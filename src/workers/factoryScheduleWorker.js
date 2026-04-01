@@ -235,8 +235,8 @@ Make real improvements — this is not a report, it's an action session. Impleme
 
 // ─── Self-Improvement (Factory improves its own code) ───────────────
 
-// Monthly on the 1st at 2 AM AEST = 4 PM UTC
-cron.schedule('0 16 1 * *', async () => {
+// Weekly Wednesday 2 AM AEST = 4 PM UTC
+cron.schedule('0 16 * * 3', async () => {
   if (metabolismBridge.isUnderPressure()) return
 
   try {
@@ -267,7 +267,7 @@ cron.schedule('0 16 1 * *', async () => {
 
     await triggers.dispatchFromSchedule({
       codebaseId: factoryCb.id,
-      prompt: `FACTORY SELF-IMPROVEMENT: Monthly review of the Factory system itself.
+      prompt: `FACTORY SELF-IMPROVEMENT: Weekly review of the Factory system itself.
 
 You are reviewing the Ecodia Factory — the autonomous code execution engine. This IS the codebase you're running in. Improve it.
 
@@ -286,12 +286,12 @@ Focus on:
 This is a real self-improvement session — make the Factory better at being the Factory.`,
     })
 
-    logger.info('Factory self-improvement session dispatched')
+    logger.info('Factory weekly self-improvement session dispatched')
   } catch (err) {
     logger.error('Factory self-improvement dispatch failed', { error: err.message })
   }
 })
 
-logger.info('Factory schedule worker started (daily audit + proactive scan + weekly sweep + monthly self-improvement)')
+logger.info('Factory schedule worker started (daily audit + daily proactive scan + weekly quality sweep + weekly self-improvement)')
 
 module.exports = { runDependencyAudit, runProactiveScan, runQualitySweep }
