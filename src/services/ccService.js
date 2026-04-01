@@ -253,13 +253,18 @@ async function startSession(session) {
 
     broadcastToSession(session.id, 'cc:status', { status, code })
 
-    // Detect changed files via git
+    // Detect changed files via git (modified + staged + untracked)
     if (success && cwd) {
       try {
         const { execFileSync } = require('child_process')
         const diff = execFileSync('git', ['diff', '--name-only'], { cwd, encoding: 'utf-8' }).trim()
         const staged = execFileSync('git', ['diff', '--name-only', '--cached'], { cwd, encoding: 'utf-8' }).trim()
-        const allChanged = [...new Set([...diff.split('\n'), ...staged.split('\n')].filter(Boolean))]
+        const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd, encoding: 'utf-8' }).trim()
+        const allChanged = [...new Set([
+          ...diff.split('\n'),
+          ...staged.split('\n'),
+          ...untracked.split('\n'),
+        ].filter(Boolean))]
 
         if (allChanged.length > 0) {
           await db`UPDATE cc_sessions SET files_changed = ${allChanged} WHERE id = ${session.id}`

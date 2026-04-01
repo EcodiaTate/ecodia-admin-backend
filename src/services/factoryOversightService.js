@@ -152,16 +152,30 @@ async function reviewChanges(session, filesChanged) {
     const { execFileSync } = require('child_process')
     const cwd = session.repo_path || session.working_dir
 
-    // Get the actual diff
+    // Get the actual diff (tracked changes + new file contents)
     let diff = ''
     try {
       diff = execFileSync('git', ['diff'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
     } catch {}
 
-    if (!diff && filesChanged.length > 0) {
+    if (!diff) {
       try {
         diff = execFileSync('git', ['diff', '--cached'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
       } catch {}
+    }
+
+    // For new untracked files, read their content directly
+    if (!diff && filesChanged.length > 0) {
+      const fs = require('fs')
+      const path = require('path')
+      const newFileContents = []
+      for (const f of filesChanged.slice(0, 5)) {
+        try {
+          const content = fs.readFileSync(path.join(cwd, f), 'utf-8')
+          newFileContents.push(`--- /dev/null\n+++ ${f}\n${content.slice(0, 2000)}`)
+        } catch {}
+      }
+      diff = newFileContents.join('\n\n')
     }
 
     if (!diff) return { approved: true, notes: 'No diff available for review' }
