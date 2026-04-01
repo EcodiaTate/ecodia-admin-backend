@@ -9,13 +9,14 @@ const IMPERSONATE_EMAIL = 'code@ecodia.au'
 
 async function getGmailClient() {
   const credentials = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON)
-  const auth = new google.auth.JWT(
-    credentials.client_email,
-    null,
-    credentials.private_key,
-    ['https://www.googleapis.com/auth/gmail.modify'],
-    IMPERSONATE_EMAIL
-  )
+  // Ensure private_key newlines are actual newlines (not literal \n from env)
+  const privateKey = credentials.private_key.replace(/\\n/g, '\n')
+  const auth = new google.auth.JWT({
+    email: credentials.client_email,
+    key: privateKey,
+    scopes: ['https://www.googleapis.com/auth/gmail.modify'],
+    subject: IMPERSONATE_EMAIL,
+  })
   await auth.authorize()
   return google.gmail({ version: 'v1', auth })
 }
