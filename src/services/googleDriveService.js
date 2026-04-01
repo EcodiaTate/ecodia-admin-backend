@@ -41,9 +41,9 @@ function getDriveClient(userEmail) {
     email: credentials.client_email,
     key: privateKey,
     scopes: [
-      'https://www.googleapis.com/auth/drive.readonly',
-      'https://www.googleapis.com/auth/documents.readonly',
-      'https://www.googleapis.com/auth/spreadsheets.readonly',
+      'https://www.googleapis.com/auth/drive',
+      'https://www.googleapis.com/auth/documents',
+      'https://www.googleapis.com/auth/spreadsheets',
     ],
     subject: userEmail,
   })
@@ -56,7 +56,7 @@ function getDocsClient(userEmail) {
   const auth = new google.auth.JWT({
     email: credentials.client_email,
     key: privateKey,
-    scopes: ['https://www.googleapis.com/auth/documents.readonly'],
+    scopes: ['https://www.googleapis.com/auth/documents'],
     subject: userEmail,
   })
   return google.docs({ version: 'v1', auth })
@@ -68,7 +68,7 @@ function getSheetsClient(userEmail) {
   const auth = new google.auth.JWT({
     email: credentials.client_email,
     key: privateKey,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     subject: userEmail,
   })
   return google.sheets({ version: 'v4', auth })
@@ -575,6 +575,202 @@ async function getFolderTree() {
   return roots
 }
 
+// ─── Write Operations ──────────────────────────────────────────────────
+
+async function createDocument(account, { title, content, folderId }) {
+  const docs = getDocsClient(account)
+  const drive = getDriveClient(account)
+
+  // Create empty doc
+  const doc = await docs.documents.create({
+    requestBody: { title },
+  })
+
+  // Move to folder if specified
+  if (folderId) {
+    await drive.files.update({
+      fileId: doc.data.documentId,
+      addParents: folderId,
+      fields: 'id, parents',
+    })
+  }
+
+  // Insert content if provided
+  if (content) {
+    await docs.documents.batchUpdate({
+      documentId: doc.data.documentId,
+      requestBody: {
+        requests: [{
+          insertText: {
+            location: { index: 1 },
+            text: content,
+          },
+        }],
+      },
+    })
+  }
+
+  logger.info(`Created Google Doc: ${title} (${doc.data.documentId})`)
+  return { documentId: doc.data.documentId, title }
+}
+
+async function appendToDocument(account, documentId, content) {
+  const docs = getDocsClient(account)
+
+  // Get current doc length to append at end
+  const doc = await docs.documents.get({ documentId })
+  const endIndex = doc.data.body.content.slice(-1)[0]?.endIndex || 1
+
+  await docs.documents.batchUpdate({
+    documentId,
+    requestBody: {
+      requests: [{
+        insertText: {
+          location: { index: Math.max(1, endIndex - 1) },
+          text: '\n' + content,
+        },
+      }],
+    },
+  })
+
+  return { documentId, appended: content.length }
+}
+
+async function createSpreadsheet(account, { title, sheets, folderId }) {
+  const sheetsClient = getSheetsClient(account)
+  const drive = getDriveClient(account)
+
+  const requestBody = {
+    properties: { title },
+    sheets: (sheets || [{ properties: { title: 'Sheet1' } }]).map(s => ({
+      properties: { title: s.title || s.properties?.title || 'Sheet1' },
+    })),
+  }
+
+  const res = await sheetsClient.spreadsheets.create({ requestBody })
+
+  if (folderId) {
+    await drive.files.update({
+      fileId: res.data.spreadsheetId,
+      addParents: folderId,
+      fields: 'id, parents',
+    })
+  }
+
+  logger.info(`Created Google Sheet: ${title} (${res.data.spreadsheetId})`)
+  return { spreadsheetId: res.data.spreadsheetId, title }
+}
+
+async function writeToSheet(account, spreadsheetId, { range, values }) {
+  const sheets = getSheetsClient(account)
+
+  const res = await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values },
+  })
+
+  return { updatedCells: res.data.updatedCells, updatedRange: res.data.updatedRange }
+}
+
+async function appendToSheet(account, spreadsheetId, { range, values }) {
+  const sheets = getSheetsClient(account)
+
+  const res = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values },
+  })
+
+  return { updatedCells: res.data.updates?.updatedCells, updatedRange: res.data.updates?.updatedRange }
+}
+
+async function uploadFile(account, { name, mimeType, content, folderId }) {
+  const drive = getDriveClient(account)
+  const { Readable } = require('stream')
+
+  const fileMetadata = { name }
+  if (folderId) fileMetadata.parents = [folderId]
+
+  const media = {
+    mimeType: mimeType || 'text/plain',
+    body: Readable.from(Buffer.from(content)),
+  }
+
+  const res = await drive.files.create({
+    requestBody: fileMetadata,
+    media,
+    fields: 'id, name, webViewLink',
+  })
+
+  logger.info(`Uploaded file to Drive: ${name} (${res.data.id})`)
+  return res.data
+}
+
+async function moveFile(account, fileId, newFolderId) {
+  const drive = getDriveClient(account)
+
+  // Get current parents
+  const file = await drive.files.get({ fileId, fields: 'parents' })
+  const previousParents = (file.data.parents || []).join(',')
+
+  const res = await drive.files.update({
+    fileId,
+    addParents: newFolderId,
+    removeParents: previousParents,
+    fields: 'id, name, parents',
+  })
+
+  return res.data
+}
+
+async function renameFile(account, fileId, newName) {
+  const drive = getDriveClient(account)
+  const res = await drive.files.update({
+    fileId,
+    requestBody: { name: newName },
+    fields: 'id, name',
+  })
+  return res.data
+}
+
+async function createFolder(account, { name, parentFolderId }) {
+  const drive = getDriveClient(account)
+
+  const fileMetadata = {
+    name,
+    mimeType: 'application/vnd.google-apps.folder',
+  }
+  if (parentFolderId) fileMetadata.parents = [parentFolderId]
+
+  const res = await drive.files.create({
+    requestBody: fileMetadata,
+    fields: 'id, name, webViewLink',
+  })
+
+  logger.info(`Created Drive folder: ${name} (${res.data.id})`)
+  return res.data
+}
+
+async function deleteFile(account, fileId) {
+  const drive = getDriveClient(account)
+  await drive.files.delete({ fileId })
+  await db`UPDATE drive_files SET trashed = true, updated_at = now() WHERE google_file_id = ${fileId}`
+}
+
+async function shareFile(account, fileId, { email, role = 'reader', type = 'user' }) {
+  const drive = getDriveClient(account)
+  const res = await drive.permissions.create({
+    fileId,
+    requestBody: { role, type, emailAddress: email },
+    sendNotificationEmail: true,
+  })
+  return res.data
+}
+
 module.exports = {
   pollDrive,
   extractContent,
@@ -585,4 +781,16 @@ module.exports = {
   getDriveClient,
   getDocsClient,
   getSheetsClient,
+  // Write operations
+  createDocument,
+  appendToDocument,
+  createSpreadsheet,
+  writeToSheet,
+  appendToSheet,
+  uploadFile,
+  moveFile,
+  renameFile,
+  createFolder,
+  deleteFile,
+  shareFile,
 }

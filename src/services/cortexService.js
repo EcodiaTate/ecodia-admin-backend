@@ -19,7 +19,12 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
 
 1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
 2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
-   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session"
+   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session", "create_doc", "create_sheet", "write_sheet", "upload_file", "search_drive"
+   - create_doc params: { title, content?, folderId? }
+   - create_sheet params: { title, sheets?: [{title}], folderId? }
+   - write_sheet params: { spreadsheetId, range, values: [[row1col1, row1col2], [row2col1, row2col2]] }
+   - upload_file params: { name, mimeType?, content, folderId? }
+   - search_drive params: { query, limit? }
    - create_calendar_event params: { summary, startTime, endTime, description?, location?, attendees?, calendar? }. IMPORTANT: startTime/endTime must BOTH be date-only ("2026-04-05") for all-day events OR BOTH be dateTime ("2026-04-05T09:00:00") — never mix them.
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
@@ -238,6 +243,52 @@ async function executeAction(action, params) {
         projectId: params.projectId,
       })
       return { success: true, message: `CC session started: ${session.id}`, sessionId: session.id }
+    }
+
+    case 'create_doc': {
+      const driveService = require('./googleDriveService')
+      const doc = await driveService.createDocument(params.account || 'tate@ecodia.au', {
+        title: params.title,
+        content: params.content,
+        folderId: params.folderId,
+      })
+      return { success: true, message: `Google Doc created: ${doc.title}`, documentId: doc.documentId }
+    }
+
+    case 'create_sheet': {
+      const driveService = require('./googleDriveService')
+      const sheet = await driveService.createSpreadsheet(params.account || 'tate@ecodia.au', {
+        title: params.title,
+        sheets: params.sheets,
+        folderId: params.folderId,
+      })
+      return { success: true, message: `Google Sheet created: ${sheet.title}`, spreadsheetId: sheet.spreadsheetId }
+    }
+
+    case 'write_sheet': {
+      const driveService = require('./googleDriveService')
+      const result = await driveService.writeToSheet(params.account || 'tate@ecodia.au', params.spreadsheetId, {
+        range: params.range,
+        values: params.values,
+      })
+      return { success: true, message: `Updated ${result.updatedCells} cells`, ...result }
+    }
+
+    case 'upload_file': {
+      const driveService = require('./googleDriveService')
+      const file = await driveService.uploadFile(params.account || 'tate@ecodia.au', {
+        name: params.name,
+        mimeType: params.mimeType,
+        content: params.content,
+        folderId: params.folderId,
+      })
+      return { success: true, message: `File uploaded: ${file.name}`, fileId: file.id }
+    }
+
+    case 'search_drive': {
+      const driveService = require('./googleDriveService')
+      const files = await driveService.searchFiles(params.query, { limit: params.limit || 10 })
+      return { success: true, files }
     }
 
     default:
