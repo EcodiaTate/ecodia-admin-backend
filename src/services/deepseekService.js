@@ -17,7 +17,6 @@ async function callDeepSeek(messages, { module = 'general', model = 'deepseek-ch
   const usage = response.data.usage
   const durationMs = Date.now() - start
 
-  // Track usage
   await db`
     INSERT INTO deepseek_usage (model, prompt_tokens, completion_tokens, cost_usd, module, duration_ms)
     VALUES (${model}, ${usage.prompt_tokens}, ${usage.completion_tokens},
@@ -26,6 +25,16 @@ async function callDeepSeek(messages, { module = 'general', model = 'deepseek-ch
   `.catch(err => logger.warn('Failed to track DeepSeek usage', { error: err.message }))
 
   return response.data.choices[0].message.content
+}
+
+function parseJSON(content) {
+  try {
+    return JSON.parse(content)
+  } catch {
+    const match = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (match) return JSON.parse(match[1].trim())
+    throw new Error(`Failed to parse DeepSeek response as JSON: ${content.slice(0, 200)}`)
+  }
 }
 
 async function categorize({ description, amount, type, date }) {
@@ -44,51 +53,54 @@ Respond with JSON only:
   "notes": "brief rationale"
 }`
 
-  const content = await callDeepSeek([{ role: 'user', content: prompt }], { module: 'finance' })
-
-  try {
-    return JSON.parse(content)
-  } catch {
-    // Try extracting JSON from markdown code block
-    const match = content.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (match) return JSON.parse(match[1].trim())
-    throw new Error(`Failed to parse DeepSeek response as JSON: ${content.slice(0, 200)}`)
-  }
+  return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], { module: 'finance' }))
 }
 
-async function triageEmail({ subject, from, body, snippet }) {
-  const prompt = `You are triaging an email for a software development business (Ecodia Pty Ltd).
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext }) {
+  const prompt = `You are Tate Donohoe's email assistant. Tate is a 21-year-old software developer running Ecodia Pty Ltd in Australia. He builds custom software for impact-focused organisations.
+
+This email arrived in the ${inbox || 'code@ecodia.au'} inbox.
 
 From: ${from}
 Subject: ${subject}
-Body: ${body || snippet}
+${clientContext ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})` : 'Unknown sender'}
+
+Body:
+${(body || snippet || '').slice(0, 3000)}
+
+Classify this email and decide what action to take. Be aggressive about filtering noise — Tate only wants to see emails that genuinely need his attention.
 
 Respond with JSON only:
 {
-  "priority": "one of: urgent, high, normal, low, spam",
-  "summary": "one-line summary",
-  "suggestedAction": "brief action recommendation"
-}`
+  "priority": "urgent|high|normal|low|spam",
+  "summary": "one concise sentence summarizing what this email is about and what it wants",
+  "suggestedAction": "reply|archive|forward|create_task|ignore",
+  "reasoning": "why this priority and action",
+  "draftReply": "if suggestedAction is reply, write a natural reply in Tate's voice (direct, friendly, no corporate fluff, signs off as just 'Tate'). null if no reply needed",
+  "shouldCreateTask": true or false,
+  "taskTitle": "task title if shouldCreateTask is true, null otherwise",
+  "taskDescription": "task detail if applicable, null otherwise",
+  "taskPriority": "low|medium|high|urgent (only if shouldCreateTask is true)"
+}
 
-  const content = await callDeepSeek([{ role: 'user', content: prompt }], { module: 'gmail' })
+Priority guide:
+- urgent: needs response within hours, money/deadline/legal on the line
+- high: needs response today, from a client or important contact
+- normal: should respond eventually, informational
+- low: newsletters, receipts, automated notifications — no action needed
+- spam: marketing, unsolicited outreach, junk`
 
-  try {
-    return JSON.parse(content)
-  } catch {
-    const match = content.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (match) return JSON.parse(match[1].trim())
-    throw new Error(`Failed to parse triage response: ${content.slice(0, 200)}`)
-  }
+  return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], { module: 'gmail' }))
 }
 
 async function draftEmailReply(thread) {
-  const prompt = `Draft a professional reply to this email for Kurt Jones, founder of Ecodia Pty Ltd (software development company).
+  const prompt = `Draft a reply to this email for Tate Donohoe, founder of Ecodia Pty Ltd (software development company based in Australia).
 
 From: ${thread.from_name || thread.from_email}
 Subject: ${thread.subject}
-Body: ${thread.full_body || thread.snippet}
+Body: ${(thread.full_body || thread.snippet || '').slice(0, 3000)}
 
-Write a clear, professional reply. Be concise. Sign off as Kurt.`
+Write a clear, natural reply. Tate's style: direct, friendly, no corporate fluff. Keep it concise. Sign off as just "Tate".`
 
   return callDeepSeek([{ role: 'user', content: prompt }], { module: 'gmail' })
 }
@@ -97,7 +109,7 @@ async function draftLinkedInReply(dm) {
   const messages = dm.messages || []
   const lastMessages = messages.slice(-5)
 
-  const prompt = `Draft a LinkedIn DM reply for Kurt Jones, founder of Ecodia (software development).
+  const prompt = `Draft a LinkedIn DM reply for Tate Donohoe, founder of Ecodia (software development).
 
 Conversation with ${dm.participant_name}:
 ${lastMessages.map(m => `${m.sender}: ${m.text}`).join('\n')}
