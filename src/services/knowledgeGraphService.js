@@ -293,23 +293,19 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
     }
 
     // Variable-length path traversal — follow chains up to maxDepth hops
+    const depthInt = parseInt(maxDepth, 10) || 3
     const paths = await runQuery(
-      `MATCH (seed) WHERE seed.name = $seedName AND $seedLabel IN labels(seed)
-       MATCH path = (seed)-[rels*1..${parseInt(maxDepth)}]-(connected)
-       WHERE ALL(r IN rels WHERE r IS NOT NULL)
-       UNWIND rels AS r
-       WITH path, connected, collect(DISTINCT {
-         type: type(r),
-         startName: startNode(r).name,
-         endName: endNode(r).name,
-         props: properties(r)
-       }) AS relDetails
-       RETURN connected.name AS name, labels(connected) AS labels,
-              properties(connected) AS props, relDetails,
-              length(path) AS depth
+      `MATCH (seed {name: $seedName})
+       MATCH (seed)-[r*1..${depthInt}]-(connected)
+       WHERE connected.name <> $seedName
+       WITH connected, r,
+            [rel IN r | {type: type(rel), startName: startNode(rel).name, endName: endNode(rel).name}] AS relChain,
+            size(r) AS depth
+       RETURN DISTINCT connected.name AS name, labels(connected) AS labels,
+              relChain AS relDetails, depth
        ORDER BY depth ASC
        LIMIT 30`,
-      { seedName: seedNode.name, seedLabel: seedLabels[0] || '' }
+      { seedName: seedNode.name }
     )
 
     for (const pathRecord of paths) {
@@ -317,12 +313,12 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
       if (visited.has(name)) continue
       visited.add(name)
 
+      const rawDepth = pathRecord.get('depth')
       trace.chains.push({
         name,
         labels: pathRecord.get('labels'),
-        properties: pathRecord.get('props'),
         via: pathRecord.get('relDetails'),
-        depth: pathRecord.get('depth')?.toInt?.() ?? pathRecord.get('depth'),
+        depth: typeof rawDepth === 'object' && rawDepth?.toInt ? rawDepth.toInt() : rawDepth,
       })
     }
 
@@ -340,22 +336,17 @@ function buildContextSummary(traces) {
 
   const lines = []
   for (const trace of traces) {
-    const seedLine = `${trace.seed.name} [${trace.seed.labels.join(', ')}] (relevance: ${(trace.seed.score * 100).toFixed(0)}%)`
+    const score = typeof trace.seed.score === 'number' ? trace.seed.score : 0.8
+    const seedLine = `${trace.seed.name} [${(trace.seed.labels || []).join(', ')}] (relevance: ${(score * 100).toFixed(0)}%)`
     lines.push(seedLine)
 
-    for (const chain of trace.chains.slice(0, 8)) {
-      const viaStr = chain.via
+    for (const chain of trace.chains.slice(0, 10)) {
+      const via = chain.via || []
+      const viaStr = via
         .map(r => `${r.startName} -[${r.type}]-> ${r.endName}`)
         .join(' → ')
-      lines.push(`  ${viaStr}`)
-
-      // Add property context if meaningful
-      const props = chain.properties || {}
-      const meaningful = Object.entries(props)
-        .filter(([k]) => !['name', 'created_at', 'updated_at', 'embedding_stale', 'embedding', 'embedding_text', 'source_module', 'source_id'].includes(k))
-        .map(([k, v]) => `${k}: ${v}`)
-        .join(', ')
-      if (meaningful) lines.push(`    (${meaningful})`)
+      if (viaStr) lines.push(`  ${viaStr}`)
+      else lines.push(`  → ${chain.name} [${(chain.labels || []).join(', ')}]`)
     }
   }
 
