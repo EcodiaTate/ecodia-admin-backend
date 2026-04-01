@@ -106,12 +106,24 @@ router.get('/consolidation/stats', async (req, res, next) => {
 })
 
 // POST /api/kg/consolidation/run — manually trigger consolidation pipeline
+// dryRun=true runs synchronously (fast, no LLM calls)
+// Real runs fire-and-forget (too many DeepSeek calls to wait for)
 router.post('/consolidation/run', async (req, res, next) => {
   try {
     const dryRun = req.query.dryRun === 'true'
     const consolidation = require('../services/kgConsolidationService')
-    const results = await consolidation.runConsolidationPipeline({ dryRun })
-    res.json(results)
+
+    if (dryRun) {
+      const results = await consolidation.runConsolidationPipeline({ dryRun: true })
+      return res.json(results)
+    }
+
+    // Fire and forget — return immediately, run in background
+    res.json({ status: 'started', message: 'Consolidation pipeline running in background. Check /consolidation/stats for results.' })
+
+    consolidation.runConsolidationPipeline({ dryRun: false }).catch(err => {
+      require('../config/logger').error('Background consolidation failed', { error: err.message })
+    })
   } catch (err) {
     next(err)
   }
