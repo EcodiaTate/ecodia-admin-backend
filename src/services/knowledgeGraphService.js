@@ -238,105 +238,63 @@ async function embedStaleNodes(batchSize = 30) {
 // ─── Trace-Based Retrieval ───────────────────────────────────────────
 
 async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0.7 } = {}) {
-  if (!env.OPENAI_API_KEY || !env.NEO4J_URI) {
-    return { traces: [], summary: '' }
-  }
+  if (!env.NEO4J_URI) return { traces: [], summary: '' }
 
-  // Step 1: Embed the query
-  const queryEmbedding = await getEmbedding(query)
-  if (!queryEmbedding) return { traces: [], summary: '' }
-
-  // Step 2: Find seed nodes via vector similarity
-  // Neo4j vector index search
   const seedLimit = parseInt(maxSeeds, 10) || 5
-  let seeds
-  try {
-    seeds = await runQuery(
-      `CALL db.index.vector.queryNodes('node_embeddings', ${seedLimit}, $embedding)
-       YIELD node, score
-       WHERE score >= $minSimilarity
-       RETURN node, score, labels(node) AS labels
-       ORDER BY score DESC`,
-      { embedding: queryEmbedding, minSimilarity: parseFloat(minSimilarity) || 0.7 }
-    )
-  } catch {
-    // Vector index might not exist yet — fall back to text search
-    // Search for each word in the query independently to be more fuzzy
-    const words = query.split(/\s+/).filter(w => w.length > 2).slice(0, 5)
-    const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
-    const params = {}
-    words.forEach((w, i) => { params[`w${i}`] = w })
+  const depthInt = parseInt(maxDepth, 10) || 3
 
-    seeds = whereClauses ? await runQuery(
-      `MATCH (n)
-       WHERE ${whereClauses}
-       RETURN n AS node, 0.8 AS score, labels(n) AS labels
-       LIMIT ${seedLimit}`,
-      params
-    ) : []
-  }
+  // Step 1: Find seed node names via text search (always works)
+  const words = query.split(/\s+/).filter(w => w.length > 2).slice(0, 5)
+  if (words.length === 0) return { traces: [], summary: '' }
 
-  if (seeds.length === 0) return { traces: [], summary: '' }
+  const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
+  const params = {}
+  words.forEach((w, i) => { params[`w${i}`] = w })
 
-  // Step 3: For each seed, follow causal/temporal chains
-  const traces = []
-  const visited = new Set()
+  const seedRecords = await runQuery(
+    `MATCH (n) WHERE ${whereClauses}
+     RETURN n.name AS name, labels(n) AS labels
+     LIMIT ${seedLimit}`,
+    params
+  )
 
-  for (const seed of seeds) {
-    const seedNode = seed.get('node').properties
-    const seedScore = seed.get('score')
-    const seedLabels = seed.get('labels')
+  if (seedRecords.length === 0) return { traces: [], summary: '' }
 
-    const trace = {
-      seed: { name: seedNode.name, labels: seedLabels, score: seedScore },
-      chains: [],
-    }
+  // Step 2: For each seed, get its neighborhood via direct Cypher
+  const lines = []
 
-    // Variable-length path traversal — follow chains up to maxDepth hops
-    const depthInt = parseInt(maxDepth, 10) || 3
-    const paths = await runQuery(
-      `MATCH (seed {name: $seedName})
-       MATCH (seed)-[r*1..${depthInt}]-(connected)
-       WHERE connected.name <> $seedName
-       WITH connected, r,
-            [rel IN r | {type: type(rel), startName: startNode(rel).name, endName: endNode(rel).name}] AS relChain,
-            size(r) AS depth
-       RETURN DISTINCT connected.name AS name, labels(connected) AS labels,
-              relChain AS relDetails, depth
-       ORDER BY depth ASC
-       LIMIT 30`,
-      { seedName: seedNode.name }
+  for (const seedRec of seedRecords) {
+    const seedName = seedRec.get('name')
+    const seedLabels = seedRec.get('labels') || []
+    lines.push(`${seedName} [${seedLabels.join(', ')}]`)
+
+    const neighbors = await runQuery(
+      `MATCH (n {name: $seedName})-[r*1..${depthInt}]-(m)
+       WHERE m.name <> $seedName
+       WITH m, [rel IN r | type(rel)] AS types, size(r) AS depth
+       RETURN DISTINCT m.name AS name, labels(m) AS labels, types, depth
+       ORDER BY depth
+       LIMIT 20`,
+      { seedName }
     )
 
-    for (const pathRecord of paths) {
-      const name = pathRecord.get('name')
-      if (visited.has(name)) continue
-      visited.add(name)
+    const seen = new Set()
+    for (const rec of neighbors) {
+      const name = rec.get('name')
+      if (seen.has(name)) continue
+      seen.add(name)
 
-      const rawDepth = pathRecord.get('depth')
-      const relDetails = pathRecord.get('relDetails')
-      // Neo4j returns relDetails as array of objects — normalize
-      const via = Array.isArray(relDetails) ? relDetails.map(r => ({
-        type: r.type || r.get?.('type') || '',
-        startName: r.startName || r.get?.('startName') || '',
-        endName: r.endName || r.get?.('endName') || '',
-      })) : []
-
-      trace.chains.push({
-        name,
-        labels: pathRecord.get('labels'),
-        via,
-        depth: typeof rawDepth === 'object' && rawDepth?.low !== undefined ? rawDepth.low : rawDepth,
-      })
+      const types = rec.get('types') || []
+      const labels = rec.get('labels') || []
+      const rawDepth = rec.get('depth')
+      const d = typeof rawDepth === 'object' && rawDepth?.low !== undefined ? rawDepth.low : rawDepth
+      const indent = '  '.repeat(d)
+      lines.push(`${indent}-[${types.join(' → ')}]-> ${name} [${labels.join(', ')}]`)
     }
-
-    traces.push(trace)
   }
 
-  // Step 4: Build narrative summary from traces
-  const summary = buildContextSummary(traces)
-
-  return { traces, summary }
+  const summary = lines.join('\n')
+  return { traces: [], summary }
 }
 
 function buildContextSummary(traces) {
