@@ -30,4 +30,8 @@ server.listen(env.PORT, async () => {
   await cleanupOrphanedSessions().catch(err =>
     logger.error('Orphan cleanup failed on startup', { error: err.message })
   )
+
+  // Start workers
+  try { require('./workers/kgEmbeddingWorker') } catch (err) { logger.debug('KG embedding worker not started', { error: err.message }) }
+  try { require('./workers/kgConsolidationWorker') } catch (err) { logger.debug('KG consolidation worker not started', { error: err.message }) }
 })

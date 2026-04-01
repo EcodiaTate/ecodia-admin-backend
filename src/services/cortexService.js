@@ -221,6 +221,7 @@ async function getSystemState() {
     pendingTasks: 0,
     recentActivity: [],
     urgentEmailDetails: [],
+    consolidation: null,
     highEmailDetails: [],
   }
 
@@ -282,6 +283,13 @@ async function getSystemState() {
     logger.debug('Cortex recent activity failed', { error: err.message })
   }
 
+  try {
+    const consolidation = require('./kgConsolidationService')
+    state.consolidation = await consolidation.getConsolidationStats()
+  } catch (err) {
+    logger.debug('Cortex consolidation stats failed', { error: err.message })
+  }
+
   return state
 }
 
@@ -310,6 +318,14 @@ function formatSystemState(state) {
     for (const a of state.recentActivity) {
       lines.push(`  - ${a.type}: ${a.detail} (${a.priority})`)
     }
+  }
+
+  if (state.consolidation) {
+    const c = state.consolidation
+    lines.push(`\nKNOWLEDGE GRAPH HEALTH:`)
+    lines.push(`  Synthesized patterns: ${c.synthesizedPatterns}, Inferred relationships: ${c.inferredRelationships}`)
+    lines.push(`  Merged duplicates: ${c.totalMerged} nodes consolidated into ${c.mergedNodes}`)
+    if (c.staleNodes > 0) lines.push(`  Stale nodes pending decay: ${c.staleNodes}`)
   }
 
   return lines.join('\n')

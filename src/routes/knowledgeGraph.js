@@ -94,6 +94,29 @@ ${context.summary}`
   }
 })
 
+// GET /api/kg/consolidation/stats — consolidation health
+router.get('/consolidation/stats', async (req, res, next) => {
+  try {
+    const consolidation = require('../services/kgConsolidationService')
+    const stats = await consolidation.getConsolidationStats()
+    res.json(stats)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/kg/consolidation/run — manually trigger consolidation pipeline
+router.post('/consolidation/run', async (req, res, next) => {
+  try {
+    const dryRun = req.query.dryRun === 'true'
+    const consolidation = require('../services/kgConsolidationService')
+    const results = await consolidation.runConsolidationPipeline({ dryRun })
+    res.json(results)
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/kg/health — check Neo4j connection
 router.get('/health', async (req, res, next) => {
   try {
