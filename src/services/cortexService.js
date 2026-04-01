@@ -20,6 +20,7 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
 1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
 2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
    - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session"
+   - create_calendar_event params: { summary, startTime, endTime, description?, location?, attendees?, calendar? }. IMPORTANT: startTime/endTime must BOTH be date-only ("2026-04-05") for all-day events OR BOTH be dateTime ("2026-04-05T09:00:00") — never mix them.
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
 5. "status_update" — something the system did. Fields: { "type": "status_update", "message": "...", "count": number|null }
@@ -216,12 +217,15 @@ async function executeAction(action, params) {
 
     case 'create_calendar_event': {
       const calendarService = require('./calendarService')
+      const start = params.startTime || params.start || params.startDate
+      const end = params.endTime || params.end || params.endDate
+      if (!start || !end) throw new Error('Calendar event requires startTime and endTime')
       const event = await calendarService.createEvent(params.calendar || 'tate@ecodia.au', {
         summary: params.summary,
         description: params.description,
         location: params.location,
-        startTime: params.startTime,
-        endTime: params.endTime,
+        startTime: start,
+        endTime: end,
         attendees: params.attendees,
       })
       return { success: true, message: `Event created: ${event.summary}`, event }

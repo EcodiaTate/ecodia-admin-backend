@@ -229,10 +229,22 @@ async function upsertEvent(event, calendarEmail) {
 async function createEvent(calendarEmail, { summary, description, location, startTime, endTime, attendees, conferenceLink }) {
   const calendar = getCalendarClient(calendarEmail)
 
-  // Detect all-day events (date-only strings like "2026-04-05")
-  const isAllDay = /^\d{4}-\d{2}-\d{2}$/.test(startTime)
-  const startField = isAllDay ? { date: startTime } : { dateTime: startTime, timeZone: 'Australia/Brisbane' }
-  const endField = isAllDay ? { date: endTime } : { dateTime: endTime, timeZone: 'Australia/Brisbane' }
+  // Detect date-only strings (e.g. "2026-04-05") vs dateTime (e.g. "2026-04-05T09:00:00")
+  const isDateOnly = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v)
+  const startIsDate = isDateOnly(startTime)
+  const endIsDate = isDateOnly(endTime)
+
+  // Both must be the same type — if mismatched, coerce both to dateTime
+  let startField, endField
+  if (startIsDate && endIsDate) {
+    startField = { date: startTime }
+    endField = { date: endTime }
+  } else {
+    // Coerce date-only to dateTime at midnight Brisbane time if needed
+    const toDateTime = (v) => isDateOnly(v) ? `${v}T00:00:00` : v
+    startField = { dateTime: toDateTime(startTime), timeZone: 'Australia/Brisbane' }
+    endField = { dateTime: toDateTime(endTime), timeZone: 'Australia/Brisbane' }
+  }
 
   const eventBody = {
     summary,
@@ -271,8 +283,16 @@ async function updateEvent(calendarEmail, googleEventId, updates) {
   if (updates.summary) patch.summary = updates.summary
   if (updates.description !== undefined) patch.description = updates.description
   if (updates.location !== undefined) patch.location = updates.location
-  if (updates.startTime) patch.start = { dateTime: updates.startTime, timeZone: 'Australia/Brisbane' }
-  if (updates.endTime) patch.end = { dateTime: updates.endTime, timeZone: 'Australia/Brisbane' }
+  if (updates.startTime) {
+    patch.start = /^\d{4}-\d{2}-\d{2}$/.test(updates.startTime)
+      ? { date: updates.startTime }
+      : { dateTime: updates.startTime, timeZone: 'Australia/Brisbane' }
+  }
+  if (updates.endTime) {
+    patch.end = /^\d{4}-\d{2}-\d{2}$/.test(updates.endTime)
+      ? { date: updates.endTime }
+      : { dateTime: updates.endTime, timeZone: 'Australia/Brisbane' }
+  }
 
   const res = await calendar.events.patch({
     calendarId: 'primary',
