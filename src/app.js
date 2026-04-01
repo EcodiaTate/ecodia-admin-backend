@@ -15,6 +15,8 @@ const settingsRoutes = require('./routes/settings')
 const kgRoutes = require('./routes/knowledgeGraph')
 const cortexRoutes = require('./routes/cortex')
 const calendarRoutes = require('./routes/calendar')
+const codebaseRoutes = require('./routes/codebase')
+const symbridgeRoutes = require('./routes/symbridge')
 
 const app = express()
 
@@ -52,6 +54,8 @@ app.use('/api/settings', settingsRoutes)
 app.use('/api/kg', kgRoutes)
 app.use('/api/cortex', cortexRoutes)
 app.use('/api/calendar', calendarRoutes)
+app.use('/api/codebase', codebaseRoutes)
+app.use('/api/symbridge', symbridgeRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)

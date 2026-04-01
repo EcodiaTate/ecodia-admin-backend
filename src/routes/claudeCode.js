@@ -41,8 +41,10 @@ router.get('/sessions', async (req, res, next) => {
 const createSessionSchema = z.object({
   projectId: z.string().uuid().optional(),
   clientId: z.string().uuid().optional(),
-  triggeredBy: z.enum(['crm_stage', 'manual', 'task']).default('manual'),
+  codebaseId: z.string().uuid().optional(),
+  triggeredBy: z.enum(['crm_stage', 'manual', 'task', 'simula', 'thymos', 'scheduled', 'cortex']).default('manual'),
   triggerRefId: z.string().optional(),
+  triggerSource: z.enum(['manual', 'crm_stage', 'kg_insight', 'simula_proposal', 'thymos_incident', 'scheduled', 'cortex']).optional(),
   initialPrompt: z.string().min(1),
   workingDir: z.string().optional(),
 })
@@ -51,9 +53,9 @@ router.post('/sessions', validate(createSessionSchema), async (req, res, next) =
   try {
     const b = req.body
     const [session] = await db`
-      INSERT INTO cc_sessions (project_id, client_id, triggered_by, trigger_ref_id, initial_prompt, working_dir)
-      VALUES (${b.projectId || null}, ${b.clientId || null}, ${b.triggeredBy},
-              ${b.triggerRefId || null}, ${b.initialPrompt}, ${b.workingDir || null})
+      INSERT INTO cc_sessions (project_id, client_id, codebase_id, triggered_by, trigger_ref_id, trigger_source, initial_prompt, working_dir)
+      VALUES (${b.projectId || null}, ${b.clientId || null}, ${b.codebaseId || null}, ${b.triggeredBy},
+              ${b.triggerRefId || null}, ${b.triggerSource || 'manual'}, ${b.initialPrompt}, ${b.workingDir || null})
       RETURNING *
     `
 
@@ -123,6 +125,22 @@ router.post('/sessions/:id/message', validate(messageSchema), async (req, res, n
   } catch (err) {
     next(err)
   }
+})
+
+// GET /api/cc/sessions/:id/pipeline
+router.get('/sessions/:id/pipeline', async (req, res, next) => {
+  try {
+    const [session] = await db`
+      SELECT pipeline_stage, confidence_score, deploy_status, files_changed, commit_sha
+      FROM cc_sessions WHERE id = ${req.params.id}
+    `
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+
+    const ccService = require('../services/ccService')
+    const active = ccService.getActiveSessionInfo(req.params.id)
+
+    res.json({ ...session, active })
+  } catch (err) { next(err) }
 })
 
 // POST /api/cc/sessions/:id/stop

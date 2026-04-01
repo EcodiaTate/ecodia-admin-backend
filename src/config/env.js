@@ -23,6 +23,10 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().default(''),
   BACKUP_DIR: z.string().optional(),
   RCLONE_BACKUP_REMOTE: z.string().optional(),
+  CLAUDE_CLI_PATH: z.string().default('claude'),
+  REDIS_URL: z.string().default(''),
+  SYMBRIDGE_SECRET: z.string().default(''),
+  ORGANISM_API_URL: z.string().default(''),
 })
 
 const parsed = envSchema.safeParse(process.env)

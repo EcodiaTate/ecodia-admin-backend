@@ -19,7 +19,7 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
 
 1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
 2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
-   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event"
+   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session"
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
 5. "status_update" — something the system did. Fields: { "type": "status_update", "message": "...", "count": number|null }
@@ -225,6 +225,15 @@ async function executeAction(action, params) {
         attendees: params.attendees,
       })
       return { success: true, message: `Event created: ${event.summary}`, event }
+    }
+
+    case 'start_cc_session': {
+      const triggers = require('./factoryTriggerService')
+      const session = await triggers.dispatchFromCortex(params.description || params.task, {
+        codebaseName: params.codebase || params.codebaseName,
+        projectId: params.projectId,
+      })
+      return { success: true, message: `CC session started: ${session.id}`, sessionId: session.id }
     }
 
     default:

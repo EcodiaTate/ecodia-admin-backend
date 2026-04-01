@@ -1,0 +1,201 @@
+const { execFileSync } = require('child_process')
+const axios = require('axios')
+const db = require('../config/db')
+const logger = require('../config/logger')
+const { broadcastToSession } = require('../websocket/wsManager')
+const kgHooks = require('./kgIngestionHooks')
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEPLOYMENT SERVICE
+//
+// Git commit → push → deploy → health check → auto-revert on failure.
+// Full audit trail in KG and notifications table.
+// ═══════════════════════════════════════════════════════════════════════
+
+const HEALTH_CHECK_TIMEOUT = 60_000 // 60s
+const HEALTH_CHECK_RETRIES = 3
+const HEALTH_CHECK_INTERVAL = 10_000 // 10s between retries
+
+function git(args, cwd) {
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }).trim()
+}
+
+async function deploySession(sessionId) {
+  const startTime = Date.now()
+
+  const [session] = await db`
+    SELECT cs.*, cb.repo_path, cb.name AS codebase_name, cb.meta
+    FROM cc_sessions cs
+    LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+    WHERE cs.id = ${sessionId}
+  `
+  if (!session) throw new Error(`Session ${sessionId} not found`)
+
+  const repoPath = session.repo_path || session.working_dir
+  if (!repoPath) throw new Error('No repo path for deployment')
+
+  await db`UPDATE cc_sessions SET pipeline_stage = 'deploying' WHERE id = ${sessionId}`
+  broadcastToSession(sessionId, 'cc:stage', { stage: 'deploying', progress: 0.8 })
+
+  // Determine deploy target from codebase metadata
+  const meta = session.meta || {}
+  const deployTarget = meta.deploy_target || 'git_push' // 'vercel', 'pm2', 'git_push'
+  const healthCheckUrl = meta.health_check_url || null
+  const pm2Name = meta.pm2_name || null
+  const branch = meta.branch || 'main'
+
+  let commitSha
+  let deploymentId
+
+  try {
+    // 1. Git commit
+    const hasChanges = git(['status', '--porcelain'], repoPath)
+    if (!hasChanges) {
+      logger.info(`No changes to deploy for session ${sessionId}`)
+      await db`UPDATE cc_sessions SET pipeline_stage = 'complete', deploy_status = 'deployed' WHERE id = ${sessionId}`
+      return { status: 'no_changes' }
+    }
+
+    git(['add', '-A'], repoPath)
+    const commitMsg = [
+      `Factory: ${session.initial_prompt.slice(0, 100)}`,
+      '',
+      `CC Session: ${sessionId}`,
+      `Confidence: ${session.confidence_score || 'N/A'}`,
+      `Trigger: ${session.trigger_source || session.triggered_by}`,
+      '',
+      'Co-Authored-By: Claude Code <noreply@anthropic.com>',
+    ].join('\n')
+
+    git(['commit', '-m', commitMsg], repoPath)
+    commitSha = git(['rev-parse', 'HEAD'], repoPath)
+
+    await db`UPDATE cc_sessions SET commit_sha = ${commitSha} WHERE id = ${sessionId}`
+
+    // Create deployment record
+    const [deployment] = await db`
+      INSERT INTO deployments (cc_session_id, codebase_id, commit_sha, branch, deploy_target, health_check_url, deploy_status)
+      VALUES (${sessionId}, ${session.codebase_id}, ${commitSha}, ${branch}, ${deployTarget}, ${healthCheckUrl}, 'deploying')
+      RETURNING *
+    `
+    deploymentId = deployment.id
+
+    // 2. Git push
+    git(['push', 'origin', branch], repoPath)
+
+    // 3. Deploy by target
+    if (deployTarget === 'pm2' && pm2Name) {
+      execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+    }
+    // Vercel deploys automatically on push — no action needed
+
+    await db`UPDATE deployments SET deploy_status = 'health_check' WHERE id = ${deploymentId}`
+
+    // 4. Health check
+    if (healthCheckUrl) {
+      const healthy = await runHealthCheck(healthCheckUrl)
+      if (healthy) {
+        await db`UPDATE deployments SET deploy_status = 'healthy', duration_ms = ${Date.now() - startTime} WHERE id = ${deploymentId}`
+        await db`UPDATE cc_sessions SET deploy_status = 'deployed', pipeline_stage = 'complete' WHERE id = ${sessionId}`
+        broadcastToSession(sessionId, 'cc:status', { status: 'deployed', commitSha })
+      } else {
+        // Auto-revert
+        await revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name)
+        return { status: 'reverted', commitSha, reason: 'Health check failed' }
+      }
+    } else {
+      // No health check URL — assume success
+      await db`UPDATE deployments SET deploy_status = 'deployed', duration_ms = ${Date.now() - startTime} WHERE id = ${deploymentId}`
+      await db`UPDATE cc_sessions SET deploy_status = 'deployed', pipeline_stage = 'complete' WHERE id = ${sessionId}`
+      broadcastToSession(sessionId, 'cc:status', { status: 'deployed', commitSha })
+    }
+
+    // KG audit trail
+    kgHooks.onDeploymentCompleted({
+      deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'deployed', deploy_target: deployTarget },
+      codebaseName: session.codebase_name,
+      sessionId,
+    }).catch(() => {})
+
+    // Notification
+    await db`
+      INSERT INTO notifications (type, message, link, metadata)
+      VALUES ('deployment', ${'Deployed: ' + (session.initial_prompt || '').slice(0, 100)},
+              ${null}, ${JSON.stringify({ sessionId, commitSha, codebaseName: session.codebase_name })})
+    `
+
+    logger.info(`Deployment successful: ${session.codebase_name} @ ${commitSha}`, { sessionId, deploymentId })
+    return { status: 'deployed', commitSha, deploymentId }
+
+  } catch (err) {
+    logger.error(`Deployment failed for session ${sessionId}`, { error: err.message })
+
+    if (deploymentId) {
+      await db`UPDATE deployments SET deploy_status = 'failed', error_message = ${err.message}, duration_ms = ${Date.now() - startTime} WHERE id = ${deploymentId}`
+    }
+    await db`UPDATE cc_sessions SET deploy_status = 'failed', pipeline_stage = 'failed' WHERE id = ${sessionId}`
+    broadcastToSession(sessionId, 'cc:status', { status: 'deploy_failed', error: err.message })
+
+    throw err
+  }
+}
+
+async function runHealthCheck(url) {
+  for (let i = 0; i < HEALTH_CHECK_RETRIES; i++) {
+    try {
+      const res = await axios.get(url, { timeout: 10_000 })
+      if (res.status >= 200 && res.status < 400) return true
+    } catch {}
+
+    if (i < HEALTH_CHECK_RETRIES - 1) {
+      await new Promise(r => setTimeout(r, HEALTH_CHECK_INTERVAL))
+    }
+  }
+  return false
+}
+
+async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name) {
+  logger.warn(`Reverting deployment ${deploymentId}`, { commitSha })
+
+  try {
+    git(['revert', '--no-edit', commitSha], repoPath)
+    const revertSha = git(['rev-parse', 'HEAD'], repoPath)
+    git(['push', 'origin', branch], repoPath)
+
+    if (pm2Name) {
+      execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+    }
+
+    await db`
+      UPDATE deployments
+      SET deploy_status = 'reverted', reverted_at = now(), revert_commit_sha = ${revertSha}
+      WHERE id = ${deploymentId}
+    `
+    await db`UPDATE cc_sessions SET deploy_status = 'reverted', pipeline_stage = 'failed' WHERE id = ${sessionId}`
+    broadcastToSession(sessionId, 'cc:status', { status: 'reverted', revertSha })
+
+    // Notify
+    await db`
+      INSERT INTO notifications (type, message, metadata)
+      VALUES ('deployment_reverted', 'Deployment auto-reverted due to health check failure',
+              ${JSON.stringify({ sessionId, commitSha, revertSha, deploymentId })})
+    `
+
+    kgHooks.onDeploymentCompleted({
+      deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'reverted', deploy_target: 'revert', reverted_at: new Date() },
+      codebaseName: 'unknown',
+      sessionId,
+    }).catch(() => {})
+
+    logger.info(`Deployment reverted: ${revertSha}`, { sessionId, deploymentId })
+  } catch (err) {
+    logger.error(`Failed to revert deployment ${deploymentId}`, { error: err.message })
+    await db`
+      INSERT INTO notifications (type, message, metadata)
+      VALUES ('deployment_revert_failed', 'CRITICAL: Auto-revert failed — manual intervention needed',
+              ${JSON.stringify({ sessionId, commitSha, deploymentId, error: err.message })})
+    `
+  }
+}
+
+module.exports = { deploySession, runHealthCheck }

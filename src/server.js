@@ -35,4 +35,7 @@ server.listen(env.PORT, async () => {
   try { require('./workers/kgEmbeddingWorker') } catch (err) { logger.debug('KG embedding worker not started', { error: err.message }) }
   try { require('./workers/kgConsolidationWorker') } catch (err) { logger.debug('KG consolidation worker not started', { error: err.message }) }
   try { require('./workers/calendarPoller') } catch (err) { logger.debug('Calendar poller not started', { error: err.message }) }
+  try { require('./workers/codebaseIndexWorker') } catch (err) { logger.debug('Codebase index worker not started', { error: err.message }) }
+  try { require('./workers/symbridgeWorker') } catch (err) { logger.debug('Symbridge worker not started', { error: err.message }) }
+  try { require('./workers/factoryScheduleWorker') } catch (err) { logger.debug('Factory schedule worker not started', { error: err.message }) }
 })

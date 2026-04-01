@@ -1,43 +1,348 @@
+const { spawn } = require('child_process')
+const { createInterface } = require('readline')
 const logger = require('../config/logger')
 const db = require('../config/db')
+const env = require('../config/env')
 const { broadcastToSession } = require('../websocket/wsManager')
 const { appendLog, updateSessionStatus } = require('../db/queries/ccSessions')
+const codebaseIntelligence = require('./codebaseIntelligenceService')
+const kg = require('./knowledgeGraphService')
+const kgHooks = require('./kgIngestionHooks')
+const secretSafety = require('./secretSafetyService')
 
-// Claude Code session management via Anthropic Agent SDK
-// TODO: Implement with @anthropic-ai/claude-agent-sdk once available on VPS
+// ═══════════════════════════════════════════════════════════════════════
+// CC SERVICE — Claude Code Execution Engine
+//
+// Spawns headless Claude Code CLI sessions as child processes.
+// Streams output in real-time via WebSocket. Builds rich context
+// bundles from codebase intelligence + KG. Manages lifecycle:
+// spawn → stream → timeout → cleanup.
+//
+// Uses `claude` CLI (Anthropic console account, NOT API).
+// ═══════════════════════════════════════════════════════════════════════
 
 const activeSessions = new Map()
 
+const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
+const MAX_TURNS = 50
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
+
+// ─── Context Bundle Builder ─────────────────────────────────────────
+
+async function buildContextBundle(session) {
+  const bundle = {
+    codebaseStructure: null,
+    relevantChunks: [],
+    kgContext: null,
+    prompt: session.initial_prompt,
+  }
+
+  // Get codebase context if linked
+  if (session.codebase_id) {
+    try {
+      const structure = await codebaseIntelligence.getCodebaseStructure(session.codebase_id)
+      bundle.codebaseStructure = structure
+
+      // Semantic search for relevant code
+      const chunks = await codebaseIntelligence.queryCodebase(
+        session.codebase_id,
+        session.initial_prompt,
+        { limit: 15 }
+      )
+      bundle.relevantChunks = chunks
+    } catch (err) {
+      logger.debug('Failed to get codebase context for CC session', { error: err.message })
+    }
+  }
+
+  // Get KG context
+  try {
+    const kgContext = await kg.getContext(session.initial_prompt)
+    bundle.kgContext = kgContext
+  } catch (err) {
+    logger.debug('Failed to get KG context for CC session', { error: err.message })
+  }
+
+  return bundle
+}
+
+function assemblePrompt(session, bundle) {
+  const parts = []
+
+  // Codebase structure
+  if (bundle.codebaseStructure) {
+    parts.push(`## Codebase Structure (${bundle.codebaseStructure.fileCount} files)`)
+    parts.push('```')
+    parts.push(formatTree(bundle.codebaseStructure.tree, '', 3))
+    parts.push('```')
+    parts.push('')
+  }
+
+  // Relevant code chunks
+  if (bundle.relevantChunks.length > 0) {
+    parts.push('## Relevant Code Context')
+    for (const chunk of bundle.relevantChunks) {
+      const sim = chunk.similarity ? ` (similarity: ${(chunk.similarity * 100).toFixed(0)}%)` : ''
+      parts.push(`### ${chunk.file_path}:${chunk.start_line}-${chunk.end_line}${sim}`)
+      parts.push('```' + (chunk.language || ''))
+      parts.push(chunk.content.slice(0, 2000))
+      parts.push('```')
+      parts.push('')
+    }
+  }
+
+  // KG context
+  if (bundle.kgContext) {
+    parts.push('## Knowledge Graph Context')
+    parts.push(bundle.kgContext)
+    parts.push('')
+  }
+
+  // Task
+  parts.push('## Task')
+  parts.push(session.initial_prompt)
+  parts.push('')
+
+  // Rules
+  parts.push('## Rules')
+  parts.push('- Do NOT modify .env files, credential files, or any files containing secrets')
+  parts.push('- Run tests after making changes if test infrastructure exists')
+  parts.push('- Write clear, descriptive commit messages')
+  parts.push('- If you encounter an error you cannot fix, explain what went wrong')
+  parts.push('- Focus on the task — do not refactor unrelated code')
+
+  return parts.join('\n')
+}
+
+function formatTree(tree, indent, maxDepth) {
+  if (maxDepth <= 0) return indent + '...'
+  const lines = []
+  const entries = Object.entries(tree)
+  for (const [name, value] of entries) {
+    if (typeof value === 'string') {
+      lines.push(`${indent}${name}`)
+    } else {
+      lines.push(`${indent}${name}/`)
+      lines.push(formatTree(value, indent + '  ', maxDepth - 1))
+    }
+  }
+  return lines.join('\n')
+}
+
+// ─── Session Lifecycle ──────────────────────────────────────────────
+
 async function startSession(session) {
   logger.info(`Starting CC session ${session.id}`, {
-    projectId: session.project_id,
-    workingDir: session.working_dir,
+    codebaseId: session.codebase_id,
+    triggerSource: session.trigger_source || 'manual',
   })
 
   await updateSessionStatus(session.id, 'running')
+  await db`UPDATE cc_sessions SET pipeline_stage = 'context' WHERE id = ${session.id}`
+  broadcastToSession(session.id, 'cc:stage', { stage: 'context', progress: 0.1 })
 
-  // TODO: Spawn CC process via child_process or Agent SDK
-  // Stream stdout to WS via broadcastToSession
-  // Store chunks via appendLog
+  // Build context bundle
+  const bundle = await buildContextBundle(session)
+  const fullPrompt = assemblePrompt(session, bundle)
 
-  logger.warn('CC session start not yet implemented — needs Agent SDK setup on VPS')
+  // Store context bundle (without full chunk content to save space)
+  const bundleSummary = {
+    chunkCount: bundle.relevantChunks.length,
+    hasKGContext: !!bundle.kgContext,
+    hasStructure: !!bundle.codebaseStructure,
+    promptLength: fullPrompt.length,
+  }
+  await db`UPDATE cc_sessions SET context_bundle = ${JSON.stringify(bundleSummary)}, pipeline_stage = 'executing' WHERE id = ${session.id}`
+  broadcastToSession(session.id, 'cc:stage', { stage: 'executing', progress: 0.2 })
+
+  // Resolve working directory
+  let cwd = session.working_dir
+  if (!cwd && session.codebase_id) {
+    const [codebase] = await db`SELECT repo_path FROM codebases WHERE id = ${session.codebase_id}`
+    cwd = codebase?.repo_path
+  }
+  if (!cwd) cwd = process.cwd()
+
+  // Spawn Claude CLI
+  const args = [
+    '--print',
+    '--output-format', 'stream-json',
+    '--max-turns', String(MAX_TURNS),
+    '--allowedTools', 'Edit,Write,Bash,Read,Grep,Glob',
+    '-p', fullPrompt,
+  ]
+
+  const proc = spawn(CC_CLI, args, {
+    cwd,
+    env: { ...process.env, LANG: 'en_US.UTF-8' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+
+  const sessionData = {
+    process: proc,
+    sessionId: session.id,
+    startedAt: Date.now(),
+    codebaseId: session.codebase_id,
+    timeout: null,
+  }
+  activeSessions.set(session.id, sessionData)
+
+  // Set timeout
+  sessionData.timeout = setTimeout(async () => {
+    logger.warn(`CC session ${session.id} timed out after ${SESSION_TIMEOUT_MS / 60000} min`)
+    try {
+      proc.kill('SIGTERM')
+      setTimeout(() => {
+        if (!proc.killed) proc.kill('SIGKILL')
+      }, 10_000)
+    } catch {}
+    await updateSessionStatus(session.id, 'error', { error_message: 'Session timed out' })
+    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+    activeSessions.delete(session.id)
+  }, SESSION_TIMEOUT_MS)
+
+  // Stream stdout line by line
+  const rl = createInterface({ input: proc.stdout })
+  rl.on('line', async (line) => {
+    try {
+      // Scrub any secrets from output
+      const safeLine = secretSafety.scrubSecrets(line)
+      await appendLog(session.id, safeLine)
+
+      // Try to parse as JSON (stream-json format)
+      let parsed
+      try {
+        parsed = JSON.parse(safeLine)
+      } catch {
+        parsed = { type: 'raw', content: safeLine }
+      }
+
+      broadcastToSession(session.id, 'cc:output', parsed)
+    } catch (err) {
+      logger.debug('Error processing CC output line', { error: err.message })
+    }
+  })
+
+  // Stderr
+  const stderrLines = []
+  const stderrRl = createInterface({ input: proc.stderr })
+  stderrRl.on('line', (line) => {
+    stderrLines.push(line)
+    logger.debug(`CC session ${session.id} stderr: ${line}`)
+  })
+
+  // Process exit
+  proc.on('close', async (code) => {
+    clearTimeout(sessionData.timeout)
+    activeSessions.delete(session.id)
+
+    const success = code === 0
+    const status = success ? 'complete' : 'error'
+    const pipelineStage = success ? 'complete' : 'failed'
+    const errorMessage = !success ? stderrLines.slice(-5).join('\n') || `Exit code ${code}` : null
+
+    await updateSessionStatus(session.id, status, {
+      error_message: errorMessage,
+    })
+    await db`UPDATE cc_sessions SET pipeline_stage = ${pipelineStage} WHERE id = ${session.id}`
+
+    broadcastToSession(session.id, 'cc:status', { status, code })
+
+    // Detect changed files via git
+    if (success && cwd) {
+      try {
+        const { execFileSync } = require('child_process')
+        const diff = execFileSync('git', ['diff', '--name-only'], { cwd, encoding: 'utf-8' }).trim()
+        const staged = execFileSync('git', ['diff', '--name-only', '--cached'], { cwd, encoding: 'utf-8' }).trim()
+        const allChanged = [...new Set([...diff.split('\n'), ...staged.split('\n')].filter(Boolean))]
+
+        if (allChanged.length > 0) {
+          await db`UPDATE cc_sessions SET files_changed = ${allChanged} WHERE id = ${session.id}`
+        }
+      } catch {}
+    }
+
+    // KG learning hook
+    kgHooks.onCCSessionCompleted({
+      session: { ...session, status },
+      projectName: session.project_name || null,
+    }).catch(() => {})
+
+    logger.info(`CC session ${session.id} completed`, { code, status })
+  })
+
+  proc.on('error', async (err) => {
+    clearTimeout(sessionData.timeout)
+    activeSessions.delete(session.id)
+
+    logger.error(`CC session ${session.id} process error`, { error: err.message })
+    await updateSessionStatus(session.id, 'error', {
+      error_message: `Process error: ${err.message}`,
+    })
+    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+    broadcastToSession(session.id, 'cc:status', { status: 'error', error: err.message })
+  })
 }
+
+// ─── Send Message to Running Session ────────────────────────────────
 
 async function sendMessage(sessionId, content) {
-  const session = activeSessions.get(sessionId)
-  if (!session) throw new Error('Session not found or not running')
-  // TODO: Write to CC process stdin
-  logger.warn('CC sendMessage not yet implemented')
+  const sessionData = activeSessions.get(sessionId)
+  if (!sessionData) throw new Error('Session not found or not running')
+
+  const proc = sessionData.process
+  if (!proc.stdin.writable) throw new Error('Session stdin is not writable')
+
+  proc.stdin.write(content + '\n')
+  await appendLog(sessionId, `[USER] ${content}`)
+  broadcastToSession(sessionId, 'cc:output', { type: 'user', content })
 }
 
+// ─── Stop Session ───────────────────────────────────────────────────
+
 async function stopSession(sessionId) {
-  const session = activeSessions.get(sessionId)
-  if (session) {
-    // TODO: Kill CC process gracefully
+  const sessionData = activeSessions.get(sessionId)
+  if (sessionData) {
+    clearTimeout(sessionData.timeout)
+
+    const proc = sessionData.process
+    proc.kill('SIGTERM')
+
+    // Force kill after 5s if still alive
+    setTimeout(() => {
+      if (!proc.killed) proc.kill('SIGKILL')
+    }, 5000)
+
     activeSessions.delete(sessionId)
   }
+
   await updateSessionStatus(sessionId, 'complete')
+  await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
   logger.info(`CC session ${sessionId} stopped`)
 }
 
-module.exports = { startSession, sendMessage, stopSession }
+// ─── Get Active Session Info ────────────────────────────────────────
+
+function getActiveSessionInfo(sessionId) {
+  const sessionData = activeSessions.get(sessionId)
+  if (!sessionData) return null
+  return {
+    sessionId: sessionData.sessionId,
+    startedAt: sessionData.startedAt,
+    runningFor: Date.now() - sessionData.startedAt,
+    codebaseId: sessionData.codebaseId,
+  }
+}
+
+function getActiveSessionCount() {
+  return activeSessions.size
+}
+
+module.exports = {
+  startSession,
+  sendMessage,
+  stopSession,
+  getActiveSessionInfo,
+  getActiveSessionCount,
+  buildContextBundle,
+}

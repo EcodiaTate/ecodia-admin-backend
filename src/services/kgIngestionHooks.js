@@ -291,6 +291,47 @@ Cost: $${session.cc_cost_usd || 0}`
   }
 }
 
+// ─── Codebase Intelligence ──────────────────────────────────────────
+
+async function onCodebaseIndexed({ codebaseId, codebaseName, language, fileCount }) {
+  if (!isEnabled()) return
+
+  try {
+    await kg.ensureNode({
+      label: 'Codebase',
+      name: codebaseName,
+      properties: { language, file_count: fileCount },
+      sourceModule: 'codebase_intelligence',
+      sourceId: codebaseId,
+    })
+  } catch (err) {
+    logger.debug('KG codebase ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Deployments ────────────────────────────────────────────────────
+
+async function onDeploymentCompleted({ deployment, codebaseName, sessionId }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Deployment to ${codebaseName}.
+Commit: ${deployment.commit_sha}
+Status: ${deployment.deploy_status}
+Target: ${deployment.deploy_target}
+${deployment.error_message ? `Error: ${deployment.error_message}` : ''}
+${deployment.reverted_at ? 'This deployment was REVERTED due to failure.' : ''}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'deployment',
+      sourceId: deployment.id,
+      context: `Deployment from CC session ${sessionId} to the ${codebaseName} codebase.`,
+    })
+  } catch (err) {
+    logger.debug('KG deployment ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 module.exports = {
   onEmailProcessed,
   onEmailTriaged,
@@ -301,4 +342,6 @@ module.exports = {
   onTransactionCategorized,
   onCalendarEventProcessed,
   onCCSessionCompleted,
+  onCodebaseIndexed,
+  onDeploymentCompleted,
 }

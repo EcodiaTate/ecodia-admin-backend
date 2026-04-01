@@ -229,12 +229,17 @@ async function upsertEvent(event, calendarEmail) {
 async function createEvent(calendarEmail, { summary, description, location, startTime, endTime, attendees, conferenceLink }) {
   const calendar = getCalendarClient(calendarEmail)
 
+  // Detect all-day events (date-only strings like "2026-04-05")
+  const isAllDay = /^\d{4}-\d{2}-\d{2}$/.test(startTime)
+  const startField = isAllDay ? { date: startTime } : { dateTime: startTime, timeZone: 'Australia/Brisbane' }
+  const endField = isAllDay ? { date: endTime } : { dateTime: endTime, timeZone: 'Australia/Brisbane' }
+
   const eventBody = {
     summary,
     description: description || undefined,
     location: location || undefined,
-    start: { dateTime: startTime, timeZone: 'Australia/Brisbane' },
-    end: { dateTime: endTime, timeZone: 'Australia/Brisbane' },
+    start: startField,
+    end: endField,
     attendees: (attendees || []).map(email => ({ email })),
   }
 
