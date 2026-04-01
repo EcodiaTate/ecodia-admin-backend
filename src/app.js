@@ -12,6 +12,7 @@ const crmRoutes = require('./routes/crm')
 const claudeCodeRoutes = require('./routes/claudeCode')
 const taskRoutes = require('./routes/tasks')
 const settingsRoutes = require('./routes/settings')
+const kgRoutes = require('./routes/knowledgeGraph')
 
 const app = express()
 
@@ -46,6 +47,7 @@ app.use('/api/crm', crmRoutes)
 app.use('/api/cc', claudeCodeRoutes)
 app.use('/api/tasks', taskRoutes)
 app.use('/api/settings', settingsRoutes)
+app.use('/api/kg', kgRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)

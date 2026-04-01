@@ -56,19 +56,25 @@ Respond with JSON only:
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], { module: 'finance' }))
 }
 
-async function triageEmail({ subject, from, body, snippet, inbox, clientContext }) {
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext }) {
+  const contextBlock = kgContext
+    ? `\n--- KNOWLEDGE GRAPH CONTEXT ---\nThe following is everything the system knows about the people, organisations, and topics related to this email:\n${kgContext}\n--- END CONTEXT ---\n`
+    : clientContext
+      ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})`
+      : 'Unknown sender'
+
   const prompt = `You are Tate Donohoe's email assistant. Tate is a 21-year-old software developer running Ecodia Pty Ltd in Australia. He builds custom software for impact-focused organisations.
 
 This email arrived in the ${inbox || 'code@ecodia.au'} inbox.
 
 From: ${from}
 Subject: ${subject}
-${clientContext ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})` : 'Unknown sender'}
+${contextBlock}
 
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 
-Classify this email and decide what action to take. Be aggressive about filtering noise — Tate only wants to see emails that genuinely need his attention.
+Classify this email and decide what action to take. Be aggressive about filtering noise — Tate only wants to see emails that genuinely need his attention. USE the knowledge graph context above to inform your decisions — if you know who this person is and what they're working on with Tate, factor that in.
 
 Respond with JSON only:
 {

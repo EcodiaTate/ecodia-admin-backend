@@ -6,6 +6,7 @@ const deepseekService = require('./deepseekService')
 const { createNotification } = require('../db/queries/transactions')
 const { findClientByEmail } = require('../db/queries/clients')
 const { createTask } = require('../db/queries/tasks')
+const kgHooks = require('./kgIngestionHooks')
 
 const INBOXES = ['code@ecodia.au', 'tate@ecodia.au']
 const MAX_TRIAGE_ATTEMPTS = 5
@@ -164,6 +165,9 @@ async function processThread(gmail, inbox, threadId) {
     )
   `
 
+  // Fire-and-forget KG ingestion
+  kgHooks.onEmailProcessed({ threadId, fromEmail, fromName, subject, body, snippet, inbox, clientId: client?.id }).catch(() => {})
+
   logger.info(`[${inbox}] Processed: ${subject} from ${fromEmail}`)
 }
 
@@ -189,6 +193,17 @@ async function triagePendingEmails() {
         ? (await db`SELECT name, stage FROM clients WHERE id = ${thread.client_id}`)[0]
         : null
 
+      // Pull knowledge graph context for richer triage
+      let kgContext = null
+      try {
+        const kgService = require('./knowledgeGraphService')
+        const ctx = await kgService.getContext(
+          `${thread.from_name || thread.from_email} ${thread.subject}`,
+          { maxSeeds: 3, maxDepth: 3, minSimilarity: 0.6 }
+        )
+        if (ctx.summary) kgContext = ctx.summary
+      } catch { /* KG not available — proceed without */ }
+
       const triage = await deepseekService.triageEmail({
         subject: thread.subject,
         from: `${thread.from_name || ''} <${thread.from_email}>`,
@@ -196,6 +211,7 @@ async function triagePendingEmails() {
         snippet: thread.snippet,
         inbox: thread.inbox,
         clientContext: client,
+        kgContext,
       })
 
       await db`
@@ -226,6 +242,12 @@ async function triagePendingEmails() {
       // ─── AUTONOMOUS ACTIONS ──────────────────────────────────────────
       // Act on the triage result automatically. Only urgent/high need human review.
       await autoAct(thread, triage)
+
+      // Fire-and-forget KG ingestion of triage results
+      kgHooks.onEmailTriaged({
+        threadId: thread.id, subject: thread.subject, fromEmail: thread.from_email,
+        triageSummary: triage.summary, triageAction: triage.suggestedAction, triagePriority: triage.priority,
+      }).catch(() => {})
 
       logger.info(`Triaged [${triage.priority}] → ${triage.suggestedAction}: ${thread.subject}`)
     } catch (err) {

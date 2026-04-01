@@ -17,6 +17,10 @@ const envSchema = z.object({
   LINKEDIN_PASSWORD: z.string().default(''),
   DEEPSEEK_API_KEY: z.string().default(''),
   ANTHROPIC_API_KEY: z.string().default(''),
+  NEO4J_URI: z.string().default(''),
+  NEO4J_USER: z.string().default('neo4j'),
+  NEO4J_PASSWORD: z.string().default(''),
+  OPENAI_API_KEY: z.string().default(''),
   BACKUP_DIR: z.string().optional(),
   RCLONE_BACKUP_REMOTE: z.string().optional(),
 })
