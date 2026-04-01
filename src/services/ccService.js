@@ -166,6 +166,7 @@ async function startSession(session) {
   // Spawn Claude CLI
   const args = [
     '--print',
+    '--verbose',
     '--output-format', 'stream-json',
     '--max-turns', String(MAX_TURNS),
     '--allowedTools', 'Edit,Write,Bash,Read,Grep,Glob',
