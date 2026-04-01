@@ -173,9 +173,13 @@ async function startSession(session) {
     '-p', fullPrompt,
   ]
 
+  // Strip ANTHROPIC_API_KEY so CC uses console auth (not API key)
+  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
+  delete ccEnv.ANTHROPIC_API_KEY
+
   const proc = spawn(CC_CLI, args, {
     cwd,
-    env: { ...process.env, LANG: 'en_US.UTF-8' },
+    env: ccEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
 
