@@ -105,7 +105,7 @@ Rules:
     const deepseekService = require('./deepseekService')
     const response = await deepseekService.callDeepSeek(
       [{ role: 'user', content: prompt }],
-      { module: 'knowledge_graph' }
+      { module: 'knowledge_graph', skipRetrieval: true, skipLogging: true }
     )
 
     const parsed = parseJSON(response)
