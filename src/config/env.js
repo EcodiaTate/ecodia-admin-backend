@@ -29,6 +29,8 @@ const envSchema = z.object({
   ORGANISM_API_URL: z.string().default(''),
   FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.7'),
   FACTORY_ESCALATE_THRESHOLD: z.string().default('0.4'),
+  CC_MAX_TURNS: z.string().default('200'),
+  CC_TIMEOUT_MINUTES: z.string().default('120'),
 })
 
 const parsed = envSchema.safeParse(process.env)
