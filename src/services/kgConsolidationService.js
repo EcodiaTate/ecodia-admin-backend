@@ -18,12 +18,6 @@ const env = require('../config/env')
 // ═══════════════════════════════════════════════════════════════════════
 
 // ─── Phase 1: Deduplication ─────────────────────────────────────────────
-//
-// Find nodes with the same label where names are identical after
-// normalization, or where embeddings are >0.95 cosine similar AND
-// share at least one neighbor. Merge properties, re-link relationships,
-// delete the duplicate.
-// ────────────────────────────────────────────────────────────────────────
 
 async function deduplicateNodes({ dryRun = false } = {}) {
   const merged = []
@@ -38,7 +32,7 @@ async function deduplicateNodes({ dryRun = false } = {}) {
            elementId(b) AS dupeId, b.name AS dupeName,
            labels(a) AS labels
     LIMIT 50
-  `)
+  `).catch(() => [])
 
   // Fallback if APOC isn't available — use toLower + trim
   let dupes = exactDupes
@@ -57,7 +51,6 @@ async function deduplicateNodes({ dryRun = false } = {}) {
   }
 
   // Strategy 2: Embedding similarity for nodes with the same label
-  // Only if both have embeddings — find pairs >0.95 similarity that share a neighbor
   const embeddingDupes = await runQuery(`
     MATCH (a), (b)
     WHERE elementId(a) < elementId(b)
@@ -90,38 +83,9 @@ async function deduplicateNodes({ dryRun = false } = {}) {
     }
 
     try {
-      // Transfer all relationships from dupe to keep
-      await runWrite(`
-        MATCH (dupe) WHERE elementId(dupe) = $dupeId
-        MATCH (keep) WHERE elementId(keep) = $keepId
-        MATCH (dupe)-[r]->(target)
-        WHERE target <> keep
-        WITH keep, target, type(r) AS relType, properties(r) AS props
-        CALL {
-          WITH keep, target, relType, props
-          MERGE (keep)-[nr:\`${relType}\`]->(target)
-          ON CREATE SET nr += props
-        }
-      `, { dupeId, keepId }).catch(() => {
-        // Fallback without parameterized rel type — do it manually
-        transferRelationships(keepId, dupeId)
-      })
-
-      // Transfer incoming relationships
-      await runWrite(`
-        MATCH (dupe) WHERE elementId(dupe) = $dupeId
-        MATCH (keep) WHERE elementId(keep) = $keepId
-        MATCH (source)-[r]->(dupe)
-        WHERE source <> keep
-        WITH keep, source, type(r) AS relType, properties(r) AS props
-        CALL {
-          WITH keep, source, relType, props
-          MERGE (source)-[nr:\`${relType}\`]->(keep)
-          ON CREATE SET nr += props
-        }
-      `, { dupeId, keepId }).catch(() => {
-        transferRelationships(keepId, dupeId)
-      })
+      // Transfer all relationships one-by-one
+      // (Aura free tier doesn't support CALL subqueries with dynamic rel types)
+      await transferRelationships(keepId, dupeId)
 
       // Merge properties (keep wins for conflicts, but preserve any unique dupe props)
       await runWrite(`
@@ -139,16 +103,15 @@ async function deduplicateNodes({ dryRun = false } = {}) {
       merged.push({ action: 'merged', keep: keepName, dupe: dupeName })
       logger.info(`KG consolidation: merged "${dupeName}" into "${keepName}"`)
     } catch (err) {
-      logger.warn(`KG dedup failed for "${dupeName}" → "${keepName}"`, { error: err.message })
+      logger.warn(`KG dedup failed for "${dupeName}" -> "${keepName}"`, { error: err.message })
     }
   }
 
   return merged
 }
 
-// Fallback relationship transfer without CALL subqueries (Aura free tier compat)
+// Transfer relationships from dupe node to keep node, one at a time
 async function transferRelationships(keepId, dupeId) {
-  // Get all relationships from the dupe
   const outRels = await runQuery(`
     MATCH (dupe)-[r]->(target)
     WHERE elementId(dupe) = $dupeId AND elementId(target) <> $keepId
@@ -156,15 +119,16 @@ async function transferRelationships(keepId, dupeId) {
   `, { dupeId, keepId })
 
   for (const rel of outRels) {
-    const relType = rel.get('relType')
+    const relType = sanitizeLabel(rel.get('relType'))
     const targetId = rel.get('targetId')
     const props = rel.get('props') || {}
-    await runWrite(`
-      MATCH (keep) WHERE elementId(keep) = $keepId
-      MATCH (target) WHERE elementId(target) = $targetId
-      MERGE (keep)-[r:\`${sanitizeLabel(relType)}\`]->(target)
-      ON CREATE SET r += $props
-    `, { keepId, targetId, props }).catch(() => {})
+    await runWrite(
+      `MATCH (keep) WHERE elementId(keep) = $keepId
+       MATCH (target) WHERE elementId(target) = $targetId
+       MERGE (keep)-[r:\`${relType}\`]->(target)
+       ON CREATE SET r += $props`,
+      { keepId, targetId, props }
+    ).catch(err => logger.debug(`Transfer out-rel failed: ${relType}`, { error: err.message }))
   }
 
   const inRels = await runQuery(`
@@ -174,27 +138,20 @@ async function transferRelationships(keepId, dupeId) {
   `, { dupeId, keepId })
 
   for (const rel of inRels) {
-    const relType = rel.get('relType')
+    const relType = sanitizeLabel(rel.get('relType'))
     const sourceId = rel.get('sourceId')
     const props = rel.get('props') || {}
-    await runWrite(`
-      MATCH (keep) WHERE elementId(keep) = $keepId
-      MATCH (source) WHERE elementId(source) = $sourceId
-      MERGE (source)-[r:\`${sanitizeLabel(relType)}\`]->(keep)
-      ON CREATE SET r += $props
-    `, { keepId, sourceId, props }).catch(() => {})
+    await runWrite(
+      `MATCH (keep) WHERE elementId(keep) = $keepId
+       MATCH (source) WHERE elementId(source) = $sourceId
+       MERGE (source)-[r:\`${relType}\`]->(keep)
+       ON CREATE SET r += $props`,
+      { keepId, sourceId, props }
+    ).catch(err => logger.debug(`Transfer in-rel failed: ${relType}`, { error: err.message }))
   }
 }
 
 // ─── Phase 2: Abstraction ───────────────────────────────────────────────
-//
-// Find clusters of nodes connected by repeated patterns and synthesize
-// higher-order "theme" nodes. This is where scattered facts become
-// understanding.
-//
-// Example: 3 different emails from Tom about pivoting from SaaS → consulting
-// become a single Theme node: "Goodreach strategic pivot toward AI consulting"
-// ────────────────────────────────────────────────────────────────────────
 
 async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
   if (!env.DEEPSEEK_API_KEY) return []
@@ -202,7 +159,6 @@ async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
   const synthesized = []
 
   // Find hub nodes with many similar-typed outgoing relationships
-  // These are natural candidates for pattern abstraction
   const hubs = await runQuery(`
     MATCH (hub)-[r]->(target)
     WHERE hub.consolidated_pattern IS NULL
@@ -214,7 +170,7 @@ async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
     LIMIT ${maxClusters}
   `)
 
-  // Find nodes that share the same 2+ neighbors (implicit clustering)
+  // Find nodes that share 2+ neighbors (implicit clustering)
   const implicitClusters = await runQuery(`
     MATCH (a)--(shared)--(b)
     WHERE elementId(a) < elementId(b)
@@ -229,7 +185,6 @@ async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
     LIMIT ${maxClusters}
   `)
 
-  // For each hub pattern, ask the LLM to synthesize a theme
   for (const record of hubs) {
     const hubName = record.get('hubName')
     const relType = record.get('relType')
@@ -259,7 +214,6 @@ What higher-order pattern, theme, or strategic direction does this cluster repre
       const parsed = parseJSON(response)
       if (!parsed.theme_name || parsed.confidence < 0.6) continue
 
-      // Create the theme node
       const kg = require('./knowledgeGraphService')
       await kg.ensureNode({
         label: parsed.theme_label || 'Pattern',
@@ -276,7 +230,6 @@ What higher-order pattern, theme, or strategic direction does this cluster repre
         sourceModule: 'consolidation',
       })
 
-      // Link the hub to the theme
       await kg.ensureRelationship({
         fromLabel: 'Pattern',
         fromName: parsed.theme_name,
@@ -356,11 +309,6 @@ What is the nature of the relationship between these two entities, given their s
 }
 
 // ─── Phase 3: Causal Threading ──────────────────────────────────────────
-//
-// Find temporal sequences in the graph and make causal chains explicit.
-// Looks for nodes with date properties that share relationships and asks
-// the LLM whether A caused/preceded/enabled B.
-// ────────────────────────────────────────────────────────────────────────
 
 async function threadCausalChains({ dryRun = false, maxChains = 10 } = {}) {
   if (!env.DEEPSEEK_API_KEY) return []
@@ -368,22 +316,22 @@ async function threadCausalChains({ dryRun = false, maxChains = 10 } = {}) {
   const threaded = []
 
   // Find pairs of events/decisions/concepts that share a person/org and have temporal ordering
+  // Use DISTINCT on the (earlier, later) pair to avoid duplicate paths through different via nodes
   const temporalPairs = await runQuery(`
     MATCH (a)-[r1]-(shared)-[r2]-(b)
     WHERE a <> b
       AND (a.created_at IS NOT NULL OR a.updated_at IS NOT NULL)
       AND (b.created_at IS NOT NULL OR b.updated_at IS NOT NULL)
-      AND NOT (a)-[:CAUSED|PRECEDED|EVOLVED_INTO|LED_TO]-(b)
+      AND NOT (a)-[:CAUSED|PRECEDED|EVOLVED_INTO|LED_TO|ENABLED|BLOCKED]-(b)
       AND any(lbl IN labels(a) WHERE lbl IN ['Event', 'Decision', 'Concept', 'Problem', 'Strategic_Direction'])
       AND any(lbl IN labels(b) WHERE lbl IN ['Event', 'Decision', 'Concept', 'Problem', 'Strategic_Direction'])
-    WITH a, b, shared,
+    WITH a, b, collect(DISTINCT shared.name)[0] AS via,
          coalesce(a.created_at, a.updated_at) AS timeA,
-         coalesce(b.created_at, b.updated_at) AS timeB,
-         type(r1) AS rel1, type(r2) AS rel2
+         coalesce(b.created_at, b.updated_at) AS timeB
     WHERE timeA < timeB
-    RETURN a.name AS earlier, labels(a) AS earlierLabels,
+    RETURN DISTINCT a.name AS earlier, labels(a) AS earlierLabels,
            b.name AS later, labels(b) AS laterLabels,
-           shared.name AS via, rel1, rel2
+           via
     LIMIT ${maxChains}
   `)
 
@@ -439,7 +387,7 @@ If there's no meaningful causal link, set relationship to null.`
       threaded.push({ action: 'threaded', earlier, later, rel: parsed.relationship })
       logger.info(`KG consolidation: causal thread "${earlier}" -[${parsed.relationship}]-> "${later}"`)
     } catch (err) {
-      logger.warn(`KG causal threading failed for "${earlier}" → "${later}"`, { error: err.message })
+      logger.warn(`KG causal threading failed for "${earlier}" -> "${later}"`, { error: err.message })
     }
   }
 
@@ -447,11 +395,6 @@ If there's no meaningful causal link, set relationship to null.`
 }
 
 // ─── Phase 4: Decay ─────────────────────────────────────────────────────
-//
-// Flag disconnected, low-value nodes as stale. Prune nodes that have been
-// stale for 30+ days. This prevents graph bloat from noisy LLM extractions.
-// Never prune: synthesized nodes, nodes with 3+ relationships, or Person/Org nodes.
-// ────────────────────────────────────────────────────────────────────────
 
 async function decayStaleNodes({ dryRun = false } = {}) {
   const results = { flagged: 0, pruned: 0 }
