@@ -91,6 +91,9 @@ async function runPostSessionPipeline(sessionId) {
       // Step 4: Post-deploy monitoring
       await monitorPostDeploy(session, deployResult)
 
+      // Step 5: Outcome learning — record success pattern in KG
+      await recordOutcome(session, 'success', { confidence, filesChanged, commitSha: deployResult.commitSha })
+
       // Report success
       await reportToTriggerSource(session, {
         success: true,
@@ -107,6 +110,7 @@ async function runPostSessionPipeline(sessionId) {
         error: err.message,
         confidence,
       })
+      await recordOutcome(session, 'deploy_failed', { confidence, error: err.message })
       await generateFollowUp(session, 'deploy_failed', err.message)
     }
   } else if (confidence >= CONFIDENCE_ESCALATE_THRESHOLD) {
@@ -152,6 +156,7 @@ async function runPostSessionPipeline(sessionId) {
       },
     })
 
+    await recordOutcome(session, 'rejected', { confidence, reason: 'low_confidence' })
     await generateFollowUp(session, 'low_confidence', `Confidence ${confidence} below threshold`)
   }
 }
@@ -377,10 +382,51 @@ Respond with JSON only:
   }
 }
 
+// ─── Outcome Learning ───────────────────────────────────────────────
+
+async function recordOutcome(session, outcome, details = {}) {
+  try {
+    const kg = require('./knowledgeGraphService')
+    const content = `Factory session outcome: ${outcome}
+Codebase: ${session.codebase_name || 'unknown'}
+Task: ${(session.initial_prompt || '').slice(0, 200)}
+Trigger: ${session.trigger_source || 'manual'}
+Confidence: ${details.confidence || 'N/A'}
+Files changed: ${(session.files_changed || []).join(', ') || 'none'}
+${details.commitSha ? `Commit: ${details.commitSha}` : ''}
+${details.error ? `Error: ${details.error}` : ''}
+${details.reason ? `Reason: ${details.reason}` : ''}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'factory_outcome',
+      sourceId: session.id,
+      context: `This is a Factory session ${outcome} record. Extract patterns about what kinds of tasks succeed/fail, which codebases have issues, and any causal relationships.`,
+    })
+
+    // Also store structured outcome for analytics
+    await db`
+      INSERT INTO notifications (type, message, metadata)
+      VALUES ('factory_outcome', ${`Factory ${outcome}: ${(session.initial_prompt || '').slice(0, 80)}`},
+              ${JSON.stringify({
+                sessionId: session.id,
+                outcome,
+                codebaseName: session.codebase_name,
+                triggerSource: session.trigger_source,
+                confidence: details.confidence,
+                filesChanged: session.files_changed,
+                ...details,
+              })})
+    `
+  } catch (err) {
+    logger.debug('Failed to record outcome', { error: err.message })
+  }
+}
+
 module.exports = {
   runPostSessionPipeline,
   reviewChanges,
   monitorPostDeploy,
   reportToTriggerSource,
   generateFollowUp,
+  recordOutcome,
 }

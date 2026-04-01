@@ -63,6 +63,22 @@ async function buildContextBundle(session) {
     logger.debug('Failed to get KG context for CC session', { error: err.message })
   }
 
+  // Get recent Factory session history for this codebase
+  bundle.sessionHistory = []
+  if (session.codebase_id) {
+    try {
+      const recentSessions = await db`
+        SELECT initial_prompt, status, confidence_score, files_changed, error_message, started_at
+        FROM cc_sessions
+        WHERE codebase_id = ${session.codebase_id}
+          AND id != ${session.id}
+          AND started_at > now() - interval '14 days'
+        ORDER BY started_at DESC LIMIT 10
+      `
+      bundle.sessionHistory = recentSessions
+    } catch {}
+  }
+
   return bundle
 }
 
@@ -95,6 +111,17 @@ function assemblePrompt(session, bundle) {
   if (bundle.kgContext) {
     parts.push('## Knowledge Graph Context')
     parts.push(bundle.kgContext)
+    parts.push('')
+  }
+
+  // Recent Factory history on this codebase
+  if (bundle.sessionHistory && bundle.sessionHistory.length > 0) {
+    parts.push('## Recent Factory Activity on This Codebase')
+    parts.push('These are previous autonomous sessions — avoid duplicating work.')
+    for (const s of bundle.sessionHistory) {
+      const files = (s.files_changed || []).slice(0, 5).join(', ')
+      parts.push(`- [${s.status}${s.confidence_score ? `, confidence: ${s.confidence_score}` : ''}] ${(s.initial_prompt || '').slice(0, 120)}${files ? ` → files: ${files}` : ''}${s.error_message ? ` (error: ${s.error_message.slice(0, 80)})` : ''}`)
+    }
     parts.push('')
   }
 
