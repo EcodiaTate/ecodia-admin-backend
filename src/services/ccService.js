@@ -274,6 +274,12 @@ async function startSession(session) {
     }).catch(() => {})
 
     logger.info(`CC session ${session.id} completed`, { code, status })
+
+    // Trigger full oversight pipeline: review → validate → deploy → monitor
+    const oversight = require('./factoryOversightService')
+    oversight.runPostSessionPipeline(session.id).catch(err => {
+      logger.error(`Oversight pipeline failed for session ${session.id}`, { error: err.message })
+    })
   })
 
   proc.on('error', async (err) => {
