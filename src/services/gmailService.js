@@ -130,7 +130,9 @@ async function processThread(gmail, threadId) {
   const body = extractBody(lastMsg)
 
   const messageIds = messages.map(m => m.id)
-  const labels = firstMsg.labelIds || []
+  // Collect labels from ALL messages in thread — if any message is UNREAD, thread is unread
+  const allLabels = [...new Set(messages.flatMap(m => m.labelIds || []))]
+  const isUnread = allLabels.includes('UNREAD')
   const receivedAt = new Date(parseInt(firstMsg.internalDate))
 
   // Try to match sender to a client
@@ -139,10 +141,11 @@ async function processThread(gmail, threadId) {
   const [inserted] = await db`
     INSERT INTO email_threads (
       gmail_thread_id, gmail_message_ids, subject, from_email, from_name,
-      snippet, full_body, labels, client_id, received_at
+      snippet, full_body, labels, client_id, received_at, status
     ) VALUES (
       ${threadId}, ${messageIds}, ${subject}, ${fromEmail}, ${fromName},
-      ${snippet}, ${body}, ${labels}, ${client?.id || null}, ${receivedAt}
+      ${snippet}, ${body}, ${allLabels}, ${client?.id || null}, ${receivedAt},
+      ${isUnread ? 'unread' : 'triaged'}
     )
     RETURNING *
   `
