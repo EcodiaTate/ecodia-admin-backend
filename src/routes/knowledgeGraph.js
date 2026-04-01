@@ -64,6 +64,36 @@ router.post('/embed', async (req, res, next) => {
   }
 })
 
+// GET /api/kg/briefing?q=query — AI-narrated briefing from graph context
+router.get('/briefing', async (req, res, next) => {
+  try {
+    const { q } = req.query
+    if (!q) return res.status(400).json({ error: 'Missing query parameter q' })
+
+    const context = await kg.getContext(q, { maxSeeds: 5, maxDepth: 3 })
+    if (!context.summary) {
+      return res.json({ briefing: null, raw: context.summary })
+    }
+
+    const deepseekService = require('../services/deepseekService')
+    const briefing = await deepseekService.callDeepSeek([
+      {
+        role: 'user',
+        content: `You are the intelligence layer of Ecodia OS — Tate Donohoe's personal operating system. Based on the following knowledge graph context, write a concise briefing about "${q}".
+
+Write in present tense, direct prose. No bullet points, no headers. Just a fluid paragraph or two that tells Tate everything he needs to know, like a trusted advisor whispering context before a meeting. Include specific details — names, dates, decisions, status. Skip anything irrelevant.
+
+Knowledge graph context:
+${context.summary}`
+      }
+    ], { module: 'cortex', skipRetrieval: true, skipLogging: true })
+
+    res.json({ briefing, raw: context.summary })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/kg/health — check Neo4j connection
 router.get('/health', async (req, res, next) => {
   try {
