@@ -3,6 +3,7 @@ const cron = require('node-cron')
 const logger = require('../config/logger')
 const gmailService = require('../services/gmailService')
 const { createNotification } = require('../db/queries/transactions')
+const { recordHeartbeat } = require('./heartbeat')
 
 logger.info('Gmail poller worker started')
 
@@ -10,8 +11,10 @@ logger.info('Gmail poller worker started')
 cron.schedule('*/3 * * * *', async () => {
   try {
     await gmailService.pollInbox()
+    await recordHeartbeat('gmail', 'active')
   } catch (e) {
     logger.error('Gmail poller failed', { error: e.message, stack: e.stack })
+    await recordHeartbeat('gmail', 'error', e.message)
     await createNotification({
       type: 'system',
       message: `Gmail poller failed: ${e.message}`,

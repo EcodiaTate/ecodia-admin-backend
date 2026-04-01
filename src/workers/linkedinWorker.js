@@ -3,6 +3,7 @@ const cron = require('node-cron')
 const logger = require('../config/logger')
 const linkedinService = require('../services/linkedinService')
 const db = require('../config/db')
+const { recordHeartbeat } = require('./heartbeat')
 
 // ═══════════════════════════════════════════════════════════════════════
 // Multi-Job LinkedIn Worker
@@ -40,9 +41,11 @@ async function runJob(jobName, fn) {
   try {
     const result = await fn()
     logger.info(`LinkedIn worker completed: ${jobName}`, result)
+    await recordHeartbeat('linkedin', 'active')
   } catch (err) {
     logger.error(`LinkedIn worker failed: ${jobName}`, { error: err.message, stack: err.stack })
 
+    await recordHeartbeat('linkedin', 'error', err.message)
     await db`
       INSERT INTO notifications (type, message, link, metadata)
       VALUES ('system', ${'LinkedIn ' + jobName + ' failed: ' + err.message.slice(0, 100)}, '/linkedin',

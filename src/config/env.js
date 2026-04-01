@@ -31,6 +31,11 @@ const envSchema = z.object({
   FACTORY_ESCALATE_THRESHOLD: z.string().default('0.4'),
   CC_MAX_TURNS: z.string().default('200'),
   CC_TIMEOUT_MINUTES: z.string().default('120'),
+  VERCEL_API_TOKEN: z.string().default(''),
+  VERCEL_TEAM_ID: z.string().default(''),
+  META_APP_ID: z.string().default(''),
+  META_APP_SECRET: z.string().default(''),
+  META_USER_ACCESS_TOKEN: z.string().default(''),
 })
 
 const parsed = envSchema.safeParse(process.env)

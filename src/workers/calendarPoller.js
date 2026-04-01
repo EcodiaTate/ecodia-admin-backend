@@ -9,6 +9,8 @@ if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || env.GOOGLE_SERVICE_ACCOUNT_JSON === '{}'
 }
 
 const calendarService = require('../services/calendarService')
+const { createNotification } = require('../db/queries/transactions')
+const { recordHeartbeat } = require('./heartbeat')
 
 logger.info('Calendar poller started')
 
@@ -16,7 +18,15 @@ logger.info('Calendar poller started')
 cron.schedule('*/5 * * * *', async () => {
   try {
     await calendarService.pollCalendars()
+    await recordHeartbeat('calendar', 'active')
   } catch (err) {
-    logger.error('Calendar poll failed', { error: err.message })
+    logger.error('Calendar poll failed', { error: err.message, stack: err.stack })
+    await recordHeartbeat('calendar', 'error', err.message)
+    await createNotification({
+      type: 'system',
+      message: `Calendar poller failed: ${err.message}`,
+      link: '/calendar',
+      metadata: { error: err.message, worker: 'calendarPoller' },
+    }).catch(notifErr => logger.error('Failed to create calendar poller notification', { error: notifErr.message }))
   }
 })

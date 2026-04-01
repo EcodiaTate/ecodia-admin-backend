@@ -332,6 +332,129 @@ ${deployment.reverted_at ? 'This deployment was REVERTED due to failure.' : ''}`
   }
 }
 
+// ─── Google Drive ────────────────────────────────────────────────────
+
+async function onDriveFileProcessed({ file }) {
+  if (!isEnabled()) return
+
+  try {
+    const contentPreview = (file.content_text || '').slice(0, 2000)
+
+    await kg.ensureNode({
+      label: 'Document',
+      name: file.name,
+      properties: {
+        source: 'google_drive',
+        mime_type: file.mime_type,
+        folder: file.parent_folder_name,
+        owner: file.owner_email,
+        web_link: file.web_view_link,
+        last_modified: file.modified_time,
+        last_modified_by: file.last_modifying_user,
+      },
+      sourceModule: 'google_drive',
+      sourceId: file.id,
+    })
+
+    if (contentPreview) {
+      await kg.ingestFromLLM(
+        `Google Drive document: ${file.name}
+Type: ${file.mime_type}
+Folder: ${file.parent_folder_name || 'root'}
+Owner: ${file.owner_email || 'unknown'}
+Last modified by: ${file.last_modifying_user || 'unknown'}
+
+Content:
+${contentPreview}`, {
+          sourceModule: 'google_drive',
+          sourceId: file.id,
+          context: 'This is a Google Drive document. Extract entities, topics, decisions, action items, and any relationships between people or projects mentioned.',
+        }
+      )
+    }
+  } catch (err) {
+    logger.debug('KG Drive ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Vercel ─────────────────────────────────────────────────────────
+
+async function onVercelDeployment({ deployment, projectName }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Vercel deployment: ${projectName || deployment.name}
+State: ${deployment.state}
+Target: ${deployment.target || 'preview'}
+Branch: ${deployment.meta?.githubCommitRef || 'unknown'}
+Commit: ${deployment.meta?.githubCommitMessage || 'no message'}
+${deployment.state === 'ERROR' ? `Error: ${deployment.errorMessage || 'unknown'}` : ''}
+URL: ${deployment.url ? `https://${deployment.url}` : 'N/A'}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'vercel',
+      sourceId: deployment.uid,
+      context: `Vercel deployment for the ${projectName || deployment.name} project. Track deployment patterns, failures, and which branches are being deployed.`,
+    })
+  } catch (err) {
+    logger.debug('KG Vercel ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Meta / Facebook ────────────────────────────────────────────────
+
+async function onMetaPostCreated({ post, pageName }) {
+  if (!isEnabled()) return
+
+  try {
+    if (!post.message && !post.story) return
+
+    const content = `Facebook/Instagram post on ${pageName || 'page'}:
+${post.message || post.story || ''}
+Type: ${post.type || 'unknown'}
+Engagement: ${post.likes?.summary?.total_count || 0} likes, ${post.comments?.summary?.total_count || 0} comments, ${post.shares?.count || 0} shares`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'meta',
+      sourceId: post.id,
+      context: 'This is a social media post. Extract topics, mentions, and any business-relevant content.',
+    })
+  } catch (err) {
+    logger.debug('KG Meta post ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+async function onMetaConversationUpdated({ conversation, participantName, platform, newMessageCount }) {
+  if (!isEnabled()) return
+
+  try {
+    await kg.ensureNode({
+      label: 'Person',
+      name: participantName || conversation.participant_id || 'Unknown',
+      properties: {
+        [`${platform}_id`]: conversation.participant_id,
+        platform,
+      },
+      sourceModule: `meta_${platform}`,
+      sourceId: conversation.id,
+    })
+
+    // We don't ingest message content to KG to avoid privacy issues with DMs
+    // Just track the relationship
+    await kg.ensureRelationship({
+      fromLabel: 'Person',
+      fromName: participantName || conversation.participant_id,
+      toLabel: 'Event',
+      toName: `${platform} conversation (${newMessageCount} new messages)`,
+      relType: 'MESSAGED_VIA',
+      properties: { platform, lastMessageAt: conversation.last_message_at },
+      sourceModule: `meta_${platform}`,
+    })
+  } catch (err) {
+    logger.debug('KG Meta conversation ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 module.exports = {
   onEmailProcessed,
   onEmailTriaged,
@@ -344,4 +467,8 @@ module.exports = {
   onCCSessionCompleted,
   onCodebaseIndexed,
   onDeploymentCompleted,
+  onDriveFileProcessed,
+  onVercelDeployment,
+  onMetaPostCreated,
+  onMetaConversationUpdated,
 }

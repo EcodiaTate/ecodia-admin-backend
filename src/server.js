@@ -38,4 +38,5 @@ server.listen(env.PORT, async () => {
   try { require('./workers/codebaseIndexWorker') } catch (err) { logger.debug('Codebase index worker not started', { error: err.message }) }
   try { require('./workers/symbridgeWorker') } catch (err) { logger.debug('Symbridge worker not started', { error: err.message }) }
   try { require('./workers/factoryScheduleWorker') } catch (err) { logger.debug('Factory schedule worker not started', { error: err.message }) }
+  try { require('./workers/workspacePoller') } catch (err) { logger.debug('Workspace poller not started', { error: err.message }) }
 })
