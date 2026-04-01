@@ -1,0 +1,3 @@
+-- migrations/002_crm.sql
+-- Reserved for future CRM schema additions
+-- Pipeline events are already in 001_initial.sql

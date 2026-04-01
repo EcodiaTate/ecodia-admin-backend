@@ -1,0 +1,3 @@
+-- migrations/003_cc_sessions.sql
+-- Reserved for future CC session schema additions
+-- Core cc_sessions + cc_session_logs tables are in 001_initial.sql
