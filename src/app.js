@@ -18,10 +18,17 @@ const app = express()
 // Middleware
 app.use(helmet())
 app.use(cors({
-  origin: [
-    'https://admin.ecodia.au',
-    'http://localhost:5173',
-  ],
+  origin: (origin, callback) => {
+    const allowed = [
+      'https://admin.ecodia.au',
+      'http://localhost:5173',
+    ]
+    if (!origin || allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true)
+    } else {
+      callback(new Error('Not allowed by CORS'))
+    }
+  },
   credentials: true,
 }))
 app.use(compression())
