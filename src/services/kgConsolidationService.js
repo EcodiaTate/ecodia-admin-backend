@@ -16,7 +16,8 @@ const env = require('../config/env')
 //   6. PREDICT           — Generate LIKELY_NEXT edges from observed patterns
 //   7. SCORE             — Compute importance scores (connectivity + recency + conversations)
 //   8. EPISODIC          — Group related ingestions into episode nodes
-//   9. DECAY             — Prune disconnected, stale, low-value noise
+//   9. FREE ASSOCIATE    — Embedding-cluster creative discovery (no hypothesis)
+//  10. DECAY             — Prune disconnected, stale, low-value noise
 //
 // Each phase is independently runnable. The full pipeline runs nightly.
 // ═══════════════════════════════════════════════════════════════════════
@@ -928,7 +929,222 @@ What event, session, or activity does this cluster represent? Respond with JSON 
   return episodes
 }
 
-// ─── Phase 9: Decay ─────────────────────────────────────────────────────
+// ─── Phase 9: Free Association ──────────────────────────────────────────
+//
+// The unstructured pass. No hypothesis, no pattern template.
+// Sample random clusters of embedding-similar nodes that have NO existing
+// relationship, hand them to the LLM and ask: "what do you see?"
+// This finds connections the structured phases never thought to look for.
+// ────────────────────────────────────────────────────────────────────────
+
+async function freeAssociate({ dryRun = false, rounds = 5, clusterSize = 6 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return []
+
+  const discoveries = []
+
+  // Strategy 1: Embedding-based — find nodes close in embedding space but not connected
+  const embeddingClusters = await runQuery(`
+    MATCH (a)
+    WHERE a.embedding IS NOT NULL
+      AND a.free_associated_at IS NULL
+    WITH a, rand() AS r
+    ORDER BY r
+    LIMIT 40
+  `).catch(() => [])
+
+  // Build clusters by checking pairwise similarity in JS
+  // (Aura free tier doesn't have GDS for kNN)
+  const nodePool = []
+  for (const rec of embeddingClusters) {
+    const props = rec.get('a')?.properties || {}
+    const labels = rec.get('a')?.labels || []
+    if (props.embedding && props.name) {
+      nodePool.push({
+        id: rec.get('a').elementId,
+        name: props.name,
+        labels,
+        embedding: props.embedding,
+        description: props.description || '',
+      })
+    }
+  }
+
+  // Cosine similarity
+  function cosineSim(a, b) {
+    let dot = 0, magA = 0, magB = 0
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i]
+      magA += a[i] * a[i]
+      magB += b[i] * b[i]
+    }
+    return dot / (Math.sqrt(magA) * Math.sqrt(magB))
+  }
+
+  // For each round, pick a random anchor and find its nearest unconnected neighbors
+  const usedAnchors = new Set()
+  for (let round = 0; round < Math.min(rounds, nodePool.length); round++) {
+    // Pick random anchor we haven't used
+    let anchor = null
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const candidate = nodePool[Math.floor(Math.random() * nodePool.length)]
+      if (!usedAnchors.has(candidate.name)) {
+        anchor = candidate
+        usedAnchors.add(candidate.name)
+        break
+      }
+    }
+    if (!anchor) continue
+
+    // Find most similar nodes to anchor
+    const similarities = nodePool
+      .filter(n => n.name !== anchor.name)
+      .map(n => ({ ...n, sim: cosineSim(anchor.embedding, n.embedding) }))
+      .filter(n => n.sim > 0.5 && n.sim < 0.95) // Similar but not duplicates
+      .sort((a, b) => b.sim - a.sim)
+      .slice(0, clusterSize - 1)
+
+    if (similarities.length < 2) continue
+
+    const cluster = [anchor, ...similarities]
+    const clusterNames = cluster.map(n => `${n.name} [${n.labels.join(', ')}]${n.description ? ` — ${n.description}` : ''}`)
+
+    // Check which pairs are already connected
+    const anchorName = anchor.name
+    const connected = await runQuery(`
+      MATCH (a {name: $name})-[r]-(b)
+      WHERE b.name IN $others
+      RETURN b.name AS connected
+    `, { name: anchorName, others: similarities.map(s => s.name) }).catch(() => [])
+    const connectedNames = new Set(connected.map(r => r.get('connected')))
+
+    const unconnected = similarities.filter(s => !connectedNames.has(s.name))
+    if (unconnected.length < 1) continue
+
+    if (dryRun) {
+      discoveries.push({
+        action: 'would_associate',
+        anchor: anchor.name,
+        cluster: unconnected.map(n => n.name),
+        avgSimilarity: (unconnected.reduce((s, n) => s + n.sim, 0) / unconnected.length).toFixed(3),
+      })
+      continue
+    }
+
+    try {
+      const deepseekService = require('./deepseekService')
+      const response = await deepseekService.callDeepSeek([{
+        role: 'user',
+        content: `You are analyzing a knowledge graph. These nodes are semantically similar (close in embedding space) but have NO existing relationship between them:
+
+${clusterNames.join('\n')}
+
+Look at these entities freely. Is there a meaningful connection, pattern, or insight that explains why they cluster together? Think creatively:
+- Hidden thematic connections
+- Shared underlying cause or motivation
+- Part of the same larger trend
+- One could inform or impact the other
+- Surprising juxtaposition that reveals something
+
+Respond with JSON only:
+{
+  "discoveries": [
+    {
+      "type": "relationship|insight|pattern",
+      "description": "one sentence describing what you found",
+      "confidence": 0.0-1.0,
+      "nodes_involved": ["node1", "node2"],
+      "relationship_type": "SCREAMING_SNAKE_CASE (only if type is relationship, null otherwise)",
+      "insight_text": "the insight in plain language (only if type is insight/pattern, null otherwise)"
+    }
+  ]
+}
+
+Return 0-3 discoveries. Only include genuinely meaningful connections (confidence >= 0.6). Return empty array if nothing interesting. Do NOT force connections that don't exist.`
+      }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
+
+      const parsed = parseJSON(response)
+      if (!parsed.discoveries || !Array.isArray(parsed.discoveries)) continue
+
+      const kg = require('./knowledgeGraphService')
+
+      for (const disc of parsed.discoveries) {
+        if (disc.confidence < 0.6) continue
+
+        if (disc.type === 'relationship' && disc.relationship_type && disc.nodes_involved?.length === 2) {
+          // Create the discovered relationship
+          const nodeA = cluster.find(n => n.name === disc.nodes_involved[0])
+          const nodeB = cluster.find(n => n.name === disc.nodes_involved[1])
+          if (!nodeA || !nodeB) continue
+
+          await kg.ensureRelationship({
+            fromLabel: nodeA.labels[0] || 'Entity',
+            fromName: nodeA.name,
+            toLabel: nodeB.labels[0] || 'Entity',
+            toName: nodeB.name,
+            relType: disc.relationship_type,
+            properties: {
+              description: disc.description,
+              confidence: disc.confidence,
+              inferred: true,
+              discovered_by: 'free_association',
+              synthesized_at: new Date().toISOString(),
+            },
+            sourceModule: 'consolidation',
+          })
+
+          discoveries.push({ action: 'relationship', from: nodeA.name, to: nodeB.name, rel: disc.relationship_type })
+          logger.info(`KG free association: "${nodeA.name}" -[${disc.relationship_type}]-> "${nodeB.name}"`)
+        } else if (disc.type === 'insight' || disc.type === 'pattern') {
+          // Store as an Insight node
+          const insightName = `Insight: ${disc.description.slice(0, 80)}`
+          await kg.ensureNode({
+            label: 'Insight',
+            name: insightName,
+            properties: {
+              description: disc.description,
+              insight_text: disc.insight_text || disc.description,
+              confidence: disc.confidence,
+              nodes_involved: disc.nodes_involved,
+              is_synthesized: true,
+              discovered_by: 'free_association',
+              synthesized_at: new Date().toISOString(),
+            },
+            sourceModule: 'consolidation',
+          })
+
+          // Link to involved nodes
+          for (const nodeName of (disc.nodes_involved || [])) {
+            const node = cluster.find(n => n.name === nodeName)
+            if (node) {
+              await kg.ensureRelationship({
+                fromLabel: 'Insight',
+                fromName: insightName,
+                toLabel: node.labels[0] || 'Entity',
+                toName: node.name,
+                relType: 'RELATES_TO',
+                sourceModule: 'consolidation',
+              })
+            }
+          }
+
+          discoveries.push({ action: 'insight', description: disc.description })
+          logger.info(`KG free association: insight — ${disc.description.slice(0, 100)}`)
+        }
+      }
+
+      // Mark anchor so we don't re-process it soon
+      await runWrite(`
+        MATCH (n {name: $name}) SET n.free_associated_at = datetime()
+      `, { name: anchor.name }).catch(() => {})
+    } catch (err) {
+      logger.warn(`KG free association round ${round} failed`, { error: err.message })
+    }
+  }
+
+  return discoveries
+}
+
+// ─── Phase 10: Decay ────────────────────────────────────────────────────
 
 async function decayStaleNodes({ dryRun = false } = {}) {
   const results = { flagged: 0, pruned: 0 }
@@ -999,6 +1215,7 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     predictions: [],
     importance: { updated: 0 },
     episodes: [],
+    freeAssociation: [],
     decay: { flagged: 0, pruned: 0 },
     durationMs: 0,
   }
@@ -1059,7 +1276,14 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     logger.error('KG phase 8 (episodes) failed', { error: err.message })
   }
 
-  // Phase 9: Decay (always last — after everything else has had a chance to link)
+  // Phase 9: Free association (embedding-based creative discovery)
+  try {
+    results.freeAssociation = await freeAssociate({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 9 (free association) failed', { error: err.message })
+  }
+
+  // Phase 10: Decay (always last — after everything else has had a chance to link)
   try {
     results.decay = await decayStaleNodes({ dryRun })
   } catch (err) {
@@ -1077,6 +1301,7 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     predictions: results.predictions.length,
     importanceScored: results.importance.updated,
     episodes: results.episodes.length,
+    freeAssociation: results.freeAssociation.length,
     staleFlag: results.decay.flagged,
     pruned: results.decay.pruned,
     durationMs: results.durationMs,
@@ -1101,6 +1326,8 @@ async function getConsolidationStats() {
   const [predictionCount] = await runQuery(`MATCH (n:Prediction) RETURN count(n) AS c`)
   const [episodeCount] = await runQuery(`MATCH (n:Episode) RETURN count(n) AS c`)
   const [contradictionCount] = await runQuery(`MATCH ()-[r:CONTRADICTS|SUPERSEDES|REFINES]->() RETURN count(r) AS c`)
+  const [insightCount] = await runQuery(`MATCH (n:Insight) RETURN count(n) AS c`)
+  const [freeAssocRels] = await runQuery(`MATCH ()-[r]->() WHERE r.discovered_by = 'free_association' RETURN count(r) AS c`)
   const [avgImportance] = await runQuery(`
     MATCH (n) WHERE n.importance IS NOT NULL
     RETURN round(avg(n.importance) * 1000) / 1000.0 AS avg, max(n.importance) AS max
@@ -1116,6 +1343,8 @@ async function getConsolidationStats() {
     predictions: toInt(predictionCount?.get('c')),
     episodes: toInt(episodeCount?.get('c')),
     contradictions: toInt(contradictionCount?.get('c')),
+    insights: toInt(insightCount?.get('c')),
+    freeAssociationEdges: toInt(freeAssocRels?.get('c')),
     avgImportance: avgImportance?.get('avg') ?? 0,
     maxImportance: avgImportance?.get('max') ?? 0,
   }
@@ -1146,6 +1375,7 @@ module.exports = {
   generatePredictions,
   scoreImportance,
   buildEpisodes,
+  freeAssociate,
   decayStaleNodes,
   runConsolidationPipeline,
   getConsolidationStats,
