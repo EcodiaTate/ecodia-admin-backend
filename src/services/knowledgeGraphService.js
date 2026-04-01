@@ -314,11 +314,19 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
       visited.add(name)
 
       const rawDepth = pathRecord.get('depth')
+      const relDetails = pathRecord.get('relDetails')
+      // Neo4j returns relDetails as array of objects — normalize
+      const via = Array.isArray(relDetails) ? relDetails.map(r => ({
+        type: r.type || r.get?.('type') || '',
+        startName: r.startName || r.get?.('startName') || '',
+        endName: r.endName || r.get?.('endName') || '',
+      })) : []
+
       trace.chains.push({
         name,
         labels: pathRecord.get('labels'),
-        via: pathRecord.get('relDetails'),
-        depth: typeof rawDepth === 'object' && rawDepth?.toInt ? rawDepth.toInt() : rawDepth,
+        via,
+        depth: typeof rawDepth === 'object' && rawDepth?.low !== undefined ? rawDepth.low : rawDepth,
       })
     }
 
