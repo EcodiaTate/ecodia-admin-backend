@@ -34,4 +34,5 @@ server.listen(env.PORT, async () => {
   // Start workers
   try { require('./workers/kgEmbeddingWorker') } catch (err) { logger.debug('KG embedding worker not started', { error: err.message }) }
   try { require('./workers/kgConsolidationWorker') } catch (err) { logger.debug('KG consolidation worker not started', { error: err.message }) }
+  try { require('./workers/calendarPoller') } catch (err) { logger.debug('Calendar poller not started', { error: err.message }) }
 })

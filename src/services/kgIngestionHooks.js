@@ -227,6 +227,48 @@ async function onTransactionCategorized({ transaction, clientName }) {
   }
 }
 
+// ─── Calendar ───────────────────────────────────────────────────────
+
+async function onCalendarEventProcessed({ event, calendarEmail }) {
+  if (!isEnabled()) return
+  if (!event.summary) return // skip empty events
+
+  try {
+    // Create person nodes for attendees
+    const attendees = typeof event.attendees === 'string' ? JSON.parse(event.attendees) : (event.attendees || [])
+    for (const att of attendees) {
+      if (att.email && !att.self && att.email !== calendarEmail) {
+        await kg.ensureNode({
+          label: 'Person',
+          name: att.name || att.email,
+          properties: { email: att.email },
+          sourceModule: 'calendar',
+        })
+      }
+    }
+
+    const attendeeNames = attendees
+      .filter(a => !a.self && a.email !== calendarEmail)
+      .map(a => a.name || a.email)
+      .join(', ')
+
+    const content = `Calendar event: ${event.summary}
+When: ${event.start_time}${event.all_day ? ' (all day)' : ` to ${event.end_time}`}
+${event.location ? `Location: ${event.location}` : ''}
+${attendeeNames ? `Attendees: ${attendeeNames}` : ''}
+${event.description ? `Description: ${(event.description || '').slice(0, 1000)}` : ''}
+Calendar: ${calendarEmail}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'calendar',
+      sourceId: event.id,
+      context: 'This is a calendar event. Extract people, topics, meeting purposes, and any relationships between attendees.',
+    })
+  } catch (err) {
+    logger.debug('KG calendar ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 // ─── Claude Code Sessions ────────────────────────────────────────────
 
 async function onCCSessionCompleted({ session, projectName }) {
@@ -257,5 +299,6 @@ module.exports = {
   onClientUpdated,
   onProjectCreated,
   onTransactionCategorized,
+  onCalendarEventProcessed,
   onCCSessionCompleted,
 }

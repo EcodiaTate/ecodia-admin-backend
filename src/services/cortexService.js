@@ -19,7 +19,7 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
 
 1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
 2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
-   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply"
+   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event"
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
 5. "status_update" — something the system did. Fields: { "type": "status_update", "message": "...", "count": number|null }
@@ -214,6 +214,19 @@ async function executeAction(action, params) {
       return { success: true, message: `Client moved to ${params.stage}` }
     }
 
+    case 'create_calendar_event': {
+      const calendarService = require('./calendarService')
+      const event = await calendarService.createEvent(params.calendar || 'tate@ecodia.au', {
+        summary: params.summary,
+        description: params.description,
+        location: params.location,
+        startTime: params.startTime,
+        endTime: params.endTime,
+        attendees: params.attendees,
+      })
+      return { success: true, message: `Event created: ${event.summary}`, event }
+    }
+
     default:
       throw new Error(`Unknown action: ${action}`)
   }
@@ -232,6 +245,8 @@ async function getSystemState() {
     urgentEmailDetails: [],
     consolidation: null,
     highEmailDetails: [],
+    calendarToday: [],
+    calendarNext24h: 0,
   }
 
   try {
@@ -299,6 +314,27 @@ async function getSystemState() {
     logger.debug('Cortex consolidation stats failed', { error: err.message })
   }
 
+  try {
+    const todayEvents = await db`
+      SELECT id, summary, start_time, end_time, location, attendees, conference_link, all_day
+      FROM calendar_events
+      WHERE start_time >= date_trunc('day', now() AT TIME ZONE 'Australia/Brisbane') AT TIME ZONE 'Australia/Brisbane'
+        AND start_time < date_trunc('day', now() AT TIME ZONE 'Australia/Brisbane') AT TIME ZONE 'Australia/Brisbane' + interval '1 day'
+        AND status = 'confirmed'
+      ORDER BY start_time ASC
+    `
+    state.calendarToday = todayEvents
+
+    const [next24h] = await db`
+      SELECT count(*)::int AS cnt FROM calendar_events
+      WHERE start_time >= now() AND start_time <= now() + interval '24 hours'
+        AND status = 'confirmed'
+    `
+    state.calendarNext24h = next24h?.cnt || 0
+  } catch (err) {
+    logger.debug('Cortex calendar fetch failed', { error: err.message })
+  }
+
   return state
 }
 
@@ -307,6 +343,17 @@ function formatSystemState(state) {
 
   lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
   lines.push(`Tasks: ${state.pendingTasks} pending`)
+  lines.push(`Calendar: ${state.calendarNext24h} events in next 24 hours, ${state.calendarToday.length} today`)
+
+  if (state.calendarToday.length) {
+    lines.push('\nTODAY\'S CALENDAR:')
+    for (const e of state.calendarToday) {
+      const time = e.all_day ? 'All day' : new Date(e.start_time).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', timeZone: 'Australia/Brisbane' })
+      const attendees = typeof e.attendees === 'string' ? JSON.parse(e.attendees) : (e.attendees || [])
+      const people = attendees.filter(a => !a.self).map(a => a.name || a.email).join(', ')
+      lines.push(`  - ${time}: ${e.summary}${e.location ? ` @ ${e.location}` : ''}${people ? ` (with ${people})` : ''}${e.conference_link ? ' [video call]' : ''}`)
+    }
+  }
 
   if (state.urgentEmailDetails.length) {
     lines.push('\nURGENT EMAILS:')
