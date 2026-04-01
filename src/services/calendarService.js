@@ -145,6 +145,11 @@ async function incrementalSync(calendar, calendarEmail, syncToken) {
 // ─── Event Upsert ───────────────────────────────────────────────────────
 
 async function upsertEvent(event, calendarEmail) {
+  // Check if event already exists (to avoid duplicate KG ingestion on re-sync)
+  const [existing] = await db`
+    SELECT id, summary, start_time FROM calendar_events WHERE google_event_id = ${event.id}
+  `
+
   const start = event.start?.dateTime || event.start?.date
   const end = event.end?.dateTime || event.end?.date
   const allDay = !event.start?.dateTime
@@ -202,11 +207,19 @@ async function upsertEvent(event, calendarEmail) {
     RETURNING *
   `
 
-  // Fire KG hook for new/updated events
-  kgHooks.onCalendarEventProcessed({
-    event: upserted,
-    calendarEmail,
-  }).catch(() => {})
+  // Only fire KG hook for new events or meaningful changes (time/summary moved)
+  const isNew = !existing
+  const changed = existing && (
+    existing.summary !== upserted.summary ||
+    new Date(existing.start_time).getTime() !== new Date(upserted.start_time).getTime()
+  )
+
+  if (isNew || changed) {
+    kgHooks.onCalendarEventProcessed({
+      event: upserted,
+      calendarEmail,
+    }).catch(() => {})
+  }
 
   return upserted
 }
