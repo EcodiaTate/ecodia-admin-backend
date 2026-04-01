@@ -5,16 +5,20 @@ const env = require('../config/env')
 // ═══════════════════════════════════════════════════════════════════════
 // KNOWLEDGE GRAPH MEMORY CONSOLIDATION
 //
-// Transforms working memories into long-term knowledge through four
-// phases modeled on biological memory consolidation:
+// Nine-phase pipeline that transforms working memories into long-term
+// knowledge, modeled on biological memory consolidation:
 //
-//   1. DEDUPLICATE  — Merge near-identical nodes (same entity, different mentions)
-//   2. ABSTRACT     — Synthesize higher-order patterns from clusters
-//   3. THREAD       — Discover causal/temporal chains between events
-//   4. DECAY        — Prune disconnected, stale, low-value noise
+//   1. DEDUPLICATE       — Merge near-identical nodes
+//   2. ABSTRACT          — Synthesize higher-order patterns from clusters
+//   3. THREAD            — Discover causal/temporal chains between events
+//   4. CONTRADICT        — Detect conflicting facts, create SUPERSEDES edges
+//   5. NARRATE           — Synthesize narrative arcs for people/projects
+//   6. PREDICT           — Generate LIKELY_NEXT edges from observed patterns
+//   7. SCORE             — Compute importance scores (connectivity + recency + conversations)
+//   8. EPISODIC          — Group related ingestions into episode nodes
+//   9. DECAY             — Prune disconnected, stale, low-value noise
 //
 // Each phase is independently runnable. The full pipeline runs nightly.
-// Every consolidation action is logged so the graph's evolution is auditable.
 // ═══════════════════════════════════════════════════════════════════════
 
 // ─── Phase 1: Deduplication ─────────────────────────────────────────────
@@ -394,7 +398,537 @@ If there's no meaningful causal link, set relationship to null.`
   return threaded
 }
 
-// ─── Phase 4: Decay ─────────────────────────────────────────────────────
+// ─── Phase 4: Contradiction Detection ────────────────────────────────────
+//
+// Find nodes that represent conflicting positions on the same topic.
+// Creates CONTRADICTS edges and, when temporal ordering exists, SUPERSEDES.
+// This is how the graph updates beliefs instead of just accumulating.
+// ────────────────────────────────────────────────────────────────────────
+
+async function detectContradictions({ dryRun = false, maxPairs = 8 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return []
+
+  const detected = []
+
+  // Find concept/decision pairs connected to the same person/org that might conflict
+  // Look for nodes sharing a neighbor where both have descriptions or were ingested
+  // from the same domain (e.g., both from emails about the same topic)
+  const candidates = await runQuery(`
+    MATCH (a)--(shared)--(b)
+    WHERE elementId(a) < elementId(b)
+      AND a <> b
+      AND any(lbl IN labels(a) WHERE lbl IN ['Concept', 'Decision', 'Strategic_Direction', 'Problem', 'Event'])
+      AND any(lbl IN labels(b) WHERE lbl IN ['Concept', 'Decision', 'Strategic_Direction', 'Problem', 'Event'])
+      AND NOT (a)-[:CONTRADICTS|SUPERSEDES]-(b)
+      AND NOT (a)-[:EVOLVED_INTO|CAUSED|LED_TO]-(b)
+    WITH a, b, collect(DISTINCT shared.name) AS sharedContext
+    WHERE size(sharedContext) >= 1
+    RETURN a.name AS nameA, labels(a) AS labelsA,
+           coalesce(a.description, '') AS descA,
+           b.name AS nameB, labels(b) AS labelsB,
+           coalesce(b.description, '') AS descB,
+           sharedContext,
+           coalesce(a.created_at, a.updated_at) AS timeA,
+           coalesce(b.created_at, b.updated_at) AS timeB
+    LIMIT ${maxPairs}
+  `)
+
+  for (const record of candidates) {
+    const nameA = record.get('nameA')
+    const nameB = record.get('nameB')
+    const descA = record.get('descA')
+    const descB = record.get('descB')
+    const sharedContext = record.get('sharedContext')
+
+    if (dryRun) {
+      detected.push({ action: 'would_check', a: nameA, b: nameB, shared: sharedContext })
+      continue
+    }
+
+    try {
+      const deepseekService = require('./deepseekService')
+      const response = await deepseekService.callDeepSeek([{
+        role: 'user',
+        content: `In a knowledge graph, two nodes share context through: ${sharedContext.join(', ')}.
+
+Node A: "${nameA}" ${descA ? `— ${descA}` : ''}
+Node B: "${nameB}" ${descB ? `— ${descB}` : ''}
+
+Do these represent contradictory or conflicting positions/facts? Consider:
+- Direct contradiction (X says yes, Y says no)
+- Strategic pivot (old approach replaced by new one)
+- Evolved understanding (initial assumption corrected by later evidence)
+- Compatible but different (not actually contradicting)
+
+Respond with JSON only:
+{
+  "contradicts": true|false,
+  "relationship": "CONTRADICTS|SUPERSEDES|REFINES|null",
+  "direction": "a_supersedes_b|b_supersedes_a|mutual|null",
+  "description": "one sentence explaining the conflict or why they don't conflict",
+  "confidence": 0.0-1.0
+}
+
+If they don't contradict, set contradicts to false and relationship to null.`
+      }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
+
+      const parsed = parseJSON(response)
+      if (!parsed.contradicts || !parsed.relationship || parsed.confidence < 0.65) continue
+
+      const kg = require('./knowledgeGraphService')
+      const labelsA = record.get('labelsA') || ['Entity']
+      const labelsB = record.get('labelsB') || ['Entity']
+
+      // Determine direction
+      const fromName = parsed.direction === 'b_supersedes_a' ? nameB : nameA
+      const toName = parsed.direction === 'b_supersedes_a' ? nameA : nameB
+      const fromLabel = parsed.direction === 'b_supersedes_a' ? labelsB[0] : labelsA[0]
+      const toLabel = parsed.direction === 'b_supersedes_a' ? labelsA[0] : labelsB[0]
+
+      await kg.ensureRelationship({
+        fromLabel, fromName,
+        toLabel, toName,
+        relType: parsed.relationship,
+        properties: {
+          description: parsed.description,
+          confidence: parsed.confidence,
+          inferred: true,
+          detected_by: 'contradiction_detection',
+          synthesized_at: new Date().toISOString(),
+        },
+        sourceModule: 'consolidation',
+      })
+
+      detected.push({ action: 'contradiction', from: fromName, to: toName, rel: parsed.relationship })
+      logger.info(`KG consolidation: ${parsed.relationship} "${fromName}" -> "${toName}"`)
+    } catch (err) {
+      logger.warn(`KG contradiction check failed for "${nameA}"/"${nameB}"`, { error: err.message })
+    }
+  }
+
+  return detected
+}
+
+// ─── Phase 5: Temporal Narrative Synthesis ───────────────────────────────
+//
+// For key entities (people, projects, orgs), trace their full relationship
+// timeline and ask the LLM to synthesize a narrative arc. Stored as
+// Narrative nodes that get regenerated when source nodes change.
+// ────────────────────────────────────────────────────────────────────────
+
+async function synthesizeNarratives({ dryRun = false, maxNarratives = 5 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return []
+
+  const narratives = []
+
+  // Find people/projects/orgs with 5+ connections that don't have a recent narrative
+  const subjects = await runQuery(`
+    MATCH (subject)-[r]-(connected)
+    WHERE any(lbl IN labels(subject) WHERE lbl IN ['Person', 'Project', 'Organisation'])
+      AND (subject.narrative_at IS NULL OR subject.narrative_at < datetime() - duration('P7D'))
+    WITH subject, count(DISTINCT connected) AS connections,
+         collect(DISTINCT {name: connected.name, labels: labels(connected), rel: type(r)}) AS context
+    WHERE connections >= 4
+    RETURN subject.name AS name, labels(subject) AS labels, connections,
+           context[..20] AS context
+    ORDER BY connections DESC
+    LIMIT ${maxNarratives}
+  `)
+
+  for (const record of subjects) {
+    const name = record.get('name')
+    const labels = record.get('labels') || []
+    const context = record.get('context') || []
+    const connections = record.get('connections')
+
+    if (dryRun) {
+      narratives.push({ action: 'would_narrate', name, connections: connections?.toInt?.() ?? connections })
+      continue
+    }
+
+    try {
+      // Get the full neighborhood for rich context
+      const neighborhood = context.map(c =>
+        `${c.rel} -> ${c.name} [${(c.labels || []).join(', ')}]`
+      ).join('\n')
+
+      const deepseekService = require('./deepseekService')
+      const response = await deepseekService.callDeepSeek([{
+        role: 'user',
+        content: `You are writing the story of "${name}" (${labels.join(', ')}) based purely on knowledge graph data. Here are all known connections:
+
+${neighborhood}
+
+Synthesize a narrative arc in 3-5 sentences. Write in present tense, direct prose. Cover: who they are, what they're involved in, how their involvement has evolved, and what the current trajectory suggests. This should read like a briefing, not a biography.
+
+Respond with JSON only:
+{
+  "narrative": "the 3-5 sentence narrative arc",
+  "trajectory": "ascending|stable|pivoting|stalling|uncertain",
+  "key_themes": ["theme1", "theme2", "theme3"],
+  "open_questions": ["unanswered question the data implies but doesn't resolve"]
+}`
+      }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
+
+      const parsed = parseJSON(response)
+      if (!parsed.narrative) continue
+
+      // Store the narrative as a node linked to the subject
+      const kg = require('./knowledgeGraphService')
+      const narrativeNodeName = `Narrative: ${name}`
+
+      await kg.ensureNode({
+        label: 'Narrative',
+        name: narrativeNodeName,
+        properties: {
+          narrative: parsed.narrative,
+          trajectory: parsed.trajectory,
+          key_themes: parsed.key_themes,
+          open_questions: parsed.open_questions,
+          subject_name: name,
+          is_synthesized: true,
+          synthesized_at: new Date().toISOString(),
+        },
+        sourceModule: 'consolidation',
+      })
+
+      await kg.ensureRelationship({
+        fromLabel: 'Narrative',
+        fromName: narrativeNodeName,
+        toLabel: labels[0],
+        toName: name,
+        relType: 'NARRATES',
+        sourceModule: 'consolidation',
+      })
+
+      // Mark the subject so we don't re-narrate too soon
+      await runWrite(`
+        MATCH (n {name: $name})
+        SET n.narrative_at = datetime()
+      `, { name })
+
+      narratives.push({ action: 'narrated', name, trajectory: parsed.trajectory })
+      logger.info(`KG consolidation: narrated "${name}" (${parsed.trajectory})`)
+    } catch (err) {
+      logger.warn(`KG narrative synthesis failed for "${name}"`, { error: err.message })
+    }
+  }
+
+  return narratives
+}
+
+// ─── Phase 6: Predictive Edges ──────────────────────────────────────────
+//
+// Analyze observed patterns in the graph to generate LIKELY_NEXT predictions.
+// Looks for repeated behavioral sequences and projects forward.
+// ────────────────────────────────────────────────────────────────────────
+
+async function generatePredictions({ dryRun = false, maxPredictions = 5 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return []
+
+  const predictions = []
+
+  // Find person nodes with multiple temporally-ordered events
+  // These are candidates for "what happens next" predictions
+  const activeEntities = await runQuery(`
+    MATCH (person:Person)-[r]-(event)
+    WHERE any(lbl IN labels(event) WHERE lbl IN ['Event', 'Decision', 'Concept', 'Problem'])
+      AND (event.created_at IS NOT NULL OR event.synthesized_at IS NOT NULL)
+    WITH person, event, type(r) AS relType,
+         coalesce(event.created_at, event.synthesized_at, event.updated_at) AS eventTime
+    ORDER BY eventTime DESC
+    WITH person, collect({name: event.name, rel: relType, time: eventTime, labels: labels(event)})[..8] AS timeline
+    WHERE size(timeline) >= 3
+      AND (person.predicted_at IS NULL OR person.predicted_at < datetime() - duration('P3D'))
+    RETURN person.name AS personName, timeline
+    LIMIT ${maxPredictions}
+  `)
+
+  for (const record of activeEntities) {
+    const personName = record.get('personName')
+    const timeline = record.get('timeline') || []
+
+    if (dryRun) {
+      predictions.push({ action: 'would_predict', person: personName, events: timeline.length })
+      continue
+    }
+
+    try {
+      const timelineText = timeline.map((e, i) =>
+        `${i + 1}. ${e.rel} -> ${e.name} [${(e.labels || []).join(', ')}]`
+      ).join('\n')
+
+      const deepseekService = require('./deepseekService')
+      const response = await deepseekService.callDeepSeek([{
+        role: 'user',
+        content: `Based on this person's recent activity pattern in a knowledge graph:
+
+Person: "${personName}"
+Recent timeline (most recent first):
+${timelineText}
+
+What is likely to happen next? Look for:
+- Repeated patterns (they always follow up after meetings)
+- Unresolved threads (started something, no completion node)
+- Escalation patterns (small → medium → large commitments)
+- Stalling patterns (activity drops off after a certain stage)
+
+Respond with JSON only:
+{
+  "predictions": [
+    {
+      "prediction": "one sentence describing what's likely to happen",
+      "timeframe": "days|weeks|months",
+      "confidence": 0.0-1.0,
+      "basis": "which pattern elements support this"
+    }
+  ]
+}
+
+Include 1-3 predictions. Only include predictions with confidence >= 0.5.`
+      }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
+
+      const parsed = parseJSON(response)
+      if (!parsed.predictions || !Array.isArray(parsed.predictions)) continue
+
+      const kg = require('./knowledgeGraphService')
+
+      for (const pred of parsed.predictions) {
+        if (pred.confidence < 0.5) continue
+
+        const predName = `Prediction: ${pred.prediction.slice(0, 60)}`
+
+        await kg.ensureNode({
+          label: 'Prediction',
+          name: predName,
+          properties: {
+            prediction: pred.prediction,
+            timeframe: pred.timeframe,
+            confidence: pred.confidence,
+            basis: pred.basis,
+            is_synthesized: true,
+            synthesized_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + (pred.timeframe === 'days' ? 7 : pred.timeframe === 'weeks' ? 30 : 90) * 86400000).toISOString(),
+          },
+          sourceModule: 'consolidation',
+        })
+
+        await kg.ensureRelationship({
+          fromLabel: 'Person',
+          fromName: personName,
+          toLabel: 'Prediction',
+          toName: predName,
+          relType: 'LIKELY_NEXT',
+          properties: {
+            confidence: pred.confidence,
+            inferred: true,
+            synthesized_at: new Date().toISOString(),
+          },
+          sourceModule: 'consolidation',
+        })
+
+        predictions.push({ action: 'predicted', person: personName, prediction: pred.prediction })
+        logger.info(`KG consolidation: prediction for "${personName}" — ${pred.prediction.slice(0, 80)}`)
+      }
+
+      // Mark so we don't re-predict too soon
+      await runWrite(`MATCH (n:Person {name: $name}) SET n.predicted_at = datetime()`, { name: personName })
+    } catch (err) {
+      logger.warn(`KG prediction failed for "${personName}"`, { error: err.message })
+    }
+  }
+
+  return predictions
+}
+
+// ─── Phase 7: Importance Scoring ────────────────────────────────────────
+//
+// Compute a 0-1 importance score for every node based on:
+//   - Connectivity (degree centrality — more connections = more important)
+//   - Recency (recently updated nodes matter more)
+//   - Conversation frequency (nodes mentioned in Cortex chats)
+//   - Type bonus (Person/Project/Org inherently more important)
+//
+// This drives what the Cortex surfaces proactively and what gets decayed.
+// Pure Cypher, no LLM calls.
+// ────────────────────────────────────────────────────────────────────────
+
+async function scoreImportance({ dryRun = false } = {}) {
+  const scored = { updated: 0 }
+
+  // Get max degree for normalization
+  const [maxDegreeRec] = await runQuery(`
+    MATCH (n)
+    OPTIONAL MATCH (n)-[r]-()
+    WITH n, count(r) AS degree
+    RETURN max(degree) AS maxDegree
+  `)
+  const maxDegree = Math.max(maxDegreeRec?.get('maxDegree')?.toInt?.() ?? maxDegreeRec?.get('maxDegree') ?? 1, 1)
+
+  if (dryRun) {
+    const [count] = await runQuery(`MATCH (n) RETURN count(n) AS cnt`)
+    scored.updated = count?.get('cnt')?.toInt?.() ?? 0
+    return scored
+  }
+
+  // Score all nodes in one pass
+  const result = await runWrite(`
+    MATCH (n)
+    OPTIONAL MATCH (n)-[r]-()
+    WITH n, count(r) AS degree
+
+    // Connectivity score (0-0.4)
+    WITH n, degree, toFloat(degree) / toFloat(${maxDegree}) * 0.4 AS connectivityScore
+
+    // Recency score (0-0.25) — nodes updated in last 7 days get full score
+    WITH n, degree, connectivityScore,
+      CASE
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P1D') THEN 0.25
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P7D') THEN 0.18
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P30D') THEN 0.08
+        ELSE 0.0
+      END AS recencyScore
+
+    // Type bonus (0-0.2)
+    WITH n, degree, connectivityScore, recencyScore,
+      CASE
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation']) THEN 0.2
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Project', 'Narrative']) THEN 0.15
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Strategic_Direction', 'Prediction']) THEN 0.12
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Decision', 'Event']) THEN 0.08
+        ELSE 0.0
+      END AS typeBonus
+
+    // Synthesized bonus (0-0.15) — synthesized nodes are inherently valuable
+    WITH n, connectivityScore, recencyScore, typeBonus,
+      CASE WHEN n.is_synthesized = true THEN 0.15 ELSE 0.0 END AS synthBonus
+
+    WITH n, connectivityScore + recencyScore + typeBonus + synthBonus AS importance
+
+    SET n.importance = round(importance * 1000) / 1000.0
+
+    RETURN count(n) AS updated
+  `)
+
+  scored.updated = result[0]?.get('updated')?.toInt?.() ?? result[0]?.get('updated') ?? 0
+
+  if (scored.updated > 0) {
+    logger.info(`KG importance: scored ${scored.updated} nodes (max degree: ${maxDegree})`)
+  }
+
+  return scored
+}
+
+// ─── Phase 8: Episodic Memory ───────────────────────────────────────────
+//
+// Group nodes that were ingested within the same time window (30 min)
+// from the same source module into "Episode" nodes. This gives the graph
+// temporal chunking — "what happened in that email batch" or "what came
+// out of that meeting" becomes a single traversal.
+// ────────────────────────────────────────────────────────────────────────
+
+async function buildEpisodes({ dryRun = false, maxEpisodes = 10 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return []
+
+  const episodes = []
+
+  // Find clusters of nodes created within 30 min of each other from the same source
+  const clusters = await runQuery(`
+    MATCH (n)
+    WHERE n.source_module IS NOT NULL
+      AND n.created_at IS NOT NULL
+      AND n.episode_id IS NULL
+      AND NOT any(lbl IN labels(n) WHERE lbl IN ['Episode', 'Narrative', 'Prediction', 'Pattern'])
+    WITH n.source_module AS source,
+         date(n.created_at) AS day,
+         n.created_at.hour AS hour,
+         collect({name: n.name, labels: labels(n), id: elementId(n)}) AS nodes
+    WHERE size(nodes) >= 3
+    RETURN source, day, hour, nodes[..15] AS nodes, size(nodes) AS nodeCount
+    ORDER BY day DESC, hour DESC
+    LIMIT ${maxEpisodes}
+  `)
+
+  for (const record of clusters) {
+    const source = record.get('source')
+    const day = record.get('day')
+    const hour = record.get('hour')
+    const nodes = record.get('nodes') || []
+    const nodeCount = record.get('nodeCount')
+
+    if (dryRun) {
+      episodes.push({ action: 'would_create_episode', source, day: day?.toString(), nodes: nodeCount?.toInt?.() ?? nodeCount })
+      continue
+    }
+
+    try {
+      const nodeNames = nodes.map(n => `${n.name} [${(n.labels || []).join(', ')}]`).join(', ')
+
+      const deepseekService = require('./deepseekService')
+      const response = await deepseekService.callDeepSeek([{
+        role: 'user',
+        content: `These ${nodes.length} entities were all ingested from "${source}" around the same time:
+${nodeNames}
+
+What event, session, or activity does this cluster represent? Respond with JSON only:
+{
+  "episode_name": "concise name (e.g., 'Email triage batch', 'Tom strategy session', 'LinkedIn DM round')",
+  "episode_type": "email_batch|meeting|conversation|research|transaction_batch|other",
+  "summary": "one sentence describing what happened in this episode"
+}`
+      }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
+
+      const parsed = parseJSON(response)
+      if (!parsed.episode_name) continue
+
+      const episodeId = `episode_${source}_${day}_${hour}`
+
+      const kg = require('./knowledgeGraphService')
+      await kg.ensureNode({
+        label: 'Episode',
+        name: parsed.episode_name,
+        properties: {
+          episode_type: parsed.episode_type,
+          summary: parsed.summary,
+          source_module: source,
+          episode_id: episodeId,
+          node_count: nodes.length,
+          is_synthesized: true,
+          synthesized_at: new Date().toISOString(),
+        },
+        sourceModule: 'consolidation',
+      })
+
+      // Link all member nodes to the episode
+      for (const node of nodes) {
+        const nodeLabels = node.labels || ['Entity']
+        await kg.ensureRelationship({
+          fromLabel: nodeLabels[0],
+          fromName: node.name,
+          toLabel: 'Episode',
+          toName: parsed.episode_name,
+          relType: 'PART_OF_EPISODE',
+          sourceModule: 'consolidation',
+        })
+
+        // Tag the node with the episode so we don't re-process
+        await runWrite(`
+          MATCH (n) WHERE elementId(n) = $nodeId
+          SET n.episode_id = $episodeId
+        `, { nodeId: node.id, episodeId }).catch(() => {})
+      }
+
+      episodes.push({ action: 'episode_created', name: parsed.episode_name, nodes: nodes.length })
+      logger.info(`KG consolidation: episode "${parsed.episode_name}" (${nodes.length} nodes)`)
+    } catch (err) {
+      logger.warn(`KG episode creation failed for ${source}/${day}`, { error: err.message })
+    }
+  }
+
+  return episodes
+}
+
+// ─── Phase 9: Decay ─────────────────────────────────────────────────────
 
 async function decayStaleNodes({ dryRun = false } = {}) {
   const results = { flagged: 0, pruned: 0 }
@@ -460,32 +994,76 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     dedup: [],
     patterns: [],
     causal: [],
+    contradictions: [],
+    narratives: [],
+    predictions: [],
+    importance: { updated: 0 },
+    episodes: [],
     decay: { flagged: 0, pruned: 0 },
     durationMs: 0,
   }
 
+  // Phase 1: Deduplicate
   try {
     results.dedup = await deduplicateNodes({ dryRun })
   } catch (err) {
-    logger.error('KG consolidation phase 1 (dedup) failed', { error: err.message })
+    logger.error('KG phase 1 (dedup) failed', { error: err.message })
   }
 
+  // Phase 2: Abstract patterns
   try {
     results.patterns = await synthesizePatterns({ dryRun })
   } catch (err) {
-    logger.error('KG consolidation phase 2 (patterns) failed', { error: err.message })
+    logger.error('KG phase 2 (patterns) failed', { error: err.message })
   }
 
+  // Phase 3: Causal threading
   try {
     results.causal = await threadCausalChains({ dryRun })
   } catch (err) {
-    logger.error('KG consolidation phase 3 (causal) failed', { error: err.message })
+    logger.error('KG phase 3 (causal) failed', { error: err.message })
   }
 
+  // Phase 4: Contradiction detection
+  try {
+    results.contradictions = await detectContradictions({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 4 (contradictions) failed', { error: err.message })
+  }
+
+  // Phase 5: Narrative synthesis
+  try {
+    results.narratives = await synthesizeNarratives({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 5 (narratives) failed', { error: err.message })
+  }
+
+  // Phase 6: Predictive edges
+  try {
+    results.predictions = await generatePredictions({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 6 (predictions) failed', { error: err.message })
+  }
+
+  // Phase 7: Importance scoring (pure Cypher, fast)
+  try {
+    results.importance = await scoreImportance({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 7 (importance) failed', { error: err.message })
+  }
+
+  // Phase 8: Episodic memory
+  try {
+    results.episodes = await buildEpisodes({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 8 (episodes) failed', { error: err.message })
+  }
+
+  // Phase 9: Decay (always last — after everything else has had a chance to link)
   try {
     results.decay = await decayStaleNodes({ dryRun })
   } catch (err) {
-    logger.error('KG consolidation phase 4 (decay) failed', { error: err.message })
+    logger.error('KG phase 9 (decay) failed', { error: err.message })
   }
 
   results.durationMs = Date.now() - start
@@ -493,8 +1071,13 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
   logger.info('KG consolidation pipeline complete', {
     merged: results.dedup.length,
     patterns: results.patterns.length,
-    causalThreads: results.causal.length,
-    flaggedStale: results.decay.flagged,
+    causal: results.causal.length,
+    contradictions: results.contradictions.length,
+    narratives: results.narratives.length,
+    predictions: results.predictions.length,
+    importanceScored: results.importance.updated,
+    episodes: results.episodes.length,
+    staleFlag: results.decay.flagged,
     pruned: results.decay.pruned,
     durationMs: results.durationMs,
   })
@@ -505,29 +1088,36 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
 // ─── Stats ──────────────────────────────────────────────────────────────
 
 async function getConsolidationStats() {
-  const [synthCount] = await runQuery(`
-    MATCH (n) WHERE n.is_synthesized = true
-    RETURN count(n) AS count
-  `)
-  const [inferredRels] = await runQuery(`
-    MATCH ()-[r]->() WHERE r.inferred = true
-    RETURN count(r) AS count
-  `)
-  const [staleCount] = await runQuery(`
-    MATCH (n) WHERE n.stale_since IS NOT NULL
-    RETURN count(n) AS count
-  `)
+  const toInt = v => v?.toInt?.() ?? v ?? 0
+
+  const [synthCount] = await runQuery(`MATCH (n) WHERE n.is_synthesized = true RETURN count(n) AS c`)
+  const [inferredRels] = await runQuery(`MATCH ()-[r]->() WHERE r.inferred = true RETURN count(r) AS c`)
+  const [staleCount] = await runQuery(`MATCH (n) WHERE n.stale_since IS NOT NULL RETURN count(n) AS c`)
   const [mergedCount] = await runQuery(`
     MATCH (n) WHERE n.merged_from IS NOT NULL
-    RETURN count(n) AS count, reduce(total = 0, x IN collect(size(n.merged_from)) | total + x) AS totalMerged
+    RETURN count(n) AS c, reduce(total = 0, x IN collect(size(n.merged_from)) | total + x) AS totalMerged
+  `)
+  const [narrativeCount] = await runQuery(`MATCH (n:Narrative) RETURN count(n) AS c`)
+  const [predictionCount] = await runQuery(`MATCH (n:Prediction) RETURN count(n) AS c`)
+  const [episodeCount] = await runQuery(`MATCH (n:Episode) RETURN count(n) AS c`)
+  const [contradictionCount] = await runQuery(`MATCH ()-[r:CONTRADICTS|SUPERSEDES|REFINES]->() RETURN count(r) AS c`)
+  const [avgImportance] = await runQuery(`
+    MATCH (n) WHERE n.importance IS NOT NULL
+    RETURN round(avg(n.importance) * 1000) / 1000.0 AS avg, max(n.importance) AS max
   `)
 
   return {
-    synthesizedPatterns: synthCount?.get('count')?.toInt?.() ?? 0,
-    inferredRelationships: inferredRels?.get('count')?.toInt?.() ?? 0,
-    staleNodes: staleCount?.get('count')?.toInt?.() ?? 0,
-    mergedNodes: mergedCount?.get('count')?.toInt?.() ?? 0,
-    totalMerged: mergedCount?.get('totalMerged')?.toInt?.() ?? 0,
+    synthesizedPatterns: toInt(synthCount?.get('c')),
+    inferredRelationships: toInt(inferredRels?.get('c')),
+    staleNodes: toInt(staleCount?.get('c')),
+    mergedNodes: toInt(mergedCount?.get('c')),
+    totalMerged: toInt(mergedCount?.get('totalMerged')),
+    narratives: toInt(narrativeCount?.get('c')),
+    predictions: toInt(predictionCount?.get('c')),
+    episodes: toInt(episodeCount?.get('c')),
+    contradictions: toInt(contradictionCount?.get('c')),
+    avgImportance: avgImportance?.get('avg') ?? 0,
+    maxImportance: avgImportance?.get('max') ?? 0,
   }
 }
 
@@ -551,6 +1141,11 @@ module.exports = {
   deduplicateNodes,
   synthesizePatterns,
   threadCausalChains,
+  detectContradictions,
+  synthesizeNarratives,
+  generatePredictions,
+  scoreImportance,
+  buildEpisodes,
   decayStaleNodes,
   runConsolidationPipeline,
   getConsolidationStats,
