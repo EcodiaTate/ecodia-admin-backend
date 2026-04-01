@@ -261,14 +261,19 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
     )
   } catch {
     // Vector index might not exist yet — fall back to text search
-    seeds = await runQuery(
+    // Search for each word in the query independently to be more fuzzy
+    const words = query.split(/\s+/).filter(w => w.length > 2).slice(0, 5)
+    const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
+    const params = {}
+    words.forEach((w, i) => { params[`w${i}`] = w })
+
+    seeds = whereClauses ? await runQuery(
       `MATCH (n)
-       WHERE toLower(n.name) CONTAINS toLower($query)
-          OR toLower(n.description) CONTAINS toLower($query)
+       WHERE ${whereClauses}
        RETURN n AS node, 0.8 AS score, labels(n) AS labels
        LIMIT ${seedLimit}`,
-      { query: query.split(' ')[0] }
-    )
+      params
+    ) : []
   }
 
   if (seeds.length === 0) return { traces: [], summary: '' }
