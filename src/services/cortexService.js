@@ -1,0 +1,357 @@
+const logger = require('../config/logger')
+const db = require('../config/db')
+const deepseekService = require('./deepseekService')
+const kg = require('./knowledgeGraphService')
+
+// ═══════════════════════════════════════════════════════════════════════
+// CORTEX SERVICE
+//
+// The conversational intelligence layer. Handles multi-turn chat,
+// structured output blocks, action execution, and proactive briefings.
+// Every exchange feeds the knowledge graph — conversation IS memory.
+// ═══════════════════════════════════════════════════════════════════════
+
+const CORTEX_SYSTEM_PROMPT = `You are The Cortex — the intelligence layer of Ecodia OS, Tate Donohoe's personal operating system. You are not a chatbot. You are a neural extension of Tate's awareness.
+
+You have access to Tate's knowledge graph — every person, project, email, decision, and connection in his professional world. You speak in present tense, direct prose. You don't ask unnecessary clarifying questions. You act on what you know and surface what matters.
+
+CRITICAL: You must respond with a JSON array of structured blocks. Each block has a "type" and type-specific fields. Available block types:
+
+1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
+2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
+   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply"
+3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
+4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
+5. "status_update" — something the system did. Fields: { "type": "status_update", "message": "...", "count": number|null }
+6. "insight" — a proactive observation. Fields: { "type": "insight", "message": "...", "urgency": "low|medium|high" }
+
+RULES:
+- Always start with a "text" block for the main narrative
+- Use action_cards when Tate asks you to DO something (reply to email, move a client, create a task)
+- Use email_cards when discussing specific emails
+- Use task_cards when Tate wants to create a reminder or todo
+- Use insights when you notice something Tate should know about
+- Use status_updates to report on autonomous actions
+- Keep prose concise, direct, present-tense. No corporate fluff. No filler.
+- If you don't have enough information in the knowledge graph, say so plainly
+- When referencing people, include what you know about their role and relationship to Tate
+- Include specific details — names, dates, decisions, status
+
+Respond with ONLY a valid JSON array of blocks. No markdown, no wrapping, just the array.`
+
+/**
+ * Process a multi-turn chat message.
+ * Takes full conversation history, retrieves KG context for the latest message,
+ * and returns structured blocks.
+ */
+async function chat(messages, { sessionId } = {}) {
+  const userMessage = messages.filter(m => m.role === 'user').pop()
+  if (!userMessage) throw new Error('No user message provided')
+
+  const query = userMessage.content
+
+  // 1. Retrieve KG context for the latest user message
+  let kgContext = ''
+  try {
+    const ctx = await kg.getContext(query, { maxSeeds: 8, maxDepth: 3 })
+    kgContext = ctx.summary || ''
+  } catch (err) {
+    logger.debug('Cortex KG retrieval failed', { error: err.message })
+  }
+
+  // 2. Gather system state for proactive awareness
+  const systemState = await getSystemState()
+
+  // 3. Build the full prompt with KG context + system state
+  const systemMessage = {
+    role: 'system',
+    content: `${CORTEX_SYSTEM_PROMPT}
+
+${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
+
+--- CURRENT SYSTEM STATE ---
+${formatSystemState(systemState)}
+--- END SYSTEM STATE ---
+
+Current date/time: ${new Date().toISOString()}`
+  }
+
+  // 4. Build conversation with system prompt
+  const fullMessages = [systemMessage, ...messages]
+
+  // 5. Call DeepSeek
+  const raw = await deepseekService.callDeepSeek(fullMessages, {
+    module: 'cortex',
+    skipRetrieval: true,  // We already retrieved KG context
+    skipLogging: false,   // Log the conversation to KG — conversation IS memory
+    sourceId: sessionId,
+  })
+
+  // 6. Parse structured blocks
+  const blocks = parseBlocks(raw)
+
+  // 7. Extract any mentioned entity names for constellation highlighting
+  const mentionedNodes = extractMentionedNodes(kgContext, query)
+
+  return { blocks, mentionedNodes, rawKgContext: kgContext }
+}
+
+/**
+ * Generate a proactive briefing for when The Cortex loads.
+ * Surfaces what happened since last visit, pending items, and urgent matters.
+ */
+async function getLoadBriefing() {
+  const systemState = await getSystemState()
+
+  const hasPendingItems =
+    systemState.unreadEmails > 0 ||
+    systemState.urgentEmails > 0 ||
+    systemState.highEmails > 0 ||
+    systemState.pendingTasks > 0
+
+  if (!hasPendingItems && !systemState.recentActivity.length) {
+    return {
+      blocks: [{
+        type: 'text',
+        content: 'All clear. No pending items, no urgent matters. The system is calm.',
+      }],
+      mentionedNodes: [],
+    }
+  }
+
+  // Build a briefing prompt
+  const prompt = `You are The Cortex. Tate just opened the interface. Generate a brief, useful load briefing based on the current system state. Be direct — lead with what matters most.
+
+--- CURRENT SYSTEM STATE ---
+${formatSystemState(systemState)}
+---
+
+Generate a JSON array of blocks. Start with a text block summarizing the situation. Then add individual cards for anything that needs attention. Keep it tight — this is a status glance, not a report.`
+
+  const raw = await deepseekService.callDeepSeek(
+    [{ role: 'system', content: CORTEX_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
+    { module: 'cortex', skipRetrieval: true, skipLogging: true }
+  )
+
+  const blocks = parseBlocks(raw)
+  return { blocks, mentionedNodes: [] }
+}
+
+/**
+ * Execute an action that was approved via an action_card.
+ */
+async function executeAction(action, params) {
+  switch (action) {
+    case 'send_email': {
+      const [thread] = await db`SELECT * FROM email_threads WHERE id = ${params.threadId}`
+      if (!thread) throw new Error('Email thread not found')
+      if (!thread.draft_reply && !params.draft) throw new Error('No draft to send')
+
+      // If a custom draft was provided, save it first
+      if (params.draft) {
+        await db`UPDATE email_threads SET draft_reply = ${params.draft} WHERE id = ${params.threadId}`
+      }
+
+      const gmailService = require('./gmailService')
+      await gmailService.sendReply(thread.gmail_thread_id, params.draft || thread.draft_reply)
+      await db`UPDATE email_threads SET status = 'replied', updated_at = now() WHERE id = ${params.threadId}`
+
+      return { success: true, message: `Reply sent to ${thread.from_email || thread.from_name}` }
+    }
+
+    case 'draft_reply': {
+      const [thread] = await db`SELECT * FROM email_threads WHERE id = ${params.threadId}`
+      if (!thread) throw new Error('Email thread not found')
+
+      const draft = await deepseekService.draftEmailReply(thread)
+      await db`UPDATE email_threads SET draft_reply = ${draft}, updated_at = now() WHERE id = ${params.threadId}`
+
+      return { success: true, message: 'Draft created', draft }
+    }
+
+    case 'archive_email': {
+      const gmailService = require('./gmailService')
+      if (params.threadIds && Array.isArray(params.threadIds)) {
+        for (const id of params.threadIds) {
+          await gmailService.archiveThread(id)
+        }
+        return { success: true, message: `Archived ${params.threadIds.length} emails` }
+      }
+      await gmailService.archiveThread(params.threadId)
+      return { success: true, message: 'Email archived' }
+    }
+
+    case 'create_task': {
+      const [task] = await db`
+        INSERT INTO tasks (title, description, source, priority)
+        VALUES (${params.title}, ${params.description || null}, 'cortex', ${params.priority || 'medium'})
+        RETURNING *
+      `
+      return { success: true, message: `Task created: ${task.title}`, task }
+    }
+
+    case 'update_crm_stage': {
+      const [client] = await db`SELECT id, stage FROM clients WHERE id = ${params.clientId}`
+      if (!client) throw new Error('Client not found')
+
+      await db.begin(async sql => {
+        await sql`UPDATE clients SET stage = ${params.stage}, updated_at = now() WHERE id = ${params.clientId}`
+        await sql`
+          INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
+          VALUES (${params.clientId}, ${client.stage}, ${params.stage}, ${params.note || 'Updated via Cortex'})
+        `
+      })
+
+      return { success: true, message: `Client moved to ${params.stage}` }
+    }
+
+    default:
+      throw new Error(`Unknown action: ${action}`)
+  }
+}
+
+// ─── Internal Helpers ──────────────────────────────────────────────────
+
+async function getSystemState() {
+  const state = {
+    unreadEmails: 0,
+    urgentEmails: 0,
+    highEmails: 0,
+    pendingTriage: 0,
+    pendingTasks: 0,
+    recentActivity: [],
+    urgentEmailDetails: [],
+    highEmailDetails: [],
+  }
+
+  try {
+    const [emailStats] = await db`
+      SELECT
+        count(*) FILTER (WHERE status = 'unread')::int AS unread,
+        count(*) FILTER (WHERE triage_priority = 'urgent' AND status != 'archived')::int AS urgent,
+        count(*) FILTER (WHERE triage_priority = 'high' AND status != 'archived')::int AS high,
+        count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage
+      FROM email_threads
+    `
+    state.unreadEmails = emailStats?.unread || 0
+    state.urgentEmails = emailStats?.urgent || 0
+    state.highEmails = emailStats?.high || 0
+    state.pendingTriage = emailStats?.pending_triage || 0
+  } catch (err) {
+    logger.debug('Cortex email stats failed', { error: err.message })
+  }
+
+  try {
+    const urgentEmails = await db`
+      SELECT id, subject, from_name, from_email, triage_summary, received_at, triage_priority, draft_reply
+      FROM email_threads
+      WHERE triage_priority IN ('urgent', 'high')
+        AND status NOT IN ('archived', 'replied')
+      ORDER BY
+        CASE triage_priority WHEN 'urgent' THEN 0 ELSE 1 END,
+        received_at DESC
+      LIMIT 10
+    `
+    state.urgentEmailDetails = urgentEmails.filter(e => e.triage_priority === 'urgent')
+    state.highEmailDetails = urgentEmails.filter(e => e.triage_priority === 'high')
+  } catch (err) {
+    logger.debug('Cortex urgent email fetch failed', { error: err.message })
+  }
+
+  try {
+    const [taskStats] = await db`
+      SELECT count(*)::int AS pending
+      FROM tasks WHERE status = 'pending' OR status = 'in_progress'
+    `
+    state.pendingTasks = taskStats?.pending || 0
+  } catch (err) {
+    logger.debug('Cortex task stats failed', { error: err.message })
+  }
+
+  try {
+    const recentEmails = await db`
+      SELECT 'email_handled' AS type, subject AS detail, triage_priority AS priority, updated_at AS ts
+      FROM email_threads
+      WHERE status IN ('archived', 'replied')
+        AND updated_at > now() - interval '24 hours'
+      ORDER BY updated_at DESC
+      LIMIT 5
+    `
+    state.recentActivity = recentEmails
+  } catch (err) {
+    logger.debug('Cortex recent activity failed', { error: err.message })
+  }
+
+  return state
+}
+
+function formatSystemState(state) {
+  const lines = []
+
+  lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
+  lines.push(`Tasks: ${state.pendingTasks} pending`)
+
+  if (state.urgentEmailDetails.length) {
+    lines.push('\nURGENT EMAILS:')
+    for (const e of state.urgentEmailDetails) {
+      lines.push(`  - From: ${e.from_name || e.from_email} | Subject: ${e.subject} | Summary: ${e.triage_summary || 'No summary'} | ID: ${e.id}${e.draft_reply ? ' (draft ready)' : ''}`)
+    }
+  }
+
+  if (state.highEmailDetails.length) {
+    lines.push('\nHIGH PRIORITY EMAILS:')
+    for (const e of state.highEmailDetails) {
+      lines.push(`  - From: ${e.from_name || e.from_email} | Subject: ${e.subject} | Summary: ${e.triage_summary || 'No summary'} | ID: ${e.id}${e.draft_reply ? ' (draft ready)' : ''}`)
+    }
+  }
+
+  if (state.recentActivity.length) {
+    lines.push('\nRECENT AUTONOMOUS ACTIONS (last 24h):')
+    for (const a of state.recentActivity) {
+      lines.push(`  - ${a.type}: ${a.detail} (${a.priority})`)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+function parseBlocks(raw) {
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) return parsed
+    if (parsed.blocks && Array.isArray(parsed.blocks)) return parsed.blocks
+    return [{ type: 'text', content: raw }]
+  } catch {
+    // Try extracting JSON from markdown code blocks
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[1].trim())
+        if (Array.isArray(parsed)) return parsed
+        return [{ type: 'text', content: raw }]
+      } catch {
+        // Fall through
+      }
+    }
+    // Last resort: wrap as text
+    return [{ type: 'text', content: raw }]
+  }
+}
+
+function extractMentionedNodes(kgContext, query) {
+  if (!kgContext) return []
+
+  const names = new Set()
+  // Extract node names from KG context (format: "Name [Label]")
+  const nameMatches = kgContext.matchAll(/^(?:\s*-\[.*?\]->\s*)?(.+?)\s*\[/gm)
+  for (const match of nameMatches) {
+    const name = match[1].trim()
+    if (name && name.length > 1 && name.length < 100) {
+      names.add(name)
+    }
+  }
+
+  return [...names]
+}
+
+module.exports = { chat, getLoadBriefing, executeAction }
