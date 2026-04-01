@@ -8,16 +8,17 @@ const env = require('../config/env')
 // Nine-phase pipeline that transforms working memories into long-term
 // knowledge, modeled on biological memory consolidation:
 //
-//   1. DEDUPLICATE       — Merge near-identical nodes
-//   2. ABSTRACT          — Synthesize higher-order patterns from clusters
-//   3. THREAD            — Discover causal/temporal chains between events
-//   4. CONTRADICT        — Detect conflicting facts, create SUPERSEDES edges
-//   5. NARRATE           — Synthesize narrative arcs for people/projects
-//   6. PREDICT           — Generate LIKELY_NEXT edges from observed patterns
-//   7. SCORE             — Compute importance scores (connectivity + recency + conversations)
-//   8. EPISODIC          — Group related ingestions into episode nodes
-//   9. FREE ASSOCIATE    — Embedding-cluster creative discovery (no hypothesis)
-//  10. DECAY             — Prune disconnected, stale, low-value noise
+//   1.  DEDUPLICATE       — Merge near-identical nodes
+//   2.  ABSTRACT          — Synthesize higher-order patterns from clusters
+//   3.  THREAD            — Discover causal/temporal chains between events
+//   3b. VALIDATE          — Audit ALL inferred edges against full context, kill garbage
+//   4.  CONTRADICT        — Detect conflicting facts, create SUPERSEDES edges
+//   5.  NARRATE           — Synthesize narrative arcs for people/projects
+//   6.  PREDICT           — Generate LIKELY_NEXT edges from observed patterns
+//   7.  SCORE             — Compute importance scores (connectivity + recency + conversations)
+//   8.  EPISODIC          — Group related ingestions into episode nodes
+//   9.  FREE ASSOCIATE    — Embedding-cluster creative discovery (no hypothesis)
+//  10.  DECAY             — Prune disconnected, stale, low-value noise
 //
 // Each phase is independently runnable. The full pipeline runs nightly.
 // ═══════════════════════════════════════════════════════════════════════
@@ -356,18 +357,18 @@ async function threadCausalChains({ dryRun = false, maxChains = 10 } = {}) {
         role: 'user',
         content: `In a knowledge graph, "${earlier}" occurred before "${later}", connected through "${via}".
 
-Is there a causal or evolutionary relationship? Respond with JSON only:
+Is there a DIRECT causal or evolutionary relationship? Respond with JSON only:
 {
   "relationship": "CAUSED|PRECEDED|EVOLVED_INTO|LED_TO|ENABLED|BLOCKED|null",
-  "description": "one sentence explaining the causal link",
+  "description": "one sentence explaining the specific causal mechanism",
   "confidence": 0.0-1.0
 }
 
-If there's no meaningful causal link, set relationship to null.`
+IMPORTANT: Most things that happen near each other are NOT causally related. Just because two things involve the same person or happened around the same time does NOT mean one caused or enabled the other. If the connection is coincidental, temporal, or you're not sure — return null. Only assert causality when you can explain the specific mechanism by which A influenced B.`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
-      if (!parsed.relationship || parsed.confidence < 0.65) continue
+      if (!parsed.relationship || parsed.confidence < 0.75) continue
 
       const kg = require('./knowledgeGraphService')
       const earlierLabels = record.get('earlierLabels') || ['Entity']
@@ -397,6 +398,174 @@ If there's no meaningful causal link, set relationship to null.`
   }
 
   return threaded
+}
+
+// ─── Phase 3b: Validation Sweep ──────────────────────────────────────────
+//
+// Audits ALL inferred relationships against the full neighborhood context
+// of both endpoints. The inference phases guess with minimal context — this
+// phase has the full picture and kills edges that don't hold up.
+//
+// Also runs on the initial ingestion output — DeepSeek sometimes hallucinates
+// relationships from email/calendar content that are factually wrong.
+// ────────────────────────────────────────────────────────────────────────
+
+async function validateInferredEdges({ dryRun = false, batchSize = 15 } = {}) {
+  if (!env.DEEPSEEK_API_KEY) return { audited: 0, killed: 0, kept: 0 }
+
+  const results = { audited: 0, killed: 0, kept: 0 }
+
+  // Find inferred relationships that haven't been validated yet
+  const candidates = await runQuery(`
+    MATCH (a)-[r]->(b)
+    WHERE r.inferred = true
+      AND r.validated IS NULL
+    RETURN elementId(r) AS relId, type(r) AS relType,
+           a.name AS fromName, labels(a) AS fromLabels,
+           b.name AS toName, labels(b) AS toLabels,
+           r.description AS description, r.confidence AS confidence,
+           coalesce(r.causal_via, r.discovered_by, 'unknown') AS source
+    ORDER BY r.confidence ASC
+    LIMIT ${batchSize}
+  `)
+
+  if (candidates.length === 0) return results
+
+  // Batch: get full neighborhood for all involved nodes in one pass
+  const nodeNames = new Set()
+  for (const rec of candidates) {
+    nodeNames.add(rec.get('fromName'))
+    nodeNames.add(rec.get('toName'))
+  }
+
+  const neighborhoods = {}
+  for (const name of nodeNames) {
+    const neighbors = await runQuery(`
+      MATCH (n {name: $name})-[r]-(m)
+      WHERE NOT r.inferred = true
+      RETURN type(r) AS rel, m.name AS neighbor, labels(m) AS labels
+      LIMIT 10
+    `, { name })
+
+    neighborhoods[name] = neighbors.map(r =>
+      `${r.get('rel')} -> ${r.get('neighbor')} [${(r.get('labels') || []).join(', ')}]`
+    )
+  }
+
+  // Batch the validation into a single LLM call for efficiency
+  const edgeDescriptions = candidates.map((rec, i) => {
+    const fromName = rec.get('fromName')
+    const toName = rec.get('toName')
+    const relType = rec.get('relType')
+    const desc = rec.get('description') || ''
+
+    const fromContext = (neighborhoods[fromName] || []).join('; ')
+    const toContext = (neighborhoods[toName] || []).join('; ')
+
+    return `${i + 1}. "${fromName}" -[${relType}]-> "${toName}" (${desc})
+   ${fromName} context: ${fromContext || 'no other connections'}
+   ${toName} context: ${toContext || 'no other connections'}`
+  }).join('\n\n')
+
+  if (dryRun) {
+    results.audited = candidates.length
+    return results
+  }
+
+  try {
+    const deepseekService = require('./deepseekService')
+    const response = await deepseekService.callDeepSeek([{
+      role: 'user',
+      content: `You are auditing a knowledge graph for factual accuracy. These relationships were INFERRED by an AI system. Some may be wrong — the system sometimes forces connections that don't actually exist.
+
+For each relationship, you have the full neighborhood context of both nodes (their REAL, non-inferred connections). Judge whether the inferred relationship makes logical sense given what we actually know.
+
+${edgeDescriptions}
+
+For each numbered relationship, respond with JSON only:
+{
+  "verdicts": [
+    {
+      "id": 1,
+      "action": "keep|downgrade|kill",
+      "reason": "one sentence",
+      "downgrade_to": "SOFTER_REL_TYPE (only if action is downgrade, e.g. BOTH_RELATE_TO_SOFTWARE, SHARE_DOMAIN, LOOSELY_CONNECTED)"
+    }
+  ]
+}
+
+Actions:
+- "keep" — the relationship is factually sound and well-supported
+- "downgrade" — there IS a connection, but the current relationship type overstates it. Replace with a softer, more abstract relationship (e.g. CAUSED -> SHARE_CONTEXT, LED_TO -> LOOSELY_RELATED, COLLABORATED_ON -> SHARE_DOMAIN)
+- "kill" — there is no meaningful connection. The inference was wrong. Delete it.
+
+Be STRICT about specificity. "A CAUSED B" is a strong claim — if it's more like "A and B both happened in the same domain", downgrade it. Only keep strong causal/direct relationships when the evidence genuinely supports them.`
+    }], { module: 'kg_validation', skipRetrieval: true, skipLogging: true })
+
+    const parsed = parseJSON(response)
+    if (!parsed.verdicts || !Array.isArray(parsed.verdicts)) return results
+
+    for (const verdict of parsed.verdicts) {
+      const idx = (verdict.id || 0) - 1
+      if (idx < 0 || idx >= candidates.length) continue
+
+      const rec = candidates[idx]
+      const relId = rec.get('relId')
+      const relType = rec.get('relType')
+      const fromName = rec.get('fromName')
+      const toName = rec.get('toName')
+
+      results.audited++
+
+      if (verdict.action === 'keep') {
+        // Mark as validated so we don't re-audit
+        await runWrite(`
+          MATCH ()-[r]->() WHERE elementId(r) = $relId
+          SET r.validated = true, r.validated_at = datetime()
+        `, { relId })
+        results.kept++
+      } else if (verdict.action === 'downgrade' && verdict.downgrade_to) {
+        // Delete the overly specific edge and create a softer one
+        const description = rec.get('description') || ''
+        const confidence = rec.get('confidence') || 0.5
+        const fromLabels = rec.get('fromLabels') || ['Entity']
+        const toLabels = rec.get('toLabels') || ['Entity']
+
+        await runWrite(`MATCH ()-[r]->() WHERE elementId(r) = $relId DELETE r`, { relId })
+
+        const kg = require('./knowledgeGraphService')
+        await kg.ensureRelationship({
+          fromLabel: fromLabels[0],
+          fromName: fromName,
+          toLabel: toLabels[0],
+          toName: toName,
+          relType: sanitizeLabel(verdict.downgrade_to),
+          properties: {
+            description: `${verdict.reason} (downgraded from ${relType})`,
+            confidence: Math.max(confidence - 0.15, 0.3),
+            inferred: true,
+            validated: true,
+            validated_at: new Date().toISOString(),
+            downgraded_from: relType,
+          },
+          sourceModule: 'consolidation',
+        })
+
+        results.downgraded = (results.downgraded || 0) + 1
+        logger.info(`KG validation: downgraded "${fromName}" -[${relType}]-> "${toName}" to ${verdict.downgrade_to}`)
+      } else {
+        // Kill the bad edge
+        await runWrite(`MATCH ()-[r]->() WHERE elementId(r) = $relId DELETE r`, { relId })
+        results.killed++
+        logger.info(`KG validation: killed "${fromName}" -[${relType}]-> "${toName}" — ${verdict.reason}`)
+      }
+    }
+  } catch (err) {
+    logger.warn('KG validation sweep failed', { error: err.message })
+  }
+
+  logger.info(`KG validation: audited ${results.audited}, kept ${results.kept}, killed ${results.killed}`)
+  return results
 }
 
 // ─── Phase 4: Contradiction Detection ────────────────────────────────────
@@ -1214,6 +1383,7 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     narratives: [],
     predictions: [],
     importance: { updated: 0 },
+    validation: { audited: 0, killed: 0, kept: 0 },
     episodes: [],
     freeAssociation: [],
     decay: { flagged: 0, pruned: 0 },
@@ -1239,6 +1409,13 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     results.causal = await threadCausalChains({ dryRun })
   } catch (err) {
     logger.error('KG phase 3 (causal) failed', { error: err.message })
+  }
+
+  // Phase 3b: Validate inferred edges (audit and kill garbage)
+  try {
+    results.validation = await validateInferredEdges({ dryRun })
+  } catch (err) {
+    logger.error('KG phase 3b (validation) failed', { error: err.message })
   }
 
   // Phase 4: Contradiction detection
@@ -1296,6 +1473,9 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     merged: results.dedup.length,
     patterns: results.patterns.length,
     causal: results.causal.length,
+    validated: results.validation.audited,
+    validationKilled: results.validation.killed,
+    validationDowngraded: results.validation.downgraded || 0,
     contradictions: results.contradictions.length,
     narratives: results.narratives.length,
     predictions: results.predictions.length,
@@ -1370,6 +1550,7 @@ module.exports = {
   deduplicateNodes,
   synthesizePatterns,
   threadCausalChains,
+  validateInferredEdges,
   detectContradictions,
   synthesizeNarratives,
   generatePredictions,
