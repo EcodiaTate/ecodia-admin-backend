@@ -185,11 +185,11 @@ async function embedStaleNodes(batchSize = 30) {
     return 0
   }
 
+  const limit = parseInt(batchSize, 10) || 30
   const stale = await runQuery(
     `MATCH (n) WHERE n.embedding_stale = true OR n.embedding IS NULL
      RETURN elementId(n) AS nodeId, n.name AS name
-     LIMIT $batchSize`,
-    { batchSize: parseInt(batchSize) }
+     LIMIT ${limit}`
   )
 
   if (stale.length === 0) return 0
@@ -248,15 +248,16 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
 
   // Step 2: Find seed nodes via vector similarity
   // Neo4j vector index search
+  const seedLimit = parseInt(maxSeeds, 10) || 5
   let seeds
   try {
     seeds = await runQuery(
-      `CALL db.index.vector.queryNodes('node_embeddings', $k, $embedding)
+      `CALL db.index.vector.queryNodes('node_embeddings', ${seedLimit}, $embedding)
        YIELD node, score
        WHERE score >= $minSimilarity
        RETURN node, score, labels(node) AS labels
        ORDER BY score DESC`,
-      { k: parseInt(maxSeeds), embedding: queryEmbedding, minSimilarity }
+      { embedding: queryEmbedding, minSimilarity: parseFloat(minSimilarity) || 0.7 }
     )
   } catch {
     // Vector index might not exist yet — fall back to text search
@@ -265,8 +266,8 @@ async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0
        WHERE toLower(n.name) CONTAINS toLower($query)
           OR toLower(n.description) CONTAINS toLower($query)
        RETURN n AS node, 0.8 AS score, labels(n) AS labels
-       LIMIT $k`,
-      { query: query.split(' ')[0], k: parseInt(maxSeeds) }
+       LIMIT ${seedLimit}`,
+      { query: query.split(' ')[0] }
     )
   }
 
