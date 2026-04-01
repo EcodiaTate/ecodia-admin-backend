@@ -223,17 +223,11 @@ async function triagePendingEmails() {
         logger.info(`Auto-created task: ${triage.taskTitle}`)
       }
 
-      // Only notify for urgent/high priority — filter the noise
-      if (triage.priority === 'urgent' || triage.priority === 'high') {
-        await createNotification({
-          type: 'email',
-          message: `[${triage.priority.toUpperCase()}] ${thread.from_name || thread.from_email}: ${triage.summary}`,
-          link: '/gmail',
-          metadata: { threadId: thread.id, priority: triage.priority },
-        }).catch(() => {})
-      }
+      // ─── AUTONOMOUS ACTIONS ──────────────────────────────────────────
+      // Act on the triage result automatically. Only urgent/high need human review.
+      await autoAct(thread, triage)
 
-      logger.info(`Triaged [${triage.priority}]: ${thread.subject}`)
+      logger.info(`Triaged [${triage.priority}] → ${triage.suggestedAction}: ${thread.subject}`)
     } catch (err) {
       logger.warn(`Triage failed for ${thread.id}`, { error: err.message })
       const newStatus = thread.triage_attempts + 1 >= MAX_TRIAGE_ATTEMPTS ? 'failed' : 'pending_retry'
@@ -246,6 +240,126 @@ async function triagePendingEmails() {
       `
     }
   }
+}
+
+// ─── Autonomous Actions ──────────────────────────────────────────────────────
+
+async function autoAct(thread, triage) {
+  const action = triage.suggestedAction
+  const priority = triage.priority
+
+  try {
+    // URGENT: never auto-act, always surface to human
+    if (priority === 'urgent') {
+      await createNotification({
+        type: 'email',
+        message: `🔴 URGENT: ${thread.from_name || thread.from_email} — ${triage.summary}`,
+        link: '/gmail',
+        metadata: { threadId: thread.id, priority },
+      }).catch(() => {})
+      return
+    }
+
+    // HIGH: notify + save draft if reply suggested, but don't auto-send
+    if (priority === 'high') {
+      if (triage.draftReply) {
+        await saveDraftToGmail(thread, triage.draftReply).catch(err =>
+          logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
+        )
+      }
+      await createNotification({
+        type: 'email',
+        message: `[HIGH] ${thread.from_name || thread.from_email}: ${triage.summary}`,
+        link: '/gmail',
+        metadata: { threadId: thread.id, priority },
+      }).catch(() => {})
+      return
+    }
+
+    // SPAM / IGNORE → auto-archive in Gmail, mark archived in DB
+    if (priority === 'spam' || action === 'ignore' || action === 'archive') {
+      await silentArchive(thread)
+      logger.info(`Auto-archived [${priority}/${action}]: ${thread.subject}`)
+      return
+    }
+
+    // LOW → auto-archive (receipts, notifications, newsletters)
+    if (priority === 'low') {
+      await silentArchive(thread)
+      logger.info(`Auto-archived [low]: ${thread.subject}`)
+      return
+    }
+
+    // NORMAL + reply → save draft to Gmail for review, don't notify
+    if (priority === 'normal' && action === 'reply' && triage.draftReply) {
+      await saveDraftToGmail(thread, triage.draftReply).catch(err =>
+        logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
+      )
+      await silentArchive(thread)
+      logger.info(`Auto-drafted & archived [normal/reply]: ${thread.subject}`)
+      return
+    }
+
+    // NORMAL + create_task → task already created above, archive email
+    if (priority === 'normal' && action === 'create_task') {
+      await silentArchive(thread)
+      logger.info(`Auto-archived [normal/create_task]: ${thread.subject}`)
+      return
+    }
+
+    // NORMAL + anything else → archive silently
+    if (priority === 'normal') {
+      await silentArchive(thread)
+      return
+    }
+  } catch (err) {
+    // Never let auto-act failures crash the triage loop
+    logger.error(`Auto-act failed for ${thread.id}`, { error: err.message })
+  }
+}
+
+async function silentArchive(thread) {
+  try {
+    const gmail = getGmailClient(thread.inbox || INBOXES[0])
+    await gmail.users.threads.modify({
+      userId: 'me',
+      id: thread.gmail_thread_id,
+      requestBody: { removeLabelIds: ['INBOX', 'UNREAD'] },
+    })
+    await db`UPDATE email_threads SET status = 'archived', updated_at = now() WHERE id = ${thread.id}`
+  } catch (err) {
+    logger.warn(`Silent archive failed for ${thread.id}`, { error: err.message })
+  }
+}
+
+async function saveDraftToGmail(thread, draftBody) {
+  const inbox = thread.inbox || INBOXES[0]
+  const gmail = getGmailClient(inbox)
+
+  const raw = createRawEmail({
+    to: thread.from_email,
+    from: inbox,
+    subject: `Re: ${thread.subject || ''}`,
+    body: draftBody,
+    inReplyTo: thread.gmail_message_ids?.[thread.gmail_message_ids.length - 1],
+  })
+
+  const draft = await gmail.users.drafts.create({
+    userId: 'me',
+    requestBody: {
+      message: {
+        raw,
+        threadId: thread.gmail_thread_id,
+      },
+    },
+  })
+
+  await db`
+    UPDATE email_threads SET draft_gmail_id = ${draft.data.id}, updated_at = now()
+    WHERE id = ${thread.id}
+  `
+
+  logger.info(`Saved Gmail draft for: ${thread.subject} (draft ID: ${draft.data.id})`)
 }
 
 // ─── Email Actions ───────────────────────────────────────────────────────────
