@@ -72,9 +72,20 @@ function detectLanguage(filePath) {
   return LANG_MAP[ext] || null
 }
 
+// Files to always skip by exact name
+const SKIP_FILES = new Set([
+  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+  'composer.lock', 'Gemfile.lock', 'poetry.lock', 'Pipfile.lock',
+  'Cargo.lock', 'go.sum',
+  '.DS_Store', 'Thumbs.db',
+])
+
 function shouldSkipFile(filePath) {
   const ext = path.extname(filePath).toLowerCase()
   if (SKIP_EXTENSIONS.has(ext)) return true
+
+  const basename = path.basename(filePath)
+  if (SKIP_FILES.has(basename)) return true
 
   const parts = filePath.replace(/\\/g, '/').split('/')
   for (const part of parts) {
