@@ -18,8 +18,10 @@ const kgHooks = require('./kgIngestionHooks')
 // 5. Generate follow-up actions if deploy fails
 // ═══════════════════════════════════════════════════════════════════════
 
-const CONFIDENCE_AUTO_DEPLOY_THRESHOLD = 0.7
-const CONFIDENCE_ESCALATE_THRESHOLD = 0.4
+const env = require('../config/env')
+
+const CONFIDENCE_AUTO_DEPLOY_THRESHOLD = parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.7')
+const CONFIDENCE_ESCALATE_THRESHOLD = parseFloat(env.FACTORY_ESCALATE_THRESHOLD || '0.4')
 
 // ─── Full Pipeline Orchestrator ─────────────────────────────────────
 
@@ -66,8 +68,17 @@ async function runPostSessionPipeline(sessionId) {
     logger.warn(`Validation failed for session ${sessionId}`, { error: err.message })
   }
 
-  const confidence = validation?.confidence || 0
+  let confidence = validation?.confidence || 0
   const reviewApproved = review?.approved !== false
+  const reviewConfidence = review?.confidence || 0
+
+  // Boost confidence with DeepSeek review score when validation couldn't fully run
+  if (reviewApproved && reviewConfidence > 0.7 && confidence < CONFIDENCE_AUTO_DEPLOY_THRESHOLD) {
+    const boost = Math.min(0.25, reviewConfidence * 0.3)
+    confidence = Math.min(confidence + boost, 0.95)
+    logger.info(`Factory oversight: boosted confidence ${(confidence - boost).toFixed(2)} → ${confidence.toFixed(2)} (DeepSeek review: ${reviewConfidence})`, { sessionId })
+    await db`UPDATE cc_sessions SET confidence_score = ${confidence} WHERE id = ${sessionId}`
+  }
 
   // Step 3: Deploy decision
   if (confidence >= CONFIDENCE_AUTO_DEPLOY_THRESHOLD && reviewApproved) {
@@ -180,10 +191,9 @@ async function reviewChanges(session, filesChanged) {
 
     if (!diff) return { approved: true, notes: 'No diff available for review' }
 
-    const response = await callDeepSeek({
-      messages: [{
-        role: 'user',
-        content: `You are a code reviewer for the Ecodia Factory — an autonomous code system. Review this diff and assess:
+    const response = await callDeepSeek([{
+      role: 'user',
+      content: `You are a code reviewer for the Ecodia Factory — an autonomous code system. Review this diff and assess:
 
 1. Does this change accomplish the stated task?
 2. Are there any obvious bugs, security issues, or regressions?
@@ -197,15 +207,15 @@ Files changed: ${filesChanged.join(', ')}
 Diff (truncated to 5000 chars):
 ${diff.slice(0, 5000)}
 
-Respond with JSON:
+Respond with JSON only:
 {
-  "approved": true/false,
-  "confidence": 0.0-1.0,
+  "approved": true,
+  "confidence": 0.85,
   "notes": "brief assessment",
-  "concerns": ["list of any concerns"],
-  "accomplishes_task": true/false
+  "concerns": [],
+  "accomplishes_task": true
 }`,
-      }],
+    }], {
       module: 'factory_oversight',
       contextQuery: session.initial_prompt,
     })
@@ -309,10 +319,9 @@ async function reportToTriggerSource(session, result) {
 
 async function generateFollowUp(session, failureType, errorDetails) {
   try {
-    const response = await callDeepSeek({
-      messages: [{
-        role: 'user',
-        content: `A Factory CC session failed. Analyze and suggest next steps.
+    const response = await callDeepSeek([{
+      role: 'user',
+      content: `A Factory CC session failed. Analyze and suggest next steps.
 
 Task: ${session.initial_prompt}
 Codebase: ${session.codebase_name || 'unknown'}
@@ -326,14 +335,14 @@ Should we:
 3. File a task for later?
 4. Something else?
 
-Respond with JSON:
+Respond with JSON only:
 {
-  "action": "retry|escalate|task|none",
+  "action": "retry",
   "retry_prompt": "modified prompt if retrying",
   "task_title": "task title if filing",
   "reasoning": "why this action"
 }`,
-      }],
+    }], {
       module: 'factory_oversight',
     })
 

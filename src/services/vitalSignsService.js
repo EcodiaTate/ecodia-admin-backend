@@ -171,6 +171,10 @@ function stopMonitoring() {
   }
 }
 
+// Clean up on process exit
+process.on('SIGTERM', stopMonitoring)
+process.on('SIGINT', stopMonitoring)
+
 module.exports = {
   checkSelfHealth,
   checkOrganismHealth,

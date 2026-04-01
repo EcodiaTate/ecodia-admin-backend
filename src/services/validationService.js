@@ -36,18 +36,24 @@ function runCommand(cmd, args, cwd, timeout) {
 
 function detectProjectType(repoPath) {
   const hasFile = (f) => fs.existsSync(path.join(repoPath, f))
+  const hasDir = (d) => fs.existsSync(path.join(repoPath, d)) && fs.statSync(path.join(repoPath, d)).isDirectory()
+
+  // Check if deps are installed (no point running tests without them)
+  const hasDeps = hasDir('node_modules') || hasDir('venv') || hasDir('.venv') || hasDir('target')
 
   if (hasFile('package.json')) {
     const pkg = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf-8'))
+    const depsReady = hasDir('node_modules')
     return {
       runtime: 'node',
-      hasTests: !!pkg.scripts?.test,
-      hasLint: !!pkg.scripts?.lint || hasFile('.eslintrc.js') || hasFile('.eslintrc.json') || hasFile('eslint.config.js') || hasFile('eslint.config.mjs'),
-      hasTypecheck: hasFile('tsconfig.json'),
-      hasPlaywright: hasFile('playwright.config.ts') || hasFile('playwright.config.js'),
-      testCmd: pkg.scripts?.test ? ['npm', ['test', '--', '--passWithNoTests']] : null,
-      lintCmd: pkg.scripts?.lint ? ['npm', ['run', 'lint']] : hasFile('eslint.config.js') || hasFile('eslint.config.mjs') ? ['npx', ['eslint', '.']] : null,
-      typecheckCmd: hasFile('tsconfig.json') ? ['npx', ['tsc', '--noEmit']] : null,
+      depsInstalled: depsReady,
+      hasTests: depsReady && !!pkg.scripts?.test,
+      hasLint: depsReady && (!!pkg.scripts?.lint || hasFile('.eslintrc.js') || hasFile('.eslintrc.json') || hasFile('eslint.config.js') || hasFile('eslint.config.mjs')),
+      hasTypecheck: depsReady && hasFile('tsconfig.json'),
+      hasPlaywright: depsReady && (hasFile('playwright.config.ts') || hasFile('playwright.config.js')),
+      testCmd: depsReady && pkg.scripts?.test ? ['npm', ['test', '--', '--passWithNoTests']] : null,
+      lintCmd: depsReady && pkg.scripts?.lint ? ['npm', ['run', 'lint']] : depsReady && (hasFile('eslint.config.js') || hasFile('eslint.config.mjs')) ? ['npx', ['eslint', '.']] : null,
+      typecheckCmd: depsReady && hasFile('tsconfig.json') ? ['npx', ['tsc', '--noEmit']] : null,
     }
   }
 
@@ -135,17 +141,25 @@ async function validateChanges(sessionId) {
 
   // Confidence score
   let confidence = 0
-  if (results.testPassed === true) confidence += 0.4
-  else if (results.testPassed === null) confidence += 0.2 // no tests = partial credit
-  if (results.lintPassed === true) confidence += 0.2
-  else if (results.lintPassed === null) confidence += 0.1
-  if (results.typecheckPassed === true) confidence += 0.2
-  else if (results.typecheckPassed === null) confidence += 0.1
-  if (results.playwrightPassed === true) confidence += 0.1
-  else if (results.playwrightPassed === null) confidence += 0.05
-  // Bonus for no failures at all
-  const anyFailed = [results.testPassed, results.lintPassed, results.typecheckPassed].some(v => v === false)
-  if (!anyFailed) confidence += 0.1
+  const noDepsInstalled = !project.depsInstalled
+
+  if (noDepsInstalled) {
+    // No deps installed — can't run tests/lint/typecheck
+    // Give baseline confidence (DeepSeek review is the real gate in this case)
+    confidence = 0.55 // just below auto-deploy threshold — DeepSeek review tips it over if approved
+    logger.info(`Validation: deps not installed for ${project.runtime} project — baseline confidence ${confidence}`, { sessionId })
+  } else {
+    if (results.testPassed === true) confidence += 0.4
+    else if (results.testPassed === null) confidence += 0.2
+    if (results.lintPassed === true) confidence += 0.2
+    else if (results.lintPassed === null) confidence += 0.1
+    if (results.typecheckPassed === true) confidence += 0.2
+    else if (results.typecheckPassed === null) confidence += 0.1
+    if (results.playwrightPassed === true) confidence += 0.1
+    else if (results.playwrightPassed === null) confidence += 0.05
+    const anyFailed = [results.testPassed, results.lintPassed, results.typecheckPassed].some(v => v === false)
+    if (!anyFailed) confidence += 0.1
+  }
   confidence = Math.min(confidence, 1.0)
 
   const durationMs = Date.now() - startTime

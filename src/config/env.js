@@ -27,6 +27,8 @@ const envSchema = z.object({
   REDIS_URL: z.string().default(''),
   SYMBRIDGE_SECRET: z.string().default(''),
   ORGANISM_API_URL: z.string().default(''),
+  FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.7'),
+  FACTORY_ESCALATE_THRESHOLD: z.string().default('0.4'),
 })
 
 const parsed = envSchema.safeParse(process.env)

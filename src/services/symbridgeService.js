@@ -52,9 +52,15 @@ function signMessage(payload) {
 }
 
 function verifySignature(payload, signature) {
-  if (!env.SYMBRIDGE_SECRET) return true // no auth configured
+  if (!env.SYMBRIDGE_SECRET) {
+    logger.warn('Symbridge: SYMBRIDGE_SECRET not configured — accepting message without auth')
+    return true
+  }
+  if (!signature) return false
   const expected = signMessage(payload)
-  return crypto.timingSafeEqual(Buffer.from(signature || ''), Buffer.from(expected || ''))
+  if (!expected) return false
+  if (signature.length !== expected.length) return false
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
 }
 
 // ─── Send (all 3 layers simultaneously) ─────────────────────────────

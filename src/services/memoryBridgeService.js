@@ -13,6 +13,10 @@ const logger = require('../config/logger')
 // Newer updated_at wins. Both versions preserved via SUPERSEDED_BY.
 // ═══════════════════════════════════════════════════════════════════════
 
+function sanitizeLabel(label) {
+  return label.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'Unknown'
+}
+
 // Labels worth syncing to the organism
 const SYNC_TO_ORGANISM_LABELS = ['Person', 'Project', 'Decision', 'Pattern', 'Codebase']
 const SYNC_TO_ORGANISM_MIN_CONNECTIONS = 2
@@ -84,8 +88,9 @@ async function syncFromOrganism() {
         const entities = res.data?.entities || res.data || []
         for (const entity of entities) {
           try {
+            const safeLabel = sanitizeLabel(label)
             await runWrite(
-              `MERGE (n:\`${label}\` {name: $name})
+              `MERGE (n:\`${safeLabel}\` {name: $name})
                ON CREATE SET n += $props, n.created_at = datetime(), n.synced_from = 'organism'
                ON MATCH SET n += $props, n.updated_at = datetime(), n.synced_from = 'organism'`,
               {
@@ -163,7 +168,7 @@ async function receiveFromOrganism(payload) {
   let synced = 0
   for (const entity of entities) {
     try {
-      const label = entity.label || entity.labels?.[0] || 'Concept'
+      const label = sanitizeLabel(entity.label || entity.labels?.[0] || 'Concept')
       await runWrite(
         `MERGE (n:\`${label}\` {name: $name})
          ON CREATE SET n += $props, n.created_at = datetime(), n.synced_from = 'organism'
@@ -178,9 +183,10 @@ async function receiveFromOrganism(payload) {
 
   for (const rel of relationships) {
     try {
+      const relType = sanitizeLabel(rel.type || 'RELATED_TO')
       await runWrite(
         `MATCH (a {name: $from}), (b {name: $to})
-         MERGE (a)-[r:\`${rel.type || 'RELATED_TO'}\`]->(b)
+         MERGE (a)-[r:\`${relType}\`]->(b)
          ON CREATE SET r += $props, r.synced_from = 'organism'`,
         { from: rel.from, to: rel.to, props: sanitizeForSync(rel.properties || {}) }
       )

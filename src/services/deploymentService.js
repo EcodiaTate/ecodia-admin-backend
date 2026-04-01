@@ -143,8 +143,9 @@ async function deploySession(sessionId) {
 async function runHealthCheck(url) {
   for (let i = 0; i < HEALTH_CHECK_RETRIES; i++) {
     try {
-      const res = await axios.get(url, { timeout: 10_000 })
-      if (res.status >= 200 && res.status < 400) return true
+      const res = await axios.get(url, { timeout: 10_000, maxRedirects: 0, validateStatus: () => true })
+      if (res.status >= 200 && res.status < 300) return true
+      logger.debug(`Health check returned ${res.status}`, { url })
     } catch {}
 
     if (i < HEALTH_CHECK_RETRIES - 1) {

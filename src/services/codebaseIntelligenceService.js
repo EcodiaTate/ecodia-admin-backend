@@ -99,7 +99,7 @@ function shouldSkipFile(filePath) {
 
 function gitExec(args, cwd) {
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim()
+    return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 60_000 }).trim()
   } catch (err) {
     logger.warn(`Git command failed: git ${args.join(' ')}`, { error: err.message, cwd })
     return null
