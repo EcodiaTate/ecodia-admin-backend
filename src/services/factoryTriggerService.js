@@ -8,6 +8,64 @@ const logger = require('../config/logger')
 // here ends with a cc_sessions row and a call to ccService.startSession.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Universal Codebase Resolution ─────────────────────────────────
+//
+// Single function used by every entry point. Resolves a codebase from
+// whatever information is available: explicit ID, name, or free-text
+// prompt. No fragile string matching — gives the full list to the AI
+// when needed.
+// ───────────────────────────────────────────────────────────────────
+
+async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
+  // 1. Explicit ID — trust it
+  if (codebaseId) {
+    const [cb] = await db`SELECT id FROM codebases WHERE id = ${codebaseId} LIMIT 1`
+    if (cb) return cb.id
+  }
+
+  // 2. Exact name match (case-insensitive)
+  if (codebaseName) {
+    const [cb] = await db`SELECT id FROM codebases WHERE name ILIKE ${codebaseName} LIMIT 1`
+    if (cb) return cb.id
+  }
+
+  // 3. If we have a prompt, ask the AI which codebase it's about
+  if (prompt) {
+    const allCodebases = await db`SELECT id, name, language, repo_path FROM codebases ORDER BY name`
+    if (allCodebases.length === 0) return null
+
+    const codebaseList = allCodebases.map(cb => `- ${cb.name} (${cb.language || 'unknown'}, ${cb.repo_path})`).join('\n')
+
+    try {
+      const { callDeepSeek } = require('./deepseekService')
+      const response = await callDeepSeek([{
+        role: 'user',
+        content: `Given this task description, which codebase should it target? If no specific codebase is mentioned or implied, respond with "none".
+
+Available codebases:
+${codebaseList}
+
+Task: ${prompt.slice(0, 500)}
+
+Respond with ONLY the exact codebase name (e.g. "wattleos") or "none". Nothing else.`,
+      }], { module: 'factory_dispatch', skipRetrieval: true })
+
+      const resolved = response.trim().toLowerCase().replace(/['"]/g, '')
+      if (resolved && resolved !== 'none') {
+        const match = allCodebases.find(cb => cb.name.toLowerCase() === resolved)
+        if (match) {
+          logger.info(`Codebase resolved by AI: "${match.name}" from prompt`)
+          return match.id
+        }
+      }
+    } catch (err) {
+      logger.debug('AI codebase resolution failed, proceeding without', { error: err.message })
+    }
+  }
+
+  return null
+}
+
 async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId }) {
   const ccService = require('./ccService')
 
@@ -38,26 +96,11 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
 // ─── Trigger: Cortex (user command) ─────────────────────────────────
 
 async function dispatchFromCortex(description, params = {}) {
-  // Resolve codebase — try explicit param first, then fuzzy-match from the prompt
-  let codebaseId = params.codebaseId || null
-
-  if (!codebaseId && params.codebaseName) {
-    const [cb] = await db`SELECT id FROM codebases WHERE name ILIKE ${params.codebaseName} LIMIT 1`
-    codebaseId = cb?.id || null
-  }
-
-  // If still no codebase, try to find one mentioned in the prompt itself
-  if (!codebaseId) {
-    const allCodebases = await db`SELECT id, name FROM codebases`
-    const promptLower = description.toLowerCase()
-    for (const cb of allCodebases) {
-      if (promptLower.includes(cb.name.toLowerCase())) {
-        codebaseId = cb.id
-        logger.info(`Factory dispatch: resolved codebase "${cb.name}" from prompt text`)
-        break
-      }
-    }
-  }
+  const codebaseId = await resolveCodebase({
+    codebaseId: params.codebaseId,
+    codebaseName: params.codebaseName,
+    prompt: description,
+  })
 
   return createAndStartSession({
     codebaseId,
@@ -96,17 +139,10 @@ async function dispatchFromCRM({ clientId, previousStage, newStage }) {
 // ─── Trigger: Simula Proposal ───────────────────────────────────────
 
 async function dispatchFromSimula(proposal) {
-  // Resolve codebase from proposal
-  let codebaseId = null
-  if (proposal.workspace_root || proposal.target_repository_url) {
-    const [cb] = await db`
-      SELECT id FROM codebases
-      WHERE repo_path = ${proposal.workspace_root || ''}
-         OR repo_url = ${proposal.target_repository_url || ''}
-      LIMIT 1
-    `
-    codebaseId = cb?.id || null
-  }
+  const codebaseId = await resolveCodebase({
+    codebaseName: proposal.codebase_name,
+    prompt: proposal.description,
+  })
 
   return createAndStartSession({
     codebaseId,
@@ -120,15 +156,10 @@ async function dispatchFromSimula(proposal) {
 // ─── Trigger: Thymos Incident ───────────────────────────────────────
 
 async function dispatchFromThymos(incident) {
-  let codebaseId = null
-  if (incident.affected_system || incident.codebase_name) {
-    const [cb] = await db`
-      SELECT id FROM codebases
-      WHERE name = ${incident.codebase_name || incident.affected_system || ''}
-      LIMIT 1
-    `
-    codebaseId = cb?.id || null
-  }
+  const codebaseId = await resolveCodebase({
+    codebaseName: incident.codebase_name || incident.affected_system,
+    prompt: incident.description || incident.error_message,
+  })
 
   return createAndStartSession({
     codebaseId,
@@ -165,11 +196,12 @@ async function dispatchFromKGInsight(insight) {
 // ─── Trigger: Capability Request (organism wants new abilities) ─────
 
 async function dispatchFromCapabilityRequest(request) {
-  // The organism wants EcodiaOS to build a new capability for it
-  const [ecodiaosCodebase] = await db`SELECT id FROM codebases WHERE name = 'ecodiaos' LIMIT 1`
+  const codebaseId = await resolveCodebase({
+    prompt: request.description || request.proposed_implementation,
+  })
 
   return createAndStartSession({
-    codebaseId: ecodiaosCodebase?.id || null,
+    codebaseId,
     prompt: `Capability Request from the Organism:\n\n${request.description}\n\nProposed Implementation: ${request.proposed_implementation || 'Decide the best approach'}\nPriority: ${request.priority || 'medium'}\nEvidence: ${(request.evidence || []).join(', ') || 'N/A'}\n\nImplement this capability in the EcodiaOS admin hub codebase so the organism can use it.`,
     triggeredBy: 'simula',
     triggerSource: 'simula_proposal',
@@ -178,6 +210,7 @@ async function dispatchFromCapabilityRequest(request) {
 }
 
 module.exports = {
+  resolveCodebase,
   dispatchFromCortex,
   dispatchFromCRM,
   dispatchFromSimula,

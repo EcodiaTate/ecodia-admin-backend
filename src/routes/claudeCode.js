@@ -52,19 +52,12 @@ const createSessionSchema = z.object({
 router.post('/sessions', validate(createSessionSchema), async (req, res, next) => {
   try {
     const b = req.body
-    let codebaseId = b.codebaseId || null
+    const { resolveCodebase } = require('../services/factoryTriggerService')
 
-    // Smart codebase resolution — if not explicitly set, try to find one from the prompt
-    if (!codebaseId && b.initialPrompt) {
-      const allCodebases = await db`SELECT id, name FROM codebases`
-      const promptLower = b.initialPrompt.toLowerCase()
-      for (const cb of allCodebases) {
-        if (promptLower.includes(cb.name.toLowerCase())) {
-          codebaseId = cb.id
-          break
-        }
-      }
-    }
+    const codebaseId = await resolveCodebase({
+      codebaseId: b.codebaseId,
+      prompt: b.initialPrompt,
+    })
 
     const [session] = await db`
       INSERT INTO cc_sessions (project_id, client_id, codebase_id, triggered_by, trigger_ref_id, trigger_source, initial_prompt, working_dir)
