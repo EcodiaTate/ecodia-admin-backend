@@ -96,9 +96,13 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
+      // source must be one of: gmail|linkedin|crm|manual|cc|cortex
+      // Capabilities are called by Cortex or the action queue — default to 'cortex'
+      const validSources = ['gmail', 'linkedin', 'crm', 'manual', 'cc', 'cortex']
+      const source = validSources.includes(params.source) ? params.source : 'cortex'
       const [task] = await db`
         INSERT INTO tasks (title, description, source, client_id, project_id, priority, due_date)
-        VALUES (${params.title}, ${params.description || null}, ${params.source || 'ai'},
+        VALUES (${params.title}, ${params.description || null}, ${source},
                 ${params.clientId || null}, ${params.projectId || null},
                 ${params.priority || 'medium'}, ${params.dueDate || null})
         RETURNING id, title

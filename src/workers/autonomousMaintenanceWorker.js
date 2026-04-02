@@ -198,6 +198,16 @@ async function readSystemState() {
       SELECT count(*)::int AS pending, count(*) FILTER (WHERE priority = 'urgent')::int AS urgent
       FROM action_queue WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now())
     `.then(([r]) => { state.actionQueuePressure = r }),
+
+    // Application errors (last 48h) — the system sees its own failures
+    db`
+      SELECT message, module, path, count(*)::int AS occurrences, max(created_at) AS last_seen
+      FROM app_errors
+      WHERE created_at > now() - interval '48 hours'
+      GROUP BY message, module, path
+      ORDER BY occurrences DESC
+      LIMIT 10
+    `.catch(() => []).then(rows => { state.appErrors = rows }),
   ])
 
   // Git activity runs after DB queries — needs state.codebases populated first
@@ -393,6 +403,13 @@ function buildSystemBrief(state) {
     if (q.pending > 10 || q.urgent > 0) {
       lines.push(`\nAction queue: ${q.pending} pending${q.urgent > 0 ? `, ${q.urgent} urgent` : ''}`)
     }
+  }
+
+  if (state.appErrors?.length > 0) {
+    lines.push(`\nApplication errors (48h):`)
+    state.appErrors.forEach(e =>
+      lines.push(`  ${e.occurrences}x [${e.module || e.path || 'unknown'}]: ${e.message?.slice(0, 120)}`)
+    )
   }
 
   return lines.join('\n')
