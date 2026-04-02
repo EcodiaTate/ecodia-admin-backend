@@ -25,9 +25,13 @@ async function migrate() {
   const applied = await db`SELECT filename FROM _migrations`
   const appliedSet = new Set(applied.map(r => r.filename))
 
+  let skipped = 0
+  let newlyApplied = 0
+
   for (const file of files) {
     if (appliedSet.has(file)) {
-      logger.info(`Skipping ${file} (already applied)`)
+      skipped++
+      logger.debug(`Skipping ${file} (already applied)`)
       continue
     }
 
@@ -39,10 +43,11 @@ async function migrate() {
       await tx`INSERT INTO _migrations (filename) VALUES (${file})`
     })
 
+    newlyApplied++
     logger.info(`Applied: ${file}`)
   }
 
-  logger.info('All migrations applied')
+  logger.info(`Migrations complete — ${newlyApplied} applied, ${skipped} already up to date`)
   await db.end()
 }
 
