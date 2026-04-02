@@ -92,6 +92,25 @@ const ACTIONS = {
       return ci.getCodebaseStructure ? await ci.getCodebaseStructure(params.codebaseId) : { error: 'Not available' }
     },
   },
+  get_email_summary: {
+    tier: 'read',
+    description: 'Get recent email summary',
+    handler: async (params) => {
+      const gmail = require('./gmailService')
+      if (gmail.getRecentSummary) return gmail.getRecentSummary(params)
+      // Fallback: query DB for recent email stats
+      const hours = parseInt(params.hours, 10) || 24
+      const interval = `${hours} hours`
+      const recent = await db`
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE is_read = false)::int AS unread,
+               count(*) FILTER (WHERE triage_priority = 'high')::int AS high_priority
+        FROM emails
+        WHERE received_at > now() - ${interval}::interval
+      `
+      return { period: `${hours}h`, ...recent[0] }
+    },
+  },
 
   // ── Write actions (gated by env var) ──
   send_email: {
@@ -143,6 +162,21 @@ const ACTIONS = {
         suggestedAction: params.suggestedAction,
         codebaseId: params.codebaseId,
       })
+    },
+  },
+  create_drive_doc: {
+    tier: 'write',
+    description: 'Create a Google Drive document',
+    handler: async (params) => {
+      const drive = require('./googleDriveService')
+      if (drive.createDocument) {
+        return drive.createDocument(params.account || 'tate@ecodia.au', {
+          title: params.title,
+          content: params.content,
+          folderId: params.folderId,
+        })
+      }
+      return { error: 'Drive createDocument not available' }
     },
   },
 }

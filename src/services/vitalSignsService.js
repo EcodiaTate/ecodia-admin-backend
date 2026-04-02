@@ -68,6 +68,49 @@ async function checkSelfHealth() {
 
 // ─── Organism Health Check ──────────────────────────────────────────
 
+// ─── Anomaly Detection + Cognitive Broadcast ───────────────────────
+
+let lastAnomalyBroadcast = 0
+const ANOMALY_BROADCAST_COOLDOWN_MS = 5 * 60 * 1000 // 5 min debounce
+
+function detectAnomaly(selfHealth) {
+  const anomalies = []
+  if (!selfHealth.db) anomalies.push('database_unreachable')
+  if (!selfHealth.neo4j) anomalies.push('neo4j_unreachable')
+  if (selfHealth.memory && selfHealth.memory.heapUsed > selfHealth.memory.heapTotal * 0.9) {
+    anomalies.push('heap_pressure')
+  }
+  if (selfHealth.memory && selfHealth.memory.systemFree < 256) {
+    anomalies.push('low_system_memory')
+  }
+  return anomalies
+}
+
+async function broadcastHealthAnomaly(anomalies, selfHealth) {
+  if (anomalies.length === 0) return
+  // Debounce: don't spam the organism with repeated anomaly broadcasts
+  const now = Date.now()
+  if (now - lastAnomalyBroadcast < ANOMALY_BROADCAST_COOLDOWN_MS) return
+  lastAnomalyBroadcast = now
+  try {
+    const kgHooks = require('./kgIngestionHooks')
+    kgHooks.sendCognitiveBroadcast('health_anomaly', 0.9, {
+      anomalies,
+      db_healthy: selfHealth.db,
+      neo4j_healthy: selfHealth.neo4j,
+      memory: selfHealth.memory,
+      active_sessions: selfHealth.activeCCSessions,
+      timestamp: new Date().toISOString(),
+    })
+  } catch {}
+
+  // Also emit on event bus for local services
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('health:anomaly_detected', { anomalies, timestamp: new Date().toISOString() })
+  } catch {}
+}
+
 async function checkOrganismHealth() {
   if (!env.ORGANISM_API_URL) {
     organismHealthState.healthy = null
@@ -163,7 +206,15 @@ function startMonitoring() {
 
   monitorInterval = setInterval(async () => {
     try {
+      // Check organism health
       await checkOrganismHealth()
+
+      // Check self health + broadcast anomalies to organism's Atune
+      const selfHealth = await checkSelfHealth()
+      const anomalies = detectAnomaly(selfHealth)
+      if (anomalies.length > 0) {
+        await broadcastHealthAnomaly(anomalies, selfHealth)
+      }
     } catch (err) {
       logger.debug('Vital signs check error', { error: err.message })
     }

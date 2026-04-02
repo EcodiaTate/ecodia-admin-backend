@@ -237,14 +237,23 @@ async function routeMessage(message) {
       break
     }
     case 'factory_query': {
-      // Organism queries Factory status
-      const [active] = await require('../config/db')`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
-      const recent = await require('../config/db')`SELECT id, status, initial_prompt, confidence_score, started_at FROM cc_sessions ORDER BY started_at DESC LIMIT 5`
+      // Organism queries Factory status — comprehensive snapshot
+      const [active] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
+      const recent = await db`SELECT id, status, initial_prompt, confidence_score, started_at, trigger_source FROM cc_sessions ORDER BY started_at DESC LIMIT 5`
       const metabolismBridge = require('./metabolismBridgeService')
+      const actionQueue = require('./actionQueueService')
+      const aqStats = await actionQueue.getStats().catch(() => ({}))
+      const [learningStats] = await db`
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE confidence > 0.5)::int AS high_confidence
+        FROM factory_learnings
+      `.catch(() => [{}])
       await send('factory_query_result', {
         active_sessions: active.count,
         recent_sessions: recent,
         metabolic_state: metabolismBridge.getState(),
+        action_queue: aqStats,
+        factory_learnings: learningStats || {},
       }, message.correlationId)
       break
     }
@@ -270,6 +279,19 @@ async function routeMessage(message) {
       // Organism requests new integration scaffolding
       const triggers = require('./factoryTriggerService')
       await triggers.dispatchIntegrationScaffold(message.payload)
+      break
+    }
+    case 'cognitive_broadcast': {
+      // Organism sends a cognitive percept to EcodiaOS
+      // Route to internal event bus so services can react to organism's cognitive state
+      const eventBus = require('./internalEventBusService')
+      eventBus.emit('organism:cognitive_broadcast', {
+        percept_type: message.payload.percept_type,
+        salience: message.payload.salience,
+        content: message.payload.content,
+        source: message.source || 'organism',
+      })
+      logger.debug(`Symbridge: received cognitive broadcast (${message.payload.percept_type}, salience: ${message.payload.salience})`)
       break
     }
     default:

@@ -14,6 +14,23 @@ function isEnabled() {
   return !!(env.NEO4J_URI && env.DEEPSEEK_API_KEY)
 }
 
+// ─── Immediate Memory Sync Helper ──────────────────────────────────
+// After any ingestion that produces a high-importance node, sync it
+// to the organism immediately rather than waiting for the 30-min sweep.
+// Fire-and-forget, non-blocking.
+
+async function trySyncImportant(nodeName, labels, properties) {
+  try {
+    const memBridge = require('./memoryBridgeService')
+    const importance = properties?.importance || 0
+    if (importance >= 0.9) {
+      await memBridge.syncImmediateIfUrgent({ name: nodeName, labels, importance, properties })
+    } else if (importance >= 0.7) {
+      await memBridge.syncImmediateIfImportant({ name: nodeName, labels, importance, properties })
+    }
+  } catch {}
+}
+
 // ─── Gmail ───────────────────────────────────────────────────────────
 
 async function onEmailProcessed({ threadId, fromEmail, fromName, subject, body, snippet, inbox, clientId }) {
@@ -306,6 +323,13 @@ Cost: $${session.cc_cost_usd || 0}`
       sourceId: session.id,
       context: projectName ? `This was work on the ${projectName} project.` : '',
     })
+
+    // Immediate sync: CC session outcomes are high-value for organism's Evo
+    trySyncImportant(
+      `CC Session: ${(session.initial_prompt || '').slice(0, 60)}`,
+      ['CCSession'],
+      { importance: session.status === 'error' ? 0.8 : 0.7, status: session.status, project: projectName },
+    )
   } catch (err) {
     logger.debug('KG CC session ingestion failed (non-blocking)', { error: err.message })
   }
@@ -347,6 +371,14 @@ ${deployment.reverted_at ? 'This deployment was REVERTED due to failure.' : ''}`
       sourceId: deployment.id,
       context: `Deployment from CC session ${sessionId} to the ${codebaseName} codebase.`,
     })
+
+    // Deploy failures are urgent — organism's Thymos needs to know immediately
+    const isFailure = deployment.deploy_status === 'failed' || deployment.deploy_status === 'reverted'
+    trySyncImportant(
+      `Deploy: ${codebaseName} — ${deployment.deploy_status}`,
+      ['Deployment'],
+      { importance: isFailure ? 0.9 : 0.7, status: deployment.deploy_status, codebase: codebaseName },
+    )
   } catch (err) {
     logger.debug('KG deployment ingestion failed (non-blocking)', { error: err.message })
   }

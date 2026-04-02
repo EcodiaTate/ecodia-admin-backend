@@ -36,28 +36,35 @@ const runHistory = {
 // ─── Cron: Daily 3 AM AEST = 5 PM UTC ──────────────────────────────
 
 cron.schedule('0 17 * * *', async () => {
+  const pressure = metabolismBridge.getPressure()
   if (metabolismBridge.shouldThrottle('audit')) {
-    logger.info(`Factory schedule: skipping dependency audit (pressure: ${metabolismBridge.getPressure().toFixed(2)})`)
+    logger.info(`Factory schedule: skipping dependency audit (pressure: ${pressure.toFixed(2)})`)
     return
   }
+  // At moderate pressure (0.3-0.5), audit runs with reduced scope (handled inside runDependencyAudit)
   await safeRun('audit', runDependencyAudit)
 })
 
 // ─── Cron: Daily 4 AM AEST = 6 PM UTC ──────────────────────────────
 
 cron.schedule('0 18 * * *', async () => {
-  if (metabolismBridge.shouldThrottle('scan')) {
-    logger.info(`Factory schedule: skipping proactive scan (pressure: ${metabolismBridge.getPressure().toFixed(2)})`)
+  const pressure = metabolismBridge.getPressure()
+  if (pressure > 0.5) {
+    // Above 0.5: skip scan entirely
+    logger.info(`Factory schedule: skipping proactive scan (pressure: ${pressure.toFixed(2)})`)
     return
   }
+  // Between 0.3-0.5: scan runs with securityOnly=true (handled inside runProactiveScan)
   await safeRun('scan', runProactiveScan)
 })
 
 // ─── Cron: Weekly Sunday 5 AM AEST = 7 PM UTC ──────────────────────
 
 cron.schedule('0 19 * * 0', async () => {
-  if (metabolismBridge.shouldThrottle('sweep')) {
-    logger.info(`Factory schedule: skipping quality sweep (pressure: ${metabolismBridge.getPressure().toFixed(2)})`)
+  const pressure = metabolismBridge.getPressure()
+  if (pressure > 0.3) {
+    // Above 0.3: skip sweep entirely (sweep is the lowest priority scheduled task)
+    logger.info(`Factory schedule: skipping quality sweep (pressure: ${pressure.toFixed(2)})`)
     return
   }
   await safeRun('sweep', runQualitySweep)
@@ -183,11 +190,29 @@ function requestImmediateRun(taskType) {
 try {
   const eventBus = require('../services/internalEventBusService')
   eventBus.on('factory:deploy_failed', (payload) => {
-    if (!metabolismBridge.shouldThrottle('all')) {
-      logger.info('Factory schedule: deploy failure detected — scheduling investigation')
-      // Don't run full self-improvement, just log for now. The oversight service
-      // already handles follow-ups via generateFollowUp().
-    }
+    if (metabolismBridge.shouldThrottle('all')) return
+
+    const codebaseName = payload.codebaseName || 'unknown'
+    const error = payload.error || 'unknown'
+    logger.info(`Factory schedule: deploy failure detected for ${codebaseName} — checking if investigation needed`)
+
+    // If the oversight service's generateFollowUp handles this, we don't need to double-up.
+    // But if there have been multiple recent failures, escalate with a self-improvement run.
+    db`
+      SELECT count(*)::int AS count
+      FROM cc_sessions
+      WHERE status = 'error' AND started_at > now() - interval '6 hours'
+    `.then(([result]) => {
+      if (result.count >= 2 && !metabolismBridge.shouldThrottle('all')) {
+        const hoursSinceSelfImprove = runHistory.selfImprovement.lastRun
+          ? (Date.now() - runHistory.selfImprovement.lastRun.getTime()) / (60 * 60 * 1000)
+          : 999
+        if (hoursSinceSelfImprove > 6) {
+          logger.info(`Factory schedule: ${result.count} failures in 6h — triggering self-improvement`)
+          safeRun('selfImprovement', runSelfImprovement).catch(() => {})
+        }
+      }
+    }).catch(() => {})
   })
 } catch {}
 

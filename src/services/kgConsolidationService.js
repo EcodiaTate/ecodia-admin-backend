@@ -909,18 +909,21 @@ Include 1-3 predictions. Only include predictions with confidence >= 0.5.`
   }
 
   // FREEDOM UPGRADE: Dispatch actionable predictions to Factory
-  // High-confidence predictions that involve codebases/projects → CC sessions
+  // Only high-confidence predictions that involve codebases/projects/code → CC sessions
+  const actionableKeywords = /codebase|project|deploy|code|refactor|implement|build|fix|ship|release|develop/i
   for (const pred of predictions) {
     if (pred.action !== 'predicted') continue
+    // Gate: only dispatch predictions that are about actionable codebase work
+    if (!actionableKeywords.test(pred.prediction || '')) continue
     try {
       const triggers = require('./factoryTriggerService')
       const result = await triggers.dispatchFromPrediction({
         description: pred.prediction,
         basis: `Pattern analysis for ${pred.person}`,
-        confidence: 0.7, // predictions that made it here already passed 0.5 threshold
+        confidence: pred.confidence || 0.7,
       })
       if (result) {
-        logger.info(`KG prediction → Factory session: ${pred.prediction.slice(0, 60)}`)
+        logger.info(`KG prediction → Factory session: ${(pred.prediction || '').slice(0, 60)}`)
       }
     } catch (err) {
       // dispatchFromPrediction handles its own daily cap — this is expected
@@ -1354,25 +1357,72 @@ Return 0-3 discoveries. Only include genuinely meaningful connections (confidenc
   }
 
   // FREEDOM UPGRADE: Discovery → Action Pipeline
-  // High-confidence discoveries feed back into the system
+  // High-confidence discoveries feed back into the system in four ways:
+  //   1. Integration opportunities → event bus for scaffold service
+  //   2. Codebase improvements → Factory sessions
+  //   3. Narrative insights → organism symbridge for Voxis/Evo/Thread
+  //   4. Cross-body connections → high-priority memory sync
   for (const disc of discoveries) {
     if (disc.action === 'would_associate') continue
+    const description = disc.description || `${disc.from || ''} → ${disc.to || ''} (${disc.rel || disc.action})`
 
     try {
-      // Send all discoveries to the organism via symbridge
+      // All discoveries → organism via symbridge (for Voxis expression, Evo hypothesis, Thread narrative)
       const symbridge = require('./symbridgeService')
       await symbridge.send('discovery', {
         type: disc.action,
-        description: disc.description || `${disc.from} → ${disc.to} (${disc.rel})`,
+        description,
         source: 'free_association',
       }).catch(() => {})
+
+      // Check if discovery suggests an integration opportunity
+      const integrationKeywords = /integrat|api|connect|webhook|poll|service|endpoint|external/i
+      if (integrationKeywords.test(description)) {
+        try {
+          const eventBus = require('./internalEventBusService')
+          eventBus.emit('kg:integration_opportunity', {
+            description,
+            source: 'free_association',
+            nodes: disc.from && disc.to ? [disc.from, disc.to] : [],
+          })
+        } catch {}
+      }
+
+      // Check if discovery suggests a codebase improvement
+      const codebaseKeywords = /codebase|refactor|bug|performance|code quality|dead code|test|optimize/i
+      if (codebaseKeywords.test(description)) {
+        try {
+          const triggers = require('./factoryTriggerService')
+          await triggers.dispatchFromKGInsight({
+            description: `KG Free Association Discovery: ${description}`,
+            context: 'Free association phase found a pattern suggesting a codebase improvement opportunity.',
+            suggestedAction: 'Investigate and address this pattern.',
+          })
+        } catch {}
+      }
+
+      // Cross-body connection: if discovery links admin-world concepts to organism-world concepts
+      const organismLabels = /narrative|prediction|hypothesis|episode|belief|percept|affect/i
+      const adminLabels = /email|calendar|crm|deploy|codebase|project|client/i
+      if ((organismLabels.test(description) && adminLabels.test(description)) ||
+          (disc.from && disc.to && organismLabels.test(disc.from) !== organismLabels.test(disc.to))) {
+        try {
+          const memBridge = require('./memoryBridgeService')
+          await memBridge.syncSingleNode(
+            `Cross-body: ${description.slice(0, 80)}`,
+            ['CrossBodyInsight'],
+            { description, source: 'free_association', importance: 0.85 },
+            { priority: 'urgent' },
+          )
+        } catch {}
+      }
 
       // High-confidence insights → notification for humans too (serendipity bonus)
       if (disc.action === 'insight') {
         const { broadcast } = require('../websocket/wsManager')
         broadcast('notification', {
           type: 'kg_discovery',
-          message: `KG Discovery: ${(disc.description || '').slice(0, 100)}`,
+          message: `KG Discovery: ${description.slice(0, 100)}`,
         })
       }
     } catch {}
@@ -1466,9 +1516,18 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
     durationMs: 0,
   }
 
+  // Helper: emit phase event to internal event bus
+  function emitPhase(eventType, data = {}) {
+    try {
+      const eventBus = require('./internalEventBusService')
+      eventBus.emit(eventType, data)
+    } catch {}
+  }
+
   // Phase 1: Deduplicate
   try {
     results.dedup = await deduplicateNodes({ dryRun })
+    emitPhase('kg:dedup_complete', { merged: results.dedup.length })
   } catch (err) {
     logger.error('KG phase 1 (dedup) failed', { error: err.message })
   }
@@ -1476,6 +1535,9 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
   // Phase 2: Abstract patterns
   try {
     results.patterns = await synthesizePatterns({ dryRun })
+    if (results.patterns.length > 0) {
+      emitPhase('kg:pattern_discovered', { count: results.patterns.length, source: 'abstraction' })
+    }
   } catch (err) {
     logger.error('KG phase 2 (patterns) failed', { error: err.message })
   }
@@ -1483,6 +1545,9 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
   // Phase 3: Causal threading
   try {
     results.causal = await threadCausalChains({ dryRun })
+    if (results.causal.length > 0) {
+      emitPhase('kg:pattern_discovered', { count: results.causal.length, source: 'causal_threading' })
+    }
   } catch (err) {
     logger.error('KG phase 3 (causal) failed', { error: err.message })
   }
@@ -1497,6 +1562,9 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
   // Phase 4: Contradiction detection
   try {
     results.contradictions = await detectContradictions({ dryRun })
+    if (results.contradictions.length > 0) {
+      emitPhase('kg:pattern_discovered', { count: results.contradictions.length, source: 'contradiction_detection' })
+    }
   } catch (err) {
     logger.error('KG phase 4 (contradictions) failed', { error: err.message })
   }
@@ -1540,8 +1608,18 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
   try {
     results.decay = await decayStaleNodes({ dryRun })
   } catch (err) {
-    logger.error('KG phase 9 (decay) failed', { error: err.message })
+    logger.error('KG phase 10 (decay) failed', { error: err.message })
   }
+
+  // Emit consolidation complete with full summary
+  emitPhase('kg:consolidation_complete', {
+    merged: results.dedup.length,
+    patterns: results.patterns.length,
+    causal: results.causal.length,
+    predictions: results.predictions.length,
+    freeAssociation: results.freeAssociation.length,
+    durationMs: Date.now() - start,
+  })
 
   results.durationMs = Date.now() - start
 

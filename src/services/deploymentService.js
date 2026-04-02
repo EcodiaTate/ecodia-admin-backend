@@ -102,11 +102,39 @@ async function deploySession(sessionId) {
 
     // 4. Deploy by target
     if (deployTarget === 'pm2' && pm2Name) {
-      execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+      try {
+        execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+      } catch (restartErr) {
+        // Self-healing: if PM2 restart fails on self-modification, revert and try again
+        if (isSelfMod) {
+          logger.error(`Self-modification PM2 restart failed — self-healing: reverting and restarting`, { error: restartErr.message })
+          try {
+            git(['revert', '--no-edit', commitSha], repoPath)
+            git(['push', 'origin', branch], repoPath)
+            execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+            logger.info('Self-healing: reverted git changes and restarted PM2 successfully')
 
-      // For self-modifications, wait for PM2 to stabilize before health check
+            // Record this as a failed deploy (self-healed)
+            if (deploymentId) {
+              await db`UPDATE deployments SET deploy_status = 'reverted', error_message = ${'Self-healed: PM2 restart failed, auto-reverted'}, reverted_at = now() WHERE id = ${deploymentId}`
+            }
+            await db`UPDATE cc_sessions SET deploy_status = 'reverted', pipeline_stage = 'failed' WHERE id = ${sessionId}`
+            return { status: 'self_healed_revert', commitSha, reason: 'PM2 restart failed, auto-reverted' }
+          } catch (healErr) {
+            logger.error('CRITICAL: Self-healing also failed', { error: healErr.message })
+            await db`
+              INSERT INTO notifications (type, message, metadata)
+              VALUES ('deployment_revert_failed', 'CRITICAL: Self-mod PM2 restart and self-heal both failed — manual intervention needed',
+                      ${JSON.stringify({ sessionId, commitSha, deploymentId, error: healErr.message })})
+            `.catch(() => {})
+          }
+        }
+        throw restartErr
+      }
+
+      // For self-modifications, wait for PM2 to stabilize before health check (30s grace period)
       if (isSelfMod) {
-        await new Promise(r => setTimeout(r, 5000))
+        await new Promise(r => setTimeout(r, 30_000))
       }
     }
     // Vercel deploys automatically on push — no action needed
@@ -122,7 +150,7 @@ async function deploySession(sessionId) {
         broadcastToSession(sessionId, 'cc:status', { status: 'deployed', commitSha })
       } else {
         // Auto-revert
-        await revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name)
+        await revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name, session.codebase_name)
         return { status: 'reverted', commitSha, reason: 'Health check failed' }
       }
     } else {
@@ -179,7 +207,7 @@ async function runHealthCheck(url) {
   return false
 }
 
-async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name) {
+async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, branch, pm2Name, codebaseName) {
   logger.warn(`Reverting deployment ${deploymentId}`, { commitSha })
 
   try {
@@ -208,7 +236,7 @@ async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, br
 
     kgHooks.onDeploymentCompleted({
       deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'reverted', deploy_target: 'revert', reverted_at: new Date() },
-      codebaseName: 'unknown',
+      codebaseName: codebaseName || 'unknown',
       sessionId,
     }).catch(() => {})
 

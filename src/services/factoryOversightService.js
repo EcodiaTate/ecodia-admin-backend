@@ -36,11 +36,13 @@ function getAutoDeployThreshold(session) {
   // Self-modification requires higher confidence
   if (session.self_modification) return SELF_MOD_THRESHOLD
 
-  // Pressure-adjusted: higher pressure = more conservative, lower pressure = more experimental
-  if (pressure < 0.2) return Math.max(0.6, BASE_AUTO_DEPLOY_THRESHOLD - 0.1) // abundance = experimental
-  if (pressure > 0.8) return Math.min(0.9, BASE_AUTO_DEPLOY_THRESHOLD + 0.15) // survival = conservative
-
-  return BASE_AUTO_DEPLOY_THRESHOLD + (pressure * 0.15)
+  // Pressure-adjusted: continuous gradient
+  // At pressure=0.0 → threshold=0.6 (experimental freedom)
+  // At pressure=0.5 → threshold=0.7 + 0.075 = 0.775
+  // At pressure=1.0 → threshold=0.7 + 0.15 = 0.85
+  // Clamped to [0.6, 0.9] range
+  if (pressure < 0.2) return Math.max(0.6, BASE_AUTO_DEPLOY_THRESHOLD - 0.1)
+  return Math.min(0.9, BASE_AUTO_DEPLOY_THRESHOLD + (pressure * 0.15))
 }
 
 // ─── Full Pipeline Orchestrator ─────────────────────────────────────
@@ -148,30 +150,51 @@ async function runPostSessionPipeline(sessionId) {
       const deploymentService = require('./deploymentService')
       const deployResult = await deploymentService.deploySession(sessionId)
 
-      // Step 4: Post-deploy monitoring
-      await monitorPostDeploy(session, deployResult)
+      // Check if deploy was actually successful or self-healed/reverted
+      const wasReverted = deployResult.status === 'reverted' || deployResult.status === 'self_healed_revert' || deployResult.status === 'no_changes'
 
-      // Step 5: Outcome learning
-      await recordOutcome(session, 'success', { confidence, filesChanged, commitSha: deployResult.commitSha })
+      if (wasReverted) {
+        // Deploy tried but was reverted — this is a failure, not a success
+        const reason = deployResult.reason || deployResult.status
+        await recordOutcome(session, 'deploy_reverted', { confidence, reason, commitSha: deployResult.commitSha })
+        await trackValidationOutcome(sessionId, 'failure')
+        await reportToTriggerSource(session, {
+          success: false,
+          stage: 'deployment',
+          error: reason,
+          confidence,
+          commitSha: deployResult.commitSha,
+        })
+        emitEvent('factory:deploy_failed', {
+          sessionId, codebaseName: session.codebase_name,
+          confidence, error: reason, reverted: true,
+        })
+      } else {
+        // Step 4: Post-deploy monitoring
+        await monitorPostDeploy(session, deployResult)
 
-      // Track validation outcome for learned confidence
-      await trackValidationOutcome(sessionId, 'success')
+        // Step 5: Outcome learning
+        await recordOutcome(session, 'success', { confidence, filesChanged, commitSha: deployResult.commitSha })
 
-      // Report success
-      await reportToTriggerSource(session, {
-        success: true,
-        stage: 'deployed',
-        commitSha: deployResult.commitSha,
-        confidence,
-        filesChanged,
-      })
+        // Track validation outcome for learned confidence
+        await trackValidationOutcome(sessionId, 'success')
 
-      // Emit to event bus
-      emitEvent('factory:deploy_success', {
-        sessionId, codebaseName: session.codebase_name,
-        confidence, commitSha: deployResult.commitSha, filesChanged,
-        selfModification: isSelfMod,
-      })
+        // Report success
+        await reportToTriggerSource(session, {
+          success: true,
+          stage: 'deployed',
+          commitSha: deployResult.commitSha,
+          confidence,
+          filesChanged,
+        })
+
+        // Emit to event bus
+        emitEvent('factory:deploy_success', {
+          sessionId, codebaseName: session.codebase_name,
+          confidence, commitSha: deployResult.commitSha, filesChanged,
+          selfModification: isSelfMod,
+        })
+      }
     } catch (err) {
       logger.error(`Factory deploy failed for session ${sessionId}`, { error: err.message })
       await reportToTriggerSource(session, {
@@ -379,15 +402,17 @@ async function checkVercelDeployment(session, deployResult) {
               ${JSON.stringify({ sessionId: session.id, commitSha: deployResult.commitSha })})
     `
 
-    if (session.trigger_source === 'simula_proposal' || session.trigger_source === 'thymos_incident') {
+    // Always notify organism about deploy health failures — not just organism-triggered sessions
+    try {
       const symbridge = require('./symbridgeService')
       await symbridge.send('factory_result', {
         session_id: session.id,
         status: 'deploy_health_failed',
         codebase_name: session.codebase_name,
         commit_sha: deployResult.commitSha,
+        trigger_source: session.trigger_source,
       }, session.id)
-    }
+    } catch {}
 
     // Cognitive broadcast: health failure is high-salience
     kgHooks.sendCognitiveBroadcast('health_anomaly', 0.9, {
@@ -403,7 +428,9 @@ async function checkVercelDeployment(session, deployResult) {
 async function reportToTriggerSource(session, result) {
   broadcastToSession(session.id, 'cc:pipeline_result', result)
 
-  if (['simula_proposal', 'thymos_incident'].includes(session.trigger_source)) {
+  // Report back to organism for any trigger source that came from the organism
+  const organismTriggers = ['simula_proposal', 'thymos_incident', 'kg_insight', 'self_modification']
+  if (organismTriggers.includes(session.trigger_source)) {
     try {
       const symbridge = require('./symbridgeService')
       await symbridge.send('factory_result', {
@@ -554,13 +581,6 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
       confidence: details.confidence,
       codebaseName: session.codebase_name,
     })
-
-    if (outcome === 'success') {
-      emitEvent('factory:learning_recorded', {
-        sessionId: session.id,
-        codebaseName: session.codebase_name,
-      })
-    }
   } catch (err) {
     logger.debug('Failed to record outcome', { error: err.message })
   }
@@ -582,10 +602,12 @@ What specific technique, approach, or insight made this succeed? This will be in
 
 Respond with JSON only:
 {
-  "pattern_type": "success_pattern",
+  "pattern_type": "success_pattern|technique|discovery|codebase_insight",
   "pattern_description": "one-sentence reusable insight",
   "confidence": 0.6
-}`
+}
+
+Use "technique" if a specific approach worked well, "discovery" if something unexpected was found, "codebase_insight" if this reveals something about the codebase structure/patterns, or "success_pattern" for general success patterns.`
       : `A Factory CC session FAILED (${outcome}).
 
 Task: ${(session.initial_prompt || '').slice(0, 300)}
@@ -596,10 +618,12 @@ What went wrong? What should future sessions AVOID? This will be injected into f
 
 Respond with JSON only:
 {
-  "pattern_type": "failure_pattern",
+  "pattern_type": "failure_pattern|dont_try",
   "pattern_description": "one-sentence warning for future sessions",
   "confidence": 0.5
-}`
+}
+
+Use "dont_try" if this approach should never be attempted again for this codebase, or "failure_pattern" for general failure patterns.`
 
     const response = await callDeepSeek([{ role: 'user', content: prompt }], {
       module: 'factory_learning',
@@ -621,6 +645,12 @@ Respond with JSON only:
                 ${[session.id]})
       `
       logger.info(`Factory learning extracted: [${parsed.pattern_type}] ${parsed.pattern_description.slice(0, 80)}`)
+
+      emitEvent('factory:learning_recorded', {
+        sessionId: session.id,
+        codebaseName: session.codebase_name,
+        patternType: parsed.pattern_type,
+      })
     }
   } catch (err) {
     logger.debug('Learning pattern extraction failed (non-blocking)', { error: err.message })
@@ -649,6 +679,45 @@ function emitEvent(type, payload) {
     eventBus.emit(type, payload)
   } catch {}
 }
+
+// ─── Event Bus Subscription: React to KG Discoveries ───────────────
+// When the KG discovers new patterns, proactively schedule Factory sessions
+// to investigate/act on them — if metabolic pressure allows.
+
+try {
+  const eventBus = require('./internalEventBusService')
+  eventBus.on('kg:pattern_discovered', async (payload) => {
+    try {
+      const metabolismBridge = require('./metabolismBridgeService')
+      if (metabolismBridge.shouldThrottle('scan')) return // not under growth mode
+
+      const count = payload.count || 0
+      const source = payload.source || 'unknown'
+
+      // Only act on significant pattern batches from creative phases
+      if (count < 2 || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
+
+      logger.info(`Factory oversight: ${count} patterns discovered (${source}) — evaluating for proactive session`)
+
+      // Rate limit: max 2 pattern-reactive sessions per day
+      const [recentPatternSessions] = await db`
+        SELECT count(*)::int AS count
+        FROM cc_sessions
+        WHERE trigger_source = 'kg_insight' AND started_at > now() - interval '24 hours'
+      `
+      if (recentPatternSessions.count >= 2) return
+
+      const triggers = require('./factoryTriggerService')
+      await triggers.dispatchFromKGInsight({
+        description: `KG discovered ${count} new patterns via ${source}. Investigate the most actionable ones and determine if any codebase improvements are warranted.`,
+        context: `Pattern discovery source: ${source}. Count: ${count}. This is a proactive session triggered by KG consolidation findings.`,
+        suggestedAction: 'Review the latest KG patterns and implement any high-value improvements.',
+      })
+    } catch (err) {
+      logger.debug('Pattern-reactive session dispatch failed', { error: err.message })
+    }
+  })
+} catch {}
 
 module.exports = {
   runPostSessionPipeline,

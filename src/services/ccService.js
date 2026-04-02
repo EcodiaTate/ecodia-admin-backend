@@ -241,6 +241,7 @@ async function startSession(session) {
     hasKGContext: !!bundle.kgContext,
     hasStructure: !!bundle.codebaseStructure,
     promptLength: fullPrompt.length,
+    selfModification: !!session.self_modification,
   }
   await db`UPDATE cc_sessions SET context_bundle = ${JSON.stringify(bundleSummary)}, pipeline_stage = 'executing' WHERE id = ${session.id}`
   broadcastToSession(session.id, 'cc:stage', { stage: 'executing', progress: 0.2 })
