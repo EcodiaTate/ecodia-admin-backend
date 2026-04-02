@@ -232,7 +232,7 @@ async function triagePendingEmails() {
         UPDATE email_threads SET
           triage_priority = ${triage.priority},
           triage_summary = ${triage.summary},
-          triage_action = ${triage.suggestedAction},
+          triage_action = ${triage.autonomousAction || triage.suggestedAction},
           draft_reply = ${triage.draftReply || null},
           triage_status = 'complete',
           triage_attempts = triage_attempts + 1,
@@ -260,10 +260,11 @@ async function triagePendingEmails() {
       // Fire-and-forget KG ingestion of triage results
       kgHooks.onEmailTriaged({
         threadId: thread.id, subject: thread.subject, fromEmail: thread.from_email,
-        triageSummary: triage.summary, triageAction: triage.suggestedAction, triagePriority: triage.priority,
+        triageSummary: triage.summary, triageAction: triage.autonomousAction || triage.suggestedAction, triagePriority: triage.priority,
       }).catch(() => {})
 
-      logger.info(`Triaged [${triage.priority}] → ${triage.suggestedAction}: ${thread.subject}`)
+      const triageAction = triage.autonomousAction || triage.suggestedAction
+      logger.info(`Triaged [${triage.priority}/${triage.confidence ?? '?'}] → ${triageAction}${triage.surfaceToHuman ? ' (surfaced)' : ''}: ${thread.subject}`)
     } catch (err) {
       logger.warn(`Triage failed for ${thread.id}`, { error: err.message })
       const newStatus = thread.triage_attempts + 1 >= MAX_TRIAGE_ATTEMPTS ? 'failed' : 'pending_retry'
@@ -279,16 +280,22 @@ async function triagePendingEmails() {
 }
 
 // ─── Autonomous Actions ──────────────────────────────────────────────────────
+// Philosophy: ACT, don't alert. The AI decides what to do. Surface to human
+// only when the AI genuinely can't handle it or confidence is too low.
 
 async function autoAct(thread, triage) {
-  const action = triage.suggestedAction
+  const action = triage.autonomousAction || triage.suggestedAction // backwards compat
   const priority = triage.priority
+  const confidence = typeof triage.confidence === 'number' ? triage.confidence : 0.8
   const actionQueue = require('./actionQueueService')
 
   try {
-    // If the AI says surface to human → enqueue to action queue
-    if (triage.surfaceToHuman) {
-      // Save draft to Gmail if available
+    // ── Safety net: low confidence overrides to surface regardless ──
+    const shouldSurface = triage.surfaceToHuman || confidence < 0.7
+
+    // ── SURFACE PATH: AI can't handle this, or isn't confident enough ──
+    if (shouldSurface) {
+      // Still save draft if we have one — human can approve sending
       if (triage.draftReply) {
         await saveDraftToGmail(thread, triage.draftReply).catch(err =>
           logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
@@ -307,30 +314,73 @@ async function autoAct(thread, triage) {
           title: triage.taskTitle || null,
           description: triage.taskDescription || null,
         },
-        context: { from: thread.from_name || thread.from_email, email: thread.from_email, inbox: thread.inbox },
+        context: {
+          from: thread.from_name || thread.from_email,
+          email: thread.from_email,
+          inbox: thread.inbox,
+          confidence,
+          surfacedBecause: confidence < 0.7 ? 'low_confidence' : 'ai_requested',
+        },
         priority,
       }).catch(() => {})
       return
     }
 
-    // AI says don't surface → execute autonomously
-    if (action === 'reply' && triage.draftReply) {
-      // Save draft but don't surface
-      await saveDraftToGmail(thread, triage.draftReply).catch(err =>
-        logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
-      )
+    // ── AUTONOMOUS PATH: AI is confident, just do it ──
+
+    if (action === 'send_reply' && triage.draftReply) {
+      // Actually send the reply — the AI is confident, act on it
+      await sendReplyToThread(thread, triage.draftReply)
       await silentArchive(thread)
-      logger.info(`Auto-drafted & archived: ${thread.subject}`)
-    } else if (action === 'archive' || action === 'ignore' || priority === 'spam' || priority === 'low') {
+      logger.info(`Auto-sent reply & archived: ${thread.subject}`)
+
+    } else if (action === 'create_task' && triage.shouldCreateTask) {
+      // Task already created in triagePendingEmails — just archive the email
+      await silentArchive(thread)
+      logger.info(`Task created, auto-archived: ${thread.subject}`)
+
+    } else if (action === 'snooze') {
+      // Repeated signal about something acknowledged — log to KG, archive, don't nag
+      await silentArchive(thread)
+      kgHooks.onEmailSnoozed({
+        threadId: thread.id,
+        subject: thread.subject,
+        fromEmail: thread.from_email,
+        summary: triage.summary,
+      }).catch(() => {})
+      logger.info(`Snoozed (repeated signal): ${thread.subject}`)
+
+    } else {
+      // archive, ignore, spam, or anything else — just archive
       await silentArchive(thread)
       logger.info(`Auto-archived [${priority}/${action}]: ${thread.subject}`)
-    } else {
-      // Anything else the AI didn't surface — archive
-      await silentArchive(thread)
     }
   } catch (err) {
     logger.error(`Auto-act failed for ${thread.id}`, { error: err.message })
   }
+}
+
+// ─── Send reply autonomously ────────────────────────────────────────────────
+
+async function sendReplyToThread(thread, body) {
+  const inbox = thread.inbox || INBOXES[0]
+  const gmail = getGmailClient(inbox)
+
+  const raw = createRawEmail({
+    to: thread.from_email,
+    from: inbox,
+    subject: `Re: ${thread.subject || ''}`,
+    body,
+    inReplyTo: thread.gmail_message_ids?.[thread.gmail_message_ids.length - 1],
+  })
+
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: { raw, threadId: thread.gmail_thread_id },
+  })
+
+  await db`UPDATE email_threads SET status = 'replied', updated_at = now() WHERE id = ${thread.id}`
+  logger.info(`Autonomous reply sent from ${inbox} to ${thread.from_email}: ${thread.subject}`)
 }
 
 async function silentArchive(thread) {

@@ -161,7 +161,7 @@ Respond with JSON only:
   }))
 }
 
-async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext }) {
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext }) {
   // kgContext may already be provided by gmailService — if so, skip retrieval
   const hasExternalContext = !!kgContext
 
@@ -171,42 +171,57 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
       ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})`
       : 'Unknown sender'
 
-  const prompt = `You are Tate Donohoe's email assistant. Tate is a 21-year-old software developer running Ecodia Pty Ltd in Australia. He builds custom software for impact-focused organisations.
+  const pendingBlock = pendingActionsContext
+    ? `\n--- ALREADY PENDING IN ACTION QUEUE ---\nThe following items from this sender are ALREADY queued and waiting for Tate's attention:\n${pendingActionsContext}\n\nIMPORTANT: If this email is about the same topic as an already-pending item, do NOT surface it again. Set surfaceToHuman to false and suggestedAction to "archive". The action queue will consolidate the signal automatically. Only surface if this email introduces genuinely NEW information or a different topic.\n--- END PENDING ---\n`
+    : ''
+
+  const prompt = `You are the autonomous email handler for Ecodia Pty Ltd (Tate Donohoe, 21, software dev, Australia). Your job is to HANDLE emails — not alert about them. Act first, surface to Tate only as a last resort.
 
 This email arrived in the ${inbox || 'code@ecodia.au'} inbox.
 
 From: ${from}
 Subject: ${subject}
-${contextBlock}
+${contextBlock}${pendingBlock}
 
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 
-Classify this email and decide what action to take. Be aggressive about filtering noise — Tate only wants to see emails that genuinely need his attention. USE the knowledge graph context above to inform your decisions — if you know who this person is and what they're working on with Tate, factor that in.
+Your job is to decide what the system should DO about this email. Not what to tell Tate about it. ACT, don't alert. USE the knowledge graph context to inform your decisions.
 
 Respond with JSON only:
 {
   "priority": "urgent|high|normal|low|spam",
-  "summary": "one concise sentence summarizing what this email is about and what it wants",
-  "suggestedAction": "reply|archive|forward|create_task|ignore",
-  "reasoning": "why this priority and action",
-  "draftReply": "if suggestedAction is reply, write a natural reply in Tate's voice (direct, friendly, no corporate fluff, signs off as just 'Tate'). null if no reply needed",
+  "summary": "one sentence: what this email is and what it wants",
+  "autonomousAction": "send_reply|archive|create_task|snooze|ignore",
+  "reasoning": "why this action — include why you can or cannot handle this autonomously",
+  "draftReply": "if autonomousAction is send_reply, write a complete reply in Tate's voice (direct, friendly, no corporate fluff, signs off as 'Tate'). This WILL be sent. null if no reply",
   "shouldCreateTask": true or false,
-  "taskTitle": "task title if shouldCreateTask is true, null otherwise",
-  "taskDescription": "task detail if applicable, null otherwise",
-  "taskPriority": "low|medium|high|urgent (only if shouldCreateTask is true)",
+  "taskTitle": "if creating a task, what is it. null otherwise",
+  "taskDescription": "detail. null otherwise",
+  "taskPriority": "low|medium|high|urgent",
+  "confidence": 0.0 to 1.0,
   "surfaceToHuman": true or false,
-  "surfaceReason": "short reason why this needs Tate's attention (null if surfaceToHuman is false)"
+  "surfaceReason": "only if surfaceToHuman is true — why Tate's personal judgement is required"
 }
 
-surfaceToHuman guide: set true if you think Tate should see this at all. Most emails should be handled silently (archived, auto-replied). Only surface things where his judgement, approval, or personal attention genuinely adds value. You have full freedom to decide — no rigid rules.
+ACTION PHILOSOPHY — read carefully:
+- DEFAULT is to handle it yourself. Archive noise. Send replies. Create tasks. Snooze reminders.
+- send_reply: You are confident in the reply and it WILL be sent automatically. Write it like Tate would. Use knowledge graph context about the sender and relationship.
+- archive: No action needed. Receipts, confirmations, newsletters, automated notifications, marketing.
+- create_task: Something needs doing but not a reply. Create the task with clear title/description and the system handles it.
+- snooze: Repeated signal about something Tate has acknowledged but not yet acted on (billing reminders, renewal notices, etc). Log it, don't nag.
+- ignore: Spam, phishing, irrelevant.
+
+surfaceToHuman: Set true ONLY when the email genuinely requires Tate's personal judgement, approval, or creative input that no system can provide. Examples: a new client asking about a custom project, a legal question, a personal message from someone important. If you CAN handle it — handle it. If the ALREADY PENDING section shows this topic is queued, DO NOT surface again.
+
+confidence: How sure you are about your autonomousAction. Below 0.7, the system will surface to Tate regardless of your surfaceToHuman choice. Be honest — this is a safety net, not a penalty.
 
 Priority guide:
-- urgent: needs response within hours, money/deadline/legal on the line
-- high: needs response today, from a client or important contact
-- normal: should respond eventually, informational
-- low: newsletters, receipts, automated notifications — no action needed
-- spam: marketing, unsolicited outreach, junk`
+- urgent: money/deadline/legal at risk, needs hours-level response
+- high: client or important contact, needs same-day attention
+- normal: should be handled eventually
+- low: informational, no action truly needed
+- spam: junk`
 
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'gmail',

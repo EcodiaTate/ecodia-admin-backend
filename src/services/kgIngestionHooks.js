@@ -67,6 +67,26 @@ Suggested action: ${triageAction}`
   }
 }
 
+async function onEmailSnoozed({ threadId, subject, fromEmail, summary }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Repeated email signal snoozed (auto-handled, not surfaced to human):
+Subject: ${subject}
+From: ${fromEmail}
+Summary: ${summary}
+Action: System archived this as a repeated signal about a known topic. No human attention needed.`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'gmail_snooze',
+      sourceId: threadId,
+      context: 'This email was a repeat notification about something already acknowledged. Record that this topic continues to generate signals — useful for tracking unresolved recurring items.',
+    })
+  } catch (err) {
+    logger.debug('KG snooze ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 // ─── LinkedIn ────────────────────────────────────────────────────────
 
 async function onLinkedInDMProcessed({ dm }) {
@@ -504,6 +524,7 @@ Result: ${result?.message || 'completed'}`
 module.exports = {
   onEmailProcessed,
   onEmailTriaged,
+  onEmailSnoozed,
   onLinkedInDMProcessed,
   onLinkedInProfileProcessed,
   onClientUpdated,
