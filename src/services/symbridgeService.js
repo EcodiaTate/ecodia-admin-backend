@@ -128,6 +128,12 @@ async function send(messageType, payload, correlationId = null) {
     logger.error('Symbridge: message failed ALL 3 layers', { messageType, correlationId })
   }
 
+  // KG ingestion — fire-and-forget
+  const kgHooks = require('./kgIngestionHooks')
+  kgHooks.onSymbridgeMessage({
+    direction: 'outbound', messageType, payload, sourceSystem: 'ecodiaos', correlationId,
+  }).catch(() => {})
+
   return { messageId: message.id, delivered, results }
 }
 
@@ -159,6 +165,13 @@ async function receiveMessage(message) {
 }
 
 async function routeMessage(message) {
+  // KG ingestion for all inbound messages
+  const kgHooks = require('./kgIngestionHooks')
+  kgHooks.onSymbridgeMessage({
+    direction: 'inbound', messageType: message.type, payload: message.payload,
+    sourceSystem: message.source || 'organism', correlationId: message.correlationId,
+  }).catch(() => {})
+
   switch (message.type) {
     case 'proposal':
     case 'simula_proposal': {

@@ -455,6 +455,52 @@ async function onMetaConversationUpdated({ conversation, participantName, platfo
   }
 }
 
+// ─── Symbridge Messages ─────────────────────────────────────────────
+
+async function onSymbridgeMessage({ direction, messageType, payload, sourceSystem, correlationId }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Symbridge message (${direction}):
+Type: ${messageType}
+Source: ${sourceSystem}
+${correlationId ? `Correlation: ${correlationId}` : ''}
+Payload: ${JSON.stringify(payload).slice(0, 1500)}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'symbridge',
+      sourceId: correlationId || null,
+      context: `This is a ${direction} symbridge message between the organism and EcodiaOS. Track communication patterns, proposals, results, and health signals between the two bodies.`,
+    })
+  } catch (err) {
+    logger.debug('KG symbridge ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Action Queue ───────────────────────────────────────────────────
+
+async function onActionExecuted({ action, result }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Action executed:
+Source: ${action.source}
+Type: ${action.action_type}
+Title: ${action.title}
+Summary: ${action.summary || 'N/A'}
+Priority: ${action.priority}
+Result: ${result?.message || 'completed'}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'action_queue',
+      sourceId: action.id,
+      context: 'An action from the unified action queue was approved and executed. Track patterns of what gets approved vs dismissed.',
+    })
+  } catch (err) {
+    logger.debug('KG action queue ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 module.exports = {
   onEmailProcessed,
   onEmailTriaged,
@@ -471,4 +517,6 @@ module.exports = {
   onVercelDeployment,
   onMetaPostCreated,
   onMetaConversationUpdated,
+  onSymbridgeMessage,
+  onActionExecuted,
 }

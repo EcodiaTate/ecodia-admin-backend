@@ -57,6 +57,11 @@ async function execute(actionId) {
     await db`UPDATE action_queue SET status = 'executed', executed_at = now() WHERE id = ${actionId}`
 
     broadcast('action_queue:executed', { id: actionId, result })
+
+    // KG learning signal
+    const kgHooks = require('./kgIngestionHooks')
+    kgHooks.onActionExecuted({ action: item, result }).catch(() => {})
+
     return result
   } catch (err) {
     await db`UPDATE action_queue SET status = 'pending', error_message = ${err.message} WHERE id = ${actionId}`
