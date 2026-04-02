@@ -246,7 +246,7 @@ async function triagePendingConversations() {
       const lastFromCustomer = messages.filter(m => !m.from_page).slice(-1)[0]
       if (!lastFromCustomer) continue // No customer message to triage
 
-      const prompt = `You are managing social media DMs for Ecodia (software development company). A ${conv.platform || 'messenger'} conversation needs triage.
+      const prompt = `Triage this ${conv.platform || 'messenger'} DM for Ecodia (software development company).
 
 Page: ${conv.page_name}
 Participant: ${conv.participant_name || 'Unknown'}
@@ -254,14 +254,16 @@ Participant: ${conv.participant_name || 'Unknown'}
 Recent messages:
 ${messages.map(m => `${m.from_page ? 'Page' : conv.participant_name || 'Customer'}: ${m.text || '(no text)'}`).join('\n')}
 
-Classify and decide what to do. Respond with JSON only:
+What's happening here and what should we do about it?
+
+Respond as JSON:
 {
   "priority": "urgent|high|medium|low|spam",
-  "summary": "one sentence summary",
+  "summary": "what's going on",
   "suggestedAction": "reply|ignore|escalate|create_task",
-  "draftReply": "draft reply if suggestedAction is reply, null otherwise",
-  "surfaceToHuman": true or false,
-  "surfaceReason": "reason to surface (null if not surfacing)"
+  "draftReply": "reply text or null",
+  "surfaceToHuman": true/false,
+  "surfaceReason": "why, or null"
 }`
 
       const raw = await deepseekService.callDeepSeek(

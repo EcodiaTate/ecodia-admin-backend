@@ -29,41 +29,26 @@ async function triageDM(dm, profileContext = null) {
     ? `\nParticipant profile:\n- Name: ${profileContext.name}\n- Headline: ${profileContext.headline || 'Unknown'}\n- Company: ${profileContext.company || 'Unknown'}\n- Location: ${profileContext.location || 'Unknown'}\n- Connection degree: ${profileContext.connection_degree || 'Unknown'}\n- Mutual connections: ${profileContext.mutual_connections || 0}`
     : ''
 
-  const prompt = `You are Tate Donohoe's LinkedIn DM assistant. Tate is a 21-year-old software developer running Ecodia Pty Ltd in Australia. He builds custom software for impact-focused organisations (nonprofits, conservation, government, health).
-
-Analyse this LinkedIn DM conversation and classify it.${profileInfo}
+  const prompt = `Triage this LinkedIn DM for Tate Donohoe (21, runs Ecodia Pty Ltd — custom software for impact orgs in Australia).${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText || '(no messages scraped)'}
 
-Be aggressive about identifying business opportunities. Tate wants to know immediately if someone might become a client. Filter noise (recruiters, generic networking, spam) efficiently.
+What's happening in this conversation? Who is this person, what do they want, and what should Tate do about it? If they look like a potential client, flag it. If it's noise, say so.
 
-Respond with JSON only:
+If you suggest a reply, write it as Tate would — direct, friendly, conversational LinkedIn tone.
+
+Respond as JSON:
 {
   "category": "lead|networking|recruiter|spam|support|personal",
   "priority": "urgent|high|normal|low|spam",
-  "summary": "one concise sentence about what this conversation is about and what they want",
-  "leadScore": 0.0 to 1.0 (how likely this person is a potential client, 0 = definitely not, 1 = definitely yes),
-  "leadSignals": ["signal1", "signal2"] or [] if no lead signals detected,
+  "summary": "what this conversation is about",
+  "leadScore": 0.0-1.0,
+  "leadSignals": [] or ["signal1", ...],
   "suggestedAction": "reply|archive|ignore|create_lead",
-  "draftReply": "if suggestedAction is reply, write a natural DM reply in Tate's voice (direct, friendly, conversational LinkedIn tone, no corporate fluff). null if no reply needed",
-  "reasoning": "brief explanation of classification"
-}
-
-Category guide:
-- lead: mentions project needs, software development, wants to build something, asks about pricing/availability
-- networking: industry peer, fellow founder, genuine professional connection
-- recruiter: recruiting, hiring, job opportunity
-- spam: sales pitch, mass outreach, irrelevant marketing
-- support: existing client or project-related follow-up
-- personal: friend, casual, non-business
-
-Priority guide:
-- urgent: active buying signal, mentions budget/timeline, warm referral
-- high: potential lead, interesting connection in target industry
-- normal: general networking, informational
-- low: recruiter, vague connection
-- spam: obvious spam/sales pitch`
+  "draftReply": "reply text or null",
+  "reasoning": "why"
+}`
 
   const result = await callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
   return parseJSON(result)
@@ -74,32 +59,22 @@ Priority guide:
 // ═══════════════════════════════════════════════════════════════════════
 
 async function scoreConnectionRequest(request) {
-  const prompt = `You are evaluating a LinkedIn connection request for Tate Donohoe, founder of Ecodia Pty Ltd (custom software development for impact organisations in Australia).
+  const prompt = `LinkedIn connection request for Tate Donohoe (Ecodia Pty Ltd — custom software for impact orgs, Australia).
 
-Connection request from:
-- Name: ${request.name}
-- Headline: ${request.headline || 'Unknown'}
-- Message: ${request.message || '(no message)'}
-- Mutual connections: ${request.mutualConnections || 0}
+From: ${request.name}
+Headline: ${request.headline || 'Unknown'}
+Message: ${request.message || '(no message)'}
+Mutual connections: ${request.mutualConnections || 0}
 
-Score this connection request's relevance to Tate's business. Tate's ideal connections are:
-- Decision-makers at nonprofits, conservation orgs, government, health orgs
-- Founders/CTOs of complementary businesses
-- People in the Australian tech/impact ecosystem
-- Potential clients who might need custom software
+Is this person worth connecting with? Tate builds software for nonprofits, conservation, government, and health orgs.
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "relevanceScore": 0.0 to 1.0,
+  "relevanceScore": 0.0-1.0,
   "recommendation": "accept|decline|review",
   "category": "potential_client|industry_peer|recruiter|random|influencer|complementary_business",
-  "reasoning": "brief explanation"
-}
-
-Recommendation guide:
-- accept: clearly relevant (score > 0.6), potential client, strong industry peer
-- review: ambiguous, could be useful but not obviously so (score 0.3-0.6)
-- decline: irrelevant, recruiter, random (score < 0.3)`
+  "reasoning": "why"
+}`
 
   const result = await callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
   return parseJSON(result)
@@ -124,26 +99,23 @@ async function generatePostContent(theme, context = {}) {
     ? '\nFormat one variation as a LinkedIn poll with a question and 4 options.'
     : ''
 
-  const prompt = `You are a LinkedIn content strategist for Tate Donohoe, a 21-year-old Australian software developer who runs Ecodia Pty Ltd. Ecodia builds custom software for impact-focused organisations (nonprofits, conservation, government, health).
+  const prompt = `Write LinkedIn post variations for Tate Donohoe (21, founder of Ecodia Pty Ltd — builds custom software for impact orgs: nonprofits, conservation, government, health. Based in Australia).
 
-Tate's LinkedIn voice: authentic, direct, occasionally technical, always approachable. He shares real experiences building software for good causes. No corporate jargon, no "I'm pleased to announce" energy. Think founder who codes and genuinely cares about impact.
+Tate's voice: authentic, direct, no corporate jargon. He codes and genuinely cares about impact.
 
-Theme/topic: ${theme}${examplesSection}${trendingSection}${typeInstruction}
+Theme: ${theme}${examplesSection}${trendingSection}${typeInstruction}
 
-Generate 3 LinkedIn post variations. Each should be different in angle/tone:
-1. Story/experience-driven (personal, relatable)
-2. Insight/educational (teaches something)
-3. Conversation-starter (asks a question, invites engagement)
+Write 3 variations — different angles, different energies. Surprise yourself. 800-1500 chars each for best engagement.
 
-Respond with JSON only:
+Respond as JSON:
 {
   "variations": [
     {
-      "angle": "story|insight|conversation",
-      "content": "the full post text (aim for 800-1500 characters for best engagement)",
+      "angle": "what approach this takes",
+      "content": "full post text",
       "hashtags": ["#tag1", "#tag2", "#tag3"],
       "characterCount": 1234,
-      "hookLine": "the first line (most important for engagement)"
+      "hookLine": "the first line"
     }
   ]
 }`
@@ -164,35 +136,23 @@ async function analyzeLeadSignals(dm, profileContext = null) {
     ? `\nProfile: ${profileContext.name} — ${profileContext.headline || 'Unknown'} at ${profileContext.company || 'Unknown'}`
     : ''
 
-  const prompt = `Analyse this LinkedIn DM conversation for buying signals. Tate Donohoe runs Ecodia Pty Ltd, building custom software for impact organisations.${profileInfo}
+  const prompt = `Analyse this LinkedIn DM for buying signals. Tate runs Ecodia Pty Ltd (custom software for impact orgs).${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText}
 
-Look for:
-- Explicit mentions of needing software/website/app built
-- Pain points that custom software could solve
-- Budget/funding mentions
-- Timeline or deadline references
-- Requests for proposals, quotes, or meetings
-- Referrals from existing clients
-- Decision-maker language ("we need", "our team wants")
+Is this person a potential client? What signals do you see — project needs, pain points, budget mentions, timeline pressure, referrals, decision-maker language? What should Tate do next?
 
-Respond with JSON only:
+Respond as JSON:
 {
   "isLead": true/false,
-  "leadScore": 0.0 to 1.0,
+  "leadScore": 0.0-1.0,
   "signals": [
-    { "type": "project_need|budget|timeline|referral|pain_point|meeting_request", "evidence": "exact quote or paraphrase from conversation", "strength": "strong|moderate|weak" }
+    { "type": "project_need|budget|timeline|referral|pain_point|meeting_request", "evidence": "quote or paraphrase", "strength": "strong|moderate|weak" }
   ],
   "suggestedCRMAction": "create_lead|update_existing|none",
-  "suggestedClientData": {
-    "name": "contact name",
-    "company": "company name or null",
-    "stage": "lead",
-    "notes": "summary of opportunity"
-  } or null,
-  "nextStep": "what Tate should do next (specific, actionable)"
+  "suggestedClientData": { "name": "...", "company": "...", "stage": "lead", "notes": "..." } or null,
+  "nextStep": "what Tate should do next"
 }`
 
   const result = await callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
@@ -212,26 +172,21 @@ async function suggestOptimalPostTime(historicalData) {
     reactions: p.reactions,
   }))
 
-  const prompt = `Analyse these LinkedIn post performance metrics for Tate Donohoe (Australian timezone, AEST/UTC+10) and suggest the best times to post.
+  const prompt = `When should Tate post on LinkedIn? He's in Australia (AEST/UTC+10), audience is mostly AU-based.
 
 Historical post data:
 ${JSON.stringify(postSummary, null, 2)}
 
-Consider:
-- LinkedIn's general best practices (Tuesday-Thursday, 8-10am, 12pm, 5-6pm)
-- Tate's actual data — which days/times got the best engagement
-- Australian business hours (most of his audience is AU-based)
-- Avoid weekends and late nights
+What patterns do you see? What's the data actually saying?
 
-Respond with JSON only:
+Respond as JSON:
 {
   "suggestedSlots": [
-    { "day": "Tuesday", "time": "09:00", "reason": "brief reason" },
-    { "day": "Thursday", "time": "12:00", "reason": "brief reason" }
+    { "day": "Tuesday", "time": "09:00", "reason": "why" }
   ],
-  "bestDay": "day of week with historically best engagement",
+  "bestDay": "day with best engagement historically",
   "bestTimeRange": "e.g. 8:00-10:00 AEST",
-  "insight": "one sentence about the data pattern"
+  "insight": "what you noticed in the data"
 }`
 
   const result = await callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
@@ -250,17 +205,14 @@ async function draftDMReply(dm, profileContext = null) {
     ? `\nAbout ${dm.participant_name}: ${profileContext.headline || 'Unknown role'} at ${profileContext.company || 'Unknown company'}. ${profileContext.connection_degree || ''} connection.`
     : ''
 
-  const prompt = `Draft a LinkedIn DM reply for Tate Donohoe, founder of Ecodia Pty Ltd (custom software for impact organisations, based in Australia).${profileInfo}
+  const prompt = `Draft a LinkedIn DM reply for Tate Donohoe (Ecodia Pty Ltd, custom software for impact orgs, Australia).${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText}
 
-Write a brief, friendly, professional reply. Keep it conversational for LinkedIn — not too formal, not too casual. Tate's style: direct, genuine, no fluff.
+${dm.category === 'lead' ? 'This looks like a potential client.' : ''}${dm.category === 'recruiter' ? 'Tate runs his own company — not looking for employment.' : ''}
 
-${dm.category === 'lead' ? 'This is a potential lead — be warm, show interest, ask clarifying questions about their needs.' : ''}
-${dm.category === 'recruiter' ? 'Politely decline — Tate runs his own company and is not looking for employment.' : ''}
-
-Return ONLY the reply text, no JSON wrapping.`
+Write as Tate would on LinkedIn — direct, genuine, conversational. Return only the reply text.`
 
   return callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
 }
@@ -270,19 +222,12 @@ Return ONLY the reply text, no JSON wrapping.`
 // ═══════════════════════════════════════════════════════════════════════
 
 async function suggestEngagementComment(postSnippet, authorName, authorHeadline) {
-  const prompt = `Write a thoughtful LinkedIn comment for Tate Donohoe (founder of Ecodia, software dev for impact orgs) to post on someone else's content.
+  const prompt = `Write a LinkedIn comment from Tate Donohoe (Ecodia, software dev for impact orgs) on this post.
 
 Post by ${authorName} (${authorHeadline || 'Unknown'}):
 "${postSnippet}"
 
-The comment should:
-- Add genuine value (share a related experience, ask a smart question, or add a perspective)
-- Sound authentically human (not AI-generated)
-- Be 1-3 sentences max
-- Reference something specific from the post
-- NOT be generic ("Great post!", "Thanks for sharing!")
-
-Return ONLY the comment text.`
+Add something real — a perspective, a question, a related experience. 1-3 sentences. Reference something specific from the post. Return only the comment text.`
 
   return callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
 }

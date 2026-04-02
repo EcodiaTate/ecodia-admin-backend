@@ -41,6 +41,7 @@ async function callDeepSeek(messages, {
   skipRetrieval = false,     // skip KG retrieval (for KG ingestion calls to avoid loops)
   skipLogging = false,       // skip KG logging (for KG ingestion calls)
   sourceId = null,           // source entity ID for KG logging
+  temperature = null,        // override temperature (default 0.3, cortex uses higher)
 } = {}) {
   const start = Date.now()
   const { kg } = getKG()
@@ -65,11 +66,8 @@ async function callDeepSeek(messages, {
   // ─── 2. INJECT: Add context as system message ──────────────────────
   let enrichedMessages = [...messages]
   if (kgContext) {
-    const systemContext = `--- ECODIA KNOWLEDGE GRAPH ---
-The following is contextual knowledge from Ecodia's world model. This represents what the system knows about relevant people, organisations, projects, events, and topics. Use this to inform your response — understand relationships, history, and context.
-
+    const systemContext = `--- KNOWLEDGE GRAPH ---
 ${kgContext}
-
 --- END KNOWLEDGE GRAPH ---`
 
     // Prepend as system message, or append to existing system message
@@ -89,7 +87,7 @@ ${kgContext}
   // ─── 3. EXECUTE: Call DeepSeek ─────────────────────────────────────
   const response = await axios.post(
     DEEPSEEK_API_URL,
-    { model, messages: enrichedMessages, temperature: 0.3 },
+    { model, messages: enrichedMessages, temperature: temperature ?? 0.3 },
     { headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' } }
   )
 
@@ -140,19 +138,18 @@ function parseJSON(content) {
 }
 
 async function categorize({ description, amount, type, date }) {
-  const prompt = `You are an Australian business bookkeeper. Categorize this transaction for Ecodia Pty Ltd, a software development company.
+  const prompt = `Categorize this transaction for Ecodia Pty Ltd (Australian software dev company).
 
-Transaction:
-- Description: ${description}
-- Amount: AUD ${Math.abs(amount)} (${type})
-- Date: ${date}
+${description} — AUD ${Math.abs(amount)} (${type}) on ${date}
 
-Respond with JSON only:
+Categories: Software Subscriptions, Cloud Infrastructure, Contractor Payments, Office/Admin, Marketing, Travel, Meals/Entertainment, Legal/Accounting, Income - Software Dev, Income - Consulting, Tax, Superannuation, Bank Fees, Other
+
+Respond as JSON:
 {
-  "category": "one of: Software Subscriptions, Cloud Infrastructure, Contractor Payments, Office/Admin, Marketing, Travel, Meals/Entertainment, Legal/Accounting, Income - Software Dev, Income - Consulting, Tax, Superannuation, Bank Fees, Other",
+  "category": "...",
   "confidence": 0.0-1.0,
-  "xeroAccountCode": "relevant Xero account code if known",
-  "notes": "brief rationale"
+  "xeroAccountCode": "if known, null otherwise",
+  "notes": "rationale"
 }`
 
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {
@@ -175,10 +172,9 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
     ? `\n--- ALREADY PENDING IN ACTION QUEUE ---\nThe following items from this sender are ALREADY queued and waiting for Tate's attention:\n${pendingActionsContext}\n\nIMPORTANT: If this email is about the same topic as an already-pending item, do NOT surface it again. Set surfaceToHuman to false and suggestedAction to "archive". The action queue will consolidate the signal automatically. Only surface if this email introduces genuinely NEW information or a different topic.\n--- END PENDING ---\n`
     : ''
 
-  const prompt = `You are the autonomous email handler for Ecodia Pty Ltd (Tate Donohoe, 21, software dev, Australia). Your job is to HANDLE emails — not alert about them. Act first, surface to Tate only as a last resort.
+  const prompt = `You are the autonomous email handler for Ecodia Pty Ltd (Tate Donohoe, 21, software dev, Australia). You handle emails — archive noise, reply when you can, create tasks when something needs doing, surface to Tate only when his personal judgment is genuinely needed.
 
-This email arrived in the ${inbox || 'code@ecodia.au'} inbox.
-
+Inbox: ${inbox || 'code@ecodia.au'}
 From: ${from}
 Subject: ${subject}
 ${contextBlock}${pendingBlock}
@@ -186,42 +182,23 @@ ${contextBlock}${pendingBlock}
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 
-Your job is to decide what the system should DO about this email. Not what to tell Tate about it. ACT, don't alert. USE the knowledge graph context to inform your decisions.
+Decide what to do. If you can handle it, handle it. If you write a draftReply, it will be sent automatically — write it as Tate would (direct, friendly, signs off as "Tate"). Confidence below 0.7 auto-surfaces to Tate regardless of your surfaceToHuman choice.
 
-Respond with JSON only:
+Respond as JSON:
 {
   "priority": "urgent|high|normal|low|spam",
-  "summary": "one sentence: what this email is and what it wants",
+  "summary": "what this email is and what it wants",
   "autonomousAction": "send_reply|archive|create_task|snooze|ignore",
-  "reasoning": "why this action — include why you can or cannot handle this autonomously",
-  "draftReply": "if autonomousAction is send_reply, write a complete reply in Tate's voice (direct, friendly, no corporate fluff, signs off as 'Tate'). This WILL be sent. null if no reply",
-  "shouldCreateTask": true or false,
-  "taskTitle": "if creating a task, what is it. null otherwise",
-  "taskDescription": "detail. null otherwise",
+  "reasoning": "why this action",
+  "draftReply": "complete reply if sending, null otherwise",
+  "shouldCreateTask": true/false,
+  "taskTitle": "if creating task, null otherwise",
+  "taskDescription": "if creating task, null otherwise",
   "taskPriority": "low|medium|high|urgent",
-  "confidence": 0.0 to 1.0,
-  "surfaceToHuman": true or false,
-  "surfaceReason": "only if surfaceToHuman is true — why Tate's personal judgement is required"
-}
-
-ACTION PHILOSOPHY — read carefully:
-- DEFAULT is to handle it yourself. Archive noise. Send replies. Create tasks. Snooze reminders.
-- send_reply: You are confident in the reply and it WILL be sent automatically. Write it like Tate would. Use knowledge graph context about the sender and relationship.
-- archive: No action needed. Receipts, confirmations, newsletters, automated notifications, marketing.
-- create_task: Something needs doing but not a reply. Create the task with clear title/description and the system handles it.
-- snooze: Repeated signal about something Tate has acknowledged but not yet acted on (billing reminders, renewal notices, etc). Log it, don't nag.
-- ignore: Spam, phishing, irrelevant.
-
-surfaceToHuman: Set true ONLY when the email genuinely requires Tate's personal judgement, approval, or creative input that no system can provide. Examples: a new client asking about a custom project, a legal question, a personal message from someone important. If you CAN handle it — handle it. If the ALREADY PENDING section shows this topic is queued, DO NOT surface again.
-
-confidence: How sure you are about your autonomousAction. Below 0.7, the system will surface to Tate regardless of your surfaceToHuman choice. Be honest — this is a safety net, not a penalty.
-
-Priority guide:
-- urgent: money/deadline/legal at risk, needs hours-level response
-- high: client or important contact, needs same-day attention
-- normal: should be handled eventually
-- low: informational, no action truly needed
-- spam: junk`
+  "confidence": 0.0-1.0,
+  "surfaceToHuman": true/false,
+  "surfaceReason": "why Tate's judgment is needed, null otherwise"
+}`
 
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'gmail',

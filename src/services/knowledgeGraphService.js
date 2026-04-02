@@ -68,19 +68,19 @@ async function ingestFromLLM(content, { sourceModule, sourceId, context = '' }) 
     return
   }
 
-  const prompt = `You are a knowledge graph builder. Extract entities and relationships from the following content and return them as structured data.
+  const prompt = `Extract a knowledge graph from this content.
 
-Content source: ${sourceModule}
-${context ? `Additional context: ${context}` : ''}
+Source: ${sourceModule}
+${context ? `Context: ${context}` : ''}
 
 Content:
 ${content.slice(0, 3000)}
 
-Extract ALL meaningful entities (people, organisations, projects, concepts, events, locations, topics, decisions, problems, tools, etc.) and ALL relationships between them. Be thorough — capture causal chains, temporal sequences, and implicit connections.
+Pull out every meaningful entity and every relationship between them — people, orgs, projects, concepts, events, decisions, problems, tools. Capture causal chains, temporal sequences, and implicit connections.
 
-For relationships, use descriptive verbs that capture the TRUE nature of the connection — not generic labels. Good: "IS_PIVOTING_TOWARDS", "BLOCKED_BY", "PROPOSED_DURING", "FRUSTRATED_WITH". Bad: "RELATED_TO", "CONNECTED_TO".
+Relationship types matter: use descriptive verbs that capture what's actually happening. "IS_PIVOTING_TOWARDS", "BLOCKED_BY", "FRUSTRATED_WITH" — not "RELATED_TO". Capture sentiment and intent when present. Include temporal context in properties when available.
 
-Respond with JSON only:
+Respond as JSON:
 {
   "nodes": [
     {"label": "Person", "name": "Tom Grote", "properties": {"role": "co-founder", "company": "Goodreach"}},
@@ -90,16 +90,7 @@ Respond with JSON only:
     {"from_label": "Person", "from_name": "Tom Grote", "rel_type": "PROPOSED", "to_label": "Concept", "to_name": "AI consultant model", "properties": {"context": "during strategy session", "when": "Mar 31 2026"}},
     {"from_label": "Concept", "from_name": "AI consultant model", "rel_type": "REPLACES", "to_label": "Concept", "to_name": "SaaS platform model", "properties": {"reason": "NFPs can't afford subscription pricing"}}
   ]
-}
-
-Rules:
-- Use specific, descriptive relationship types (verbs in SCREAMING_SNAKE_CASE)
-- Include temporal context in relationship properties when available
-- Extract implicit relationships (if someone works at a company, that's a relationship even if not explicitly stated)
-- Capture sentiment and intent when present ("FRUSTRATED_WITH", "EXCITED_ABOUT", "CONSIDERING")
-- Every person should have their role/title if known
-- Organisations should have industry/domain if inferable
-- Don't create generic/useless nodes — every node should carry meaning`
+}`
 
   try {
     const deepseekService = require('./deepseekService')

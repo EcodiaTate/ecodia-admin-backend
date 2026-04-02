@@ -129,22 +129,17 @@ async function dispatchFromCRM({ clientId, previousStage, newStage, clientName }
     const { callDeepSeek } = require('./deepseekService')
     const response = await callDeepSeek([{
       role: 'user',
-      content: `A CRM client just moved from "${previousStage}" to "${newStage}".
-Client: ${clientName || 'Unknown'}
+      content: `CRM client "${clientName || 'Unknown'}" moved from "${previousStage}" to "${newStage}".
 Project: ${project?.name || 'No active project'}
-Project description: ${project?.description || 'N/A'}
+${project?.description ? `Description: ${project.description}` : ''}
 
-Should this stage transition trigger an autonomous code session? Consider:
-- "development" stage might need scaffolding/setup
-- "live" stage might need deployment verification
-- "archived" stage might need cleanup
-- Other transitions might need documentation, testing, or nothing at all
+Does this stage transition warrant an autonomous code session?
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "shouldTrigger": true or false,
-  "prompt": "the task description for the CC session if shouldTrigger is true, null otherwise",
-  "reasoning": "brief explanation"
+  "shouldTrigger": true/false,
+  "prompt": "task description for the CC session if triggering, null otherwise",
+  "reasoning": "why"
 }`
     }], { module: 'factory_dispatch', skipRetrieval: true })
 

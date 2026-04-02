@@ -79,12 +79,11 @@ router.get('/briefing', async (req, res, next) => {
     const briefing = await deepseekService.callDeepSeek([
       {
         role: 'user',
-        content: `You are the intelligence layer of Ecodia OS — Tate Donohoe's personal operating system. Based on the following knowledge graph context, write a concise briefing about "${q}".
+        content: `Tate wants to know everything relevant about "${q}". Here's what the knowledge graph has:
 
-Write in present tense, direct prose. No bullet points, no headers. Just a fluid paragraph or two that tells Tate everything he needs to know, like a trusted advisor whispering context before a meeting. Include specific details — names, dates, decisions, status. Skip anything irrelevant.
+${context.summary}
 
-Knowledge graph context:
-${context.summary}`
+Write a briefing. Present tense, direct prose, specific details — names, dates, decisions, status. Whatever he needs to know.`
       }
     ], { module: 'cortex', skipRetrieval: true, skipLogging: true })
 

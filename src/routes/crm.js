@@ -196,17 +196,16 @@ router.patch('/clients/:id/stage', validate(stageSchema), async (req, res, next)
       try {
         const response = await deepseekService.callDeepSeek([{
           role: 'user',
-          content: `CRM client "${fullClient?.name || 'Unknown'}" just moved from "${fromStage}" to "${toStage}".
-${req.body.note ? `Note: ${req.body.note}` : ''}
+          content: `"${fullClient?.name || 'Unknown'}" moved from "${fromStage}" to "${toStage}".${req.body.note ? `\nNote: ${req.body.note}` : ''}
 
-Should any follow-up action be surfaced to the human? Examples: send a congratulations email, schedule a kickoff call, update project documentation, send an invoice, etc.
+Is there a follow-up action worth surfacing?
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "shouldSurface": true or false,
-  "actionType": "create_task" or "schedule_meeting" or "send_email" or "follow_up",
-  "title": "short action title",
-  "summary": "what needs to happen and why",
+  "shouldSurface": true/false,
+  "actionType": "create_task|schedule_meeting|send_email|follow_up",
+  "title": "action title",
+  "summary": "what and why",
   "priority": "low|medium|high"
 }`
         }], { module: 'crm', skipRetrieval: true })

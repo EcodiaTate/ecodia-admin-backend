@@ -144,6 +144,24 @@ async function checkOrganismHealth() {
         VALUES ('symbiont_down', 'CRITICAL: Organism is unresponsive',
                 ${JSON.stringify({ failures: organismHealthState.consecutiveFailures, lastError: err.message })})
       `.catch(() => {})
+
+      // Dispatch Factory investigation — diagnose and fix whatever crashed the organism
+      try {
+        const factoryTrigger = require('./factoryTriggerService')
+        factoryTrigger.dispatchFromThymos({
+          severity: 'critical',
+          affected_system: 'organism',
+          codebase_name: 'organism',
+          error_message: `Organism unresponsive after ${MAX_CONSECUTIVE_FAILURES} consecutive health check failures. Last error: ${err.message}`,
+          description: 'Organism process is down or not responding to health checks on port 8000. Investigate via pm2 logs, check for runtime errors (uncaught exceptions, missing awaits on coroutines, import failures), and restart or fix as needed.',
+          stack_trace: '',
+          id: `symbiont_down_${Date.now()}`,
+        }).catch(dispatchErr => {
+          logger.warn('Failed to dispatch Factory investigation for SYMBIONT DOWN', { error: dispatchErr.message })
+        })
+      } catch (triggerErr) {
+        logger.warn('Factory trigger not available for SYMBIONT DOWN', { error: triggerErr.message })
+      }
     }
 
     if (organismHealthState.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {

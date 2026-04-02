@@ -205,15 +205,17 @@ async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `You are a knowledge graph analyst. A node "${hubName}" has ${targets.length} "${relType}" relationships pointing to: ${targets.join(', ')}.
+        content: `"${hubName}" has ${targets.length} "${relType}" relationships: ${targets.join(', ')}.
 
-What higher-order pattern, theme, or strategic direction does this cluster represent? Respond with JSON only:
+What higher-order pattern or strategic direction does this cluster represent?
+
+Respond as JSON:
 {
-  "theme_name": "concise name for the pattern (5 words max)",
+  "theme_name": "name for the pattern",
   "theme_label": "Strategic_Direction|Recurring_Pattern|Emerging_Trend|Decision_Pattern|Behavioral_Pattern",
-  "description": "one sentence explaining what this pattern means",
+  "description": "one sentence",
   "confidence": 0.0-1.0,
-  "causal_insight": "what this pattern suggests about future direction or underlying motivation"
+  "causal_insight": "what this pattern suggests about direction or motivation"
 }`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
@@ -273,11 +275,13 @@ What higher-order pattern, theme, or strategic direction does this cluster repre
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `Two entities "${nameA}" and "${nameB}" share ${sharedNames.length} connections: ${sharedNames.join(', ')}.
+        content: `"${nameA}" and "${nameB}" share ${sharedNames.length} connections: ${sharedNames.join(', ')}.
 
-What is the nature of the relationship between these two entities, given their shared connections? Respond with JSON only:
+What's the relationship between them, given what they share?
+
+Respond as JSON:
 {
-  "relationship_type": "SCREAMING_SNAKE_CASE verb describing the relationship",
+  "relationship_type": "SCREAMING_SNAKE_CASE verb",
   "description": "one sentence",
   "confidence": 0.0-1.0
 }`
@@ -355,16 +359,16 @@ async function threadCausalChains({ dryRun = false, maxChains = 10 } = {}) {
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `In a knowledge graph, "${earlier}" occurred before "${later}", connected through "${via}".
+        content: `"${earlier}" occurred before "${later}", connected through "${via}".
 
-Is there a DIRECT causal or evolutionary relationship? Respond with JSON only:
+Is there a direct causal or evolutionary relationship, or just temporal proximity? Only assert causality if you can explain the specific mechanism. If in doubt, return null.
+
+Respond as JSON:
 {
   "relationship": "CAUSED|PRECEDED|EVOLVED_INTO|LED_TO|ENABLED|BLOCKED|null",
-  "description": "one sentence explaining the specific causal mechanism",
+  "description": "the specific mechanism, or why there isn't one",
   "confidence": 0.0-1.0
-}
-
-IMPORTANT: Most things that happen near each other are NOT causally related. Just because two things involve the same person or happened around the same time does NOT mean one caused or enabled the other. If the connection is coincidental, temporal, or you're not sure — return null. Only assert causality when you can explain the specific mechanism by which A influenced B.`
+}`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
@@ -476,30 +480,23 @@ async function validateInferredEdges({ dryRun = false, batchSize = 15 } = {}) {
     const deepseekService = require('./deepseekService')
     const response = await deepseekService.callDeepSeek([{
       role: 'user',
-      content: `You are auditing a knowledge graph for factual accuracy. These relationships were INFERRED by an AI system. Some may be wrong — the system sometimes forces connections that don't actually exist.
-
-For each relationship, you have the full neighborhood context of both nodes (their REAL, non-inferred connections). Judge whether the inferred relationship makes logical sense given what we actually know.
+      content: `These AI-inferred relationships need validation. Some are wrong. For each one, you have the full neighborhood context of both nodes — use it to judge whether the relationship actually holds.
 
 ${edgeDescriptions}
 
-For each numbered relationship, respond with JSON only:
+Be strict about strong claims like CAUSED or LED_TO. If the evidence only supports proximity or shared domain, downgrade it.
+
+For each numbered relationship, respond as JSON:
 {
   "verdicts": [
     {
       "id": 1,
       "action": "keep|downgrade|kill",
       "reason": "one sentence",
-      "downgrade_to": "SOFTER_REL_TYPE (only if action is downgrade, e.g. BOTH_RELATE_TO_SOFTWARE, SHARE_DOMAIN, LOOSELY_CONNECTED)"
+      "downgrade_to": "SOFTER_REL_TYPE if downgrading (e.g. SHARE_CONTEXT, SHARE_DOMAIN), null otherwise"
     }
   ]
-}
-
-Actions:
-- "keep" — the relationship is factually sound and well-supported
-- "downgrade" — there IS a connection, but the current relationship type overstates it. Replace with a softer, more abstract relationship (e.g. CAUSED -> SHARE_CONTEXT, LED_TO -> LOOSELY_RELATED, COLLABORATED_ON -> SHARE_DOMAIN)
-- "kill" — there is no meaningful connection. The inference was wrong. Delete it.
-
-Be STRICT about specificity. "A CAUSED B" is a strong claim — if it's more like "A and B both happened in the same domain", downgrade it. Only keep strong causal/direct relationships when the evidence genuinely supports them.`
+}`
     }], { module: 'kg_validation', skipRetrieval: true, skipLogging: true })
 
     const parsed = parseJSON(response)
@@ -619,27 +616,21 @@ async function detectContradictions({ dryRun = false, maxPairs = 8 } = {}) {
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `In a knowledge graph, two nodes share context through: ${sharedContext.join(', ')}.
+        content: `Two nodes share context: ${sharedContext.join(', ')}.
 
-Node A: "${nameA}" ${descA ? `— ${descA}` : ''}
-Node B: "${nameB}" ${descB ? `— ${descB}` : ''}
+"${nameA}"${descA ? ` — ${descA}` : ''}
+"${nameB}"${descB ? ` — ${descB}` : ''}
 
-Do these represent contradictory or conflicting positions/facts? Consider:
-- Direct contradiction (X says yes, Y says no)
-- Strategic pivot (old approach replaced by new one)
-- Evolved understanding (initial assumption corrected by later evidence)
-- Compatible but different (not actually contradicting)
+Do these contradict each other — a direct conflict, a pivot, an evolved position? Or are they just different things that happen to overlap?
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "contradicts": true|false,
+  "contradicts": true/false,
   "relationship": "CONTRADICTS|SUPERSEDES|REFINES|null",
   "direction": "a_supersedes_b|b_supersedes_a|mutual|null",
-  "description": "one sentence explaining the conflict or why they don't conflict",
+  "description": "one sentence",
   "confidence": 0.0-1.0
-}
-
-If they don't contradict, set contradicts to false and relationship to null.`
+}`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
@@ -725,18 +716,18 @@ async function synthesizeNarratives({ dryRun = false, maxNarratives = 5 } = {}) 
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `You are writing the story of "${name}" (${labels.join(', ')}) based purely on knowledge graph data. Here are all known connections:
+        content: `Here's everything the knowledge graph knows about "${name}" (${labels.join(', ')}):
 
 ${neighborhood}
 
-Synthesize a narrative arc in 3-5 sentences. Write in present tense, direct prose. Cover: who they are, what they're involved in, how their involvement has evolved, and what the current trajectory suggests. This should read like a briefing, not a biography.
+Write the story. Present tense, direct. Who are they, what are they involved in, where is it going? What questions does the data raise but not answer?
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "narrative": "the 3-5 sentence narrative arc",
+  "narrative": "the arc, 3-5 sentences",
   "trajectory": "ascending|stable|pivoting|stalling|uncertain",
   "key_themes": ["theme1", "theme2", "theme3"],
-  "open_questions": ["unanswered question the data implies but doesn't resolve"]
+  "open_questions": ["question the data implies but doesn't resolve"]
 }`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
@@ -831,31 +822,24 @@ async function generatePredictions({ dryRun = false, maxPredictions = 5 } = {}) 
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `Based on this person's recent activity pattern in a knowledge graph:
-
-Person: "${personName}"
-Recent timeline (most recent first):
+        content: `Recent activity for "${personName}" (most recent first):
 ${timelineText}
 
-What is likely to happen next? Look for:
-- Repeated patterns (they always follow up after meetings)
-- Unresolved threads (started something, no completion node)
-- Escalation patterns (small → medium → large commitments)
-- Stalling patterns (activity drops off after a certain stage)
+What's likely to happen next? Look for patterns — repeated behaviors, unresolved threads, escalation arcs, things that started but have no completion.
 
-Respond with JSON only:
+Respond as JSON:
 {
   "predictions": [
     {
-      "prediction": "one sentence describing what's likely to happen",
+      "prediction": "what's likely to happen",
       "timeframe": "days|weeks|months",
       "confidence": 0.0-1.0,
-      "basis": "which pattern elements support this"
+      "basis": "what in the pattern supports this"
     }
   ]
 }
 
-Include 1-3 predictions. Only include predictions with confidence >= 0.5.`
+1-3 predictions, confidence >= 0.5 only.`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
@@ -1067,14 +1051,16 @@ async function buildEpisodes({ dryRun = false, maxEpisodes = 10 } = {}) {
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `These ${nodes.length} entities were all ingested from "${source}" around the same time:
+        content: `These ${nodes.length} entities came from "${source}" around the same time:
 ${nodeNames}
 
-What event, session, or activity does this cluster represent? Respond with JSON only:
+What happened here? What event, session, or activity does this cluster represent?
+
+Respond as JSON:
 {
-  "episode_name": "concise name (e.g., 'Email triage batch', 'Tom strategy session', 'LinkedIn DM round')",
+  "episode_name": "concise name",
   "episode_type": "email_batch|meeting|conversation|research|transaction_batch|other",
-  "summary": "one sentence describing what happened in this episode"
+  "summary": "one sentence"
 }`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
@@ -1249,32 +1235,27 @@ async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
       const deepseekService = require('./deepseekService')
       const response = await deepseekService.callDeepSeek([{
         role: 'user',
-        content: `You are analyzing a knowledge graph. These nodes are semantically similar (close in embedding space) but have NO existing relationship between them:
+        content: `These nodes are semantically similar but have no existing relationships:
 
 ${clusterNames.join('\n')}
 
-Look at these entities freely. Is there a meaningful connection, pattern, or insight that explains why they cluster together? Think creatively:
-- Hidden thematic connections
-- Shared underlying cause or motivation
-- Part of the same larger trend
-- One could inform or impact the other
-- Surprising juxtaposition that reveals something
+What do you see? Hidden connections, shared motivations, converging trends, surprising juxtapositions — anything real. Don't force it if there's nothing there.
 
-Respond with JSON only:
+Respond as JSON:
 {
   "discoveries": [
     {
       "type": "relationship|insight|pattern",
-      "description": "one sentence describing what you found",
+      "description": "what you found",
       "confidence": 0.0-1.0,
       "nodes_involved": ["node1", "node2"],
-      "relationship_type": "SCREAMING_SNAKE_CASE (only if type is relationship, null otherwise)",
-      "insight_text": "the insight in plain language (only if type is insight/pattern, null otherwise)"
+      "relationship_type": "SCREAMING_SNAKE_CASE if type is relationship, null otherwise",
+      "insight_text": "plain language insight if type is insight/pattern, null otherwise"
     }
   ]
 }
 
-Return 0-3 discoveries. Only include genuinely meaningful connections (confidence >= 0.6). Return empty array if nothing interesting. Do NOT force connections that don't exist.`
+0-3 discoveries. Confidence >= 0.6 only. Empty array if nothing meaningful.`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)

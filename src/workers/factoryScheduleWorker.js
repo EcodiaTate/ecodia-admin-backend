@@ -406,20 +406,13 @@ async function runQualitySweep() {
 
   await triggers.dispatchFromSchedule({
     codebaseId: target.id,
-    prompt: `WEEKLY QUALITY SWEEP for ${target.name}
+    prompt: `WEEKLY QUALITY SWEEP — ${target.name}
 
-You are doing a deep code quality review of this codebase. Analyze the codebase structure, identify the most impactful improvements, and implement the top 1-3 changes. Focus on:
+Read the codebase. Find what's worth improving. Fix it.
 
-1. Dead code removal (unused exports, unreachable branches, commented-out code)
-2. Performance issues (unnecessary re-renders, missing memoization, N+1 queries)
-3. Accessibility gaps (missing aria labels, contrast issues, keyboard navigation)
-4. Missing error boundaries or error handling
-5. Code duplication that could be extracted into shared utilities
-6. Outdated patterns that should be modernized
+${sessionHistory ? `Recent Factory activity (avoid duplicating):\n${sessionHistory}\n` : ''}Some areas worth looking at: dead code, performance, accessibility, error handling, duplication, outdated patterns. But use your own judgment — you might find something more important than any of those.
 
-${sessionHistory ? `Recent Factory activity on this codebase:\n${sessionHistory}\n\nAvoid duplicating recent work.` : ''}
-
-Make real improvements — this is not a report, it's an action session. Implement the changes, run tests if available, and leave the codebase measurably better.`,
+Leave it measurably better. Run tests if they exist.`,
   })
 
   logger.info(`Factory quality sweep dispatched for ${target.name}`)
@@ -455,23 +448,16 @@ async function runSelfImprovement() {
 
   await triggers.dispatchFromSchedule({
     codebaseId: factoryCb.id,
-    prompt: `FACTORY SELF-IMPROVEMENT: Weekly review of the Factory system itself.
+    prompt: `FACTORY SELF-IMPROVEMENT — weekly review of the Factory itself.
 
-You are reviewing the Ecodia Factory — the autonomous code execution engine. This IS the codebase you're running in. Improve it.
+You are in the codebase you're running in. Improve it.
 
 Recent error patterns (last 30 days):
 ${errorSummary || 'No errors'}
 
-Validation stats: ${recentValidation[0]?.total || 0} sessions, avg confidence ${recentValidation[0]?.avg_confidence || 'N/A'}, ${recentValidation[0]?.low_confidence_count || 0} low-confidence
+Validation stats: ${recentValidation[0]?.total || 0} sessions, avg confidence ${recentValidation[0]?.avg_confidence || 'N/A'}, ${recentValidation[0]?.low_confidence_count || 0} low-confidence.
 
-Focus on:
-1. Fix recurring error patterns
-2. Improve the oversight pipeline accuracy
-3. Optimize the codebase intelligence chunking/embedding
-4. Strengthen the validation harness
-5. Add any missing error handling or edge cases
-
-This is a real self-improvement session — make the Factory better at being the Factory.`,
+Read the code. Find what's causing errors, what's brittle, what could be smarter. Fix what you find.`,
   })
 
   logger.info('Factory weekly self-improvement session dispatched')

@@ -326,13 +326,8 @@ async function reviewChanges(session, filesChanged) {
 
     const response = await callDeepSeek([{
       role: 'user',
-      content: `You are a code reviewer for the Ecodia Factory — an autonomous code system. Review this diff and assess:
+      content: `Review this diff from the Ecodia Factory (autonomous code system).${session.self_modification ? ' This is a self-modification — the Factory editing its own code.' : ''}
 
-1. Does this change accomplish the stated task?
-2. Are there any obvious bugs, security issues, or regressions?
-3. Is the code quality acceptable?
-4. Should this be auto-deployed, or does it need human review?
-${session.self_modification ? '\n5. CRITICAL: This is a SELF-MODIFICATION — the Factory modifying its own code. Be extra thorough. Check for: infinite loops, resource leaks, broken imports, missing error handling, and anything that could crash the running server.\n' : ''}
 Task: ${session.initial_prompt}
 Codebase: ${session.codebase_name || 'unknown'}
 Files changed: ${filesChanged.join(', ')}
@@ -341,13 +336,15 @@ ${learningsContext}
 Diff (truncated to 5000 chars):
 ${diff.slice(0, 5000)}
 
-Respond with JSON only:
+Does it accomplish the task? Any bugs, security issues, or regressions? Should it auto-deploy or need human review?
+
+Respond as JSON:
 {
-  "approved": true,
-  "confidence": 0.85,
-  "notes": "brief assessment",
+  "approved": true/false,
+  "confidence": 0.0-1.0,
+  "notes": "your assessment",
   "concerns": [],
-  "accomplishes_task": true
+  "accomplishes_task": true/false
 }`,
     }], {
       module: 'factory_oversight',
@@ -456,26 +453,21 @@ async function generateFollowUp(session, failureType, errorDetails) {
   try {
     const response = await callDeepSeek([{
       role: 'user',
-      content: `A Factory CC session failed. Analyze and suggest next steps.
+      content: `Factory CC session failed.
 
 Task: ${session.initial_prompt}
 Codebase: ${session.codebase_name || 'unknown'}
-Failure type: ${failureType}
-Error: ${errorDetails}
-Trigger source: ${session.trigger_source}
+Failure: ${failureType} — ${errorDetails}
+Trigger: ${session.trigger_source}
 
-Should we:
-1. Retry with a modified approach?
-2. Escalate to human?
-3. File a task for later?
-4. Something else?
+What should happen next?
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "action": "retry",
-  "retry_prompt": "modified prompt if retrying",
-  "task_title": "task title if filing",
-  "reasoning": "why this action"
+  "action": "retry|task|escalate|nothing",
+  "retry_prompt": "modified prompt if retrying, null otherwise",
+  "task_title": "task title if filing, null otherwise",
+  "reasoning": "why"
 }`,
     }], {
       module: 'factory_oversight',
@@ -591,39 +583,35 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
 async function extractLearningPattern(session, outcome, details) {
   try {
     const prompt = outcome === 'success'
-      ? `A Factory CC session SUCCEEDED. Extract a reusable learning pattern.
+      ? `Factory CC session succeeded.
 
 Task: ${(session.initial_prompt || '').slice(0, 300)}
 Codebase: ${session.codebase_name || 'unknown'}
 Confidence: ${details.confidence || 'N/A'}
 Files changed: ${(session.files_changed || []).join(', ') || 'none'}
 
-What specific technique, approach, or insight made this succeed? This will be injected into future sessions.
+What's worth remembering for future sessions on this codebase? Any technique, insight, or pattern that made this work?
 
-Respond with JSON only:
+Respond as JSON:
 {
   "pattern_type": "success_pattern|technique|discovery|codebase_insight",
   "pattern_description": "one-sentence reusable insight",
-  "confidence": 0.6
-}
-
-Use "technique" if a specific approach worked well, "discovery" if something unexpected was found, "codebase_insight" if this reveals something about the codebase structure/patterns, or "success_pattern" for general success patterns.`
-      : `A Factory CC session FAILED (${outcome}).
+  "confidence": 0.0-1.0
+}`
+      : `Factory CC session failed (${outcome}).
 
 Task: ${(session.initial_prompt || '').slice(0, 300)}
 Codebase: ${session.codebase_name || 'unknown'}
 Error: ${details.error || details.reason || 'unknown'}
 
-What went wrong? What should future sessions AVOID? This will be injected into future sessions.
+What should future sessions know to avoid or approach differently?
 
-Respond with JSON only:
+Respond as JSON:
 {
   "pattern_type": "failure_pattern|dont_try",
-  "pattern_description": "one-sentence warning for future sessions",
-  "confidence": 0.5
-}
-
-Use "dont_try" if this approach should never be attempted again for this codebase, or "failure_pattern" for general failure patterns.`
+  "pattern_description": "one-sentence insight for future sessions",
+  "confidence": 0.0-1.0
+}`
 
     const response = await callDeepSeek([{ role: 'user', content: prompt }], {
       module: 'factory_learning',

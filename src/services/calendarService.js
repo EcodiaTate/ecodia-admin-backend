@@ -391,7 +391,7 @@ async function surfaceUpcomingMeetingPrep() {
       const attendees = typeof event.attendees === 'string' ? JSON.parse(event.attendees) : (event.attendees || [])
       const people = attendees.filter(a => !a.self).map(a => a.name || a.email).join(', ')
 
-      const prompt = `An upcoming calendar event needs review. Should Tate be reminded or do any prep?
+      const prompt = `Upcoming event for Tate — is there anything worth flagging or prepping for?
 
 Event: ${event.summary}
 Time: ${new Date(event.start_time).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })}
@@ -400,11 +400,11 @@ ${people ? `Attendees: ${people}` : ''}
 ${event.description ? `Description: ${(event.description || '').slice(0, 500)}` : ''}
 ${event.conference_link ? 'Has video call link' : ''}
 
-Respond with JSON only:
+Respond as JSON:
 {
-  "shouldSurface": true or false,
-  "title": "short prep reminder title",
-  "summary": "what Tate should know or do before this meeting",
+  "shouldSurface": true/false,
+  "title": "prep reminder title",
+  "summary": "what Tate should know or do beforehand",
   "priority": "low|medium|high"
 }`
 
