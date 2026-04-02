@@ -82,7 +82,7 @@ const logger = createLogger({
       ? format.json()
       : format.combine(format.colorize(), format.simple())
   ),
-  defaultMeta: { service: 'ecodia-hub' },
+  defaultMeta: { service: 'ecodiaos' },
   transports: [
     new transports.Console(),
     ...(env.NODE_ENV === 'production'
