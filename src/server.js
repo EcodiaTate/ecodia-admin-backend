@@ -25,6 +25,17 @@ async function cleanupOrphanedSessions() {
   }
 }
 
+// Graceful shutdown — registered at module level so it fires regardless of
+// whether the server has finished starting. PM2 sends SIGTERM on restart.
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received — shutting down')
+  try {
+    const maintenance = require('./workers/autonomousMaintenanceWorker')
+    maintenance.stop()
+  } catch {}
+  server.close(() => process.exit(0))
+})
+
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
 
@@ -48,7 +59,10 @@ server.listen(env.PORT, async () => {
   const workers = [
     { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
     { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
+    { name: 'gmailPoller',                 path: './workers/gmailPoller' },
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
+    { name: 'linkedinWorker',              path: './workers/linkedinWorker' },
+    { name: 'financePoller',               path: './workers/financePoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
     { name: 'symbridgeWorker',             path: './workers/symbridgeWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
@@ -59,7 +73,6 @@ server.listen(env.PORT, async () => {
   for (const w of workers) {
     try {
       const mod = require(w.path)
-      // Workers that export start() are started explicitly
       if (w.start && typeof mod.start === 'function') {
         mod.start()
       }
@@ -67,14 +80,4 @@ server.listen(env.PORT, async () => {
       logger.debug(`${w.name} not started`, { error: err.message })
     }
   }
-
-  // Graceful shutdown — stop the maintenance mind cleanly
-  process.on('SIGTERM', () => {
-    logger.info('SIGTERM received — shutting down')
-    try {
-      const maintenance = require('./workers/autonomousMaintenanceWorker')
-      maintenance.stop()
-    } catch {}
-    server.close(() => process.exit(0))
-  })
 })

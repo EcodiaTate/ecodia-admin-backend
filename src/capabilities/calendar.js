@@ -35,7 +35,11 @@ registry.registerMany([
     },
     handler: async (params) => {
       const cal = require('../services/calendarService')
-      const event = await cal.updateEvent(params.eventId, params)
+      await cal.updateEvent(
+        params.calendar || env.GOOGLE_PRIMARY_ACCOUNT,
+        params.eventId,
+        { summary: params.summary, startTime: params.startTime, endTime: params.endTime, description: params.description }
+      )
       return { message: `Event updated`, eventId: params.eventId }
     },
   },
@@ -51,7 +55,9 @@ registry.registerMany([
     },
     handler: async (params) => {
       const cal = require('../services/calendarService')
-      return cal.getEvents ? cal.getEvents(params) : { error: 'getEvents not available' }
+      // getUpcoming({ hours, limit }) — returns events within the next N hours
+      const hours = params.limit ? undefined : 24  // default 24h window
+      return cal.getUpcoming({ hours: params.hours || 24, limit: params.limit || 20 })
     },
   },
 ])

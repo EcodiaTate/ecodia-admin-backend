@@ -1,5 +1,4 @@
 const logger = require('../config/logger')
-const env = require('../config/env')
 
 // ═══════════════════════════════════════════════════════════════════════
 // CAPABILITY REGISTRY
@@ -86,7 +85,7 @@ async function execute(name, params = {}, context = {}) {
 
   // Write-tier: check metabolic pressure gate
   if (cap.tier === 'write') {
-    const pressureBlock = checkPressureGate(name)
+    const pressureBlock = checkPressureGate(name, cap)
     if (pressureBlock) return pressureBlock
   }
 
@@ -127,22 +126,20 @@ function has(name) {
 }
 
 // ─── Pressure gate ────────────────────────────────────────────────────
-// Generalised: high-priority write capabilities pass at any pressure.
+// Generalised: capabilities declaring priority='critical' pass at any pressure.
 // Non-critical writes are blocked above 0.85.
-// The capability itself declares its priority.
+// cap is already resolved by execute() — passed in to avoid double-lookup.
 
-function checkPressureGate(name) {
+function checkPressureGate(name, cap) {
   try {
     const metabolismBridge = require('./metabolismBridgeService')
     const pressure = metabolismBridge.getPressure()
     if (pressure < 0.85) return null
-
-    const cap = registry.get(name)
-    if (cap?.priority === 'critical') return null  // critical caps always pass
+    if (cap?.priority === 'critical') return null
 
     return {
       success: false,
-      error: `Metabolic pressure too high (${pressure.toFixed(2)}) for non-critical write action "${name}"`,
+      error: `Metabolic pressure too high (${pressure.toFixed(2)}) for non-critical write "${name}"`,
       pressure,
     }
   } catch {

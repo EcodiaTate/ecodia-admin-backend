@@ -121,9 +121,13 @@ function validateScaffold(filesChanged = []) {
 // ─── Event Bus Subscription: React to Integration Opportunities ─────
 // When KG free association discovers an integration opportunity,
 // evaluate it and dispatch a scaffold session if it's strong enough.
+// Guard prevents duplicate listeners if module cache is ever cleared.
 
+let _scaffoldListenerAttached = false
 try {
   const eventBus = require('./internalEventBusService')
+  if (!_scaffoldListenerAttached) {
+    _scaffoldListenerAttached = true
   eventBus.on('kg:integration_opportunity', async (payload) => {
     try {
       const metabolismBridge = require('./metabolismBridgeService')
@@ -162,6 +166,7 @@ try {
       logger.debug('Integration scaffold dispatch failed', { error: err.message })
     }
   })
+  } // end if !_scaffoldListenerAttached
 } catch {}
 
 module.exports = {

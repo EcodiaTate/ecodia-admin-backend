@@ -25,61 +25,47 @@ router.get('/', async (req, res, next) => {
   }
 })
 
-// POST /api/settings/workers/:name/trigger — manually trigger a worker/job
-// Supported names: audit, scan, sweep, self_improvement, kg_embed, kg_consolidation
+// POST /api/settings/workers/:name/trigger
+//
+// Only KG operations are exposed here — they are targeted, stateless ops
+// that can be useful to invoke directly (e.g. force-embed before a query).
+//
+// Factory maintenance (audit, scan, sweep, self_improvement) is NOT exposed.
+// Those are decided by the AutonomousMaintenanceWorker, not by the user.
+// If you need maintenance to run, tell Cortex — it will dispatch a Factory session.
+//
+// Supported: kg_embed, kg_consolidation, maintenance_cycle
 router.post('/workers/:name/trigger', async (req, res, next) => {
   try {
     const { name } = req.params
-    let message = ''
 
-    switch (name) {
-      case 'audit': {
-        const worker = require('../workers/factoryScheduleWorker')
-        worker.runDependencyAudit().catch(() => {})
-        message = 'Dependency audit triggered'
-        break
-      }
-      case 'scan': {
-        const worker = require('../workers/factoryScheduleWorker')
-        worker.runProactiveScan().catch(() => {})
-        message = 'Proactive scan triggered'
-        break
-      }
-      case 'sweep': {
-        const worker = require('../workers/factoryScheduleWorker')
-        worker.runQualitySweep().catch(() => {})
-        message = 'Quality sweep triggered'
-        break
-      }
-      case 'self_improvement': {
-        const worker = require('../workers/factoryScheduleWorker')
-        worker.runSelfImprovement().catch(() => {})
-        message = 'Self-improvement triggered'
-        break
-      }
-      case 'kg_embed': {
-        const kgWorker = require('../workers/kgEmbeddingWorker')
-        if (kgWorker && typeof kgWorker.runOnce === 'function') {
-          kgWorker.runOnce().catch(() => {})
-        } else {
-          const kgService = require('../services/knowledgeGraphService')
-          kgService.embedStaleNodes().catch(() => {})
-        }
-        message = 'KG embedding triggered'
-        break
-      }
-      case 'kg_consolidation': {
-        const kgConsolidation = require('../services/kgConsolidationService')
-        kgConsolidation.runConsolidationPipeline({ dryRun: false }).catch(() => {})
-        message = 'KG consolidation triggered'
-        break
-      }
-      default:
-        return res.status(400).json({ error: `Unknown worker: ${name}` })
+    if (name === 'kg_embed') {
+      const kgService = require('../services/knowledgeGraphService')
+      kgService.embedStaleNodes().catch(() => {})
+      logger.info('Manual trigger: KG embedding')
+      return res.json({ ok: true, message: 'KG embedding started' })
     }
 
-    logger.info(`Manual worker trigger: ${name}`)
-    res.json({ ok: true, message })
+    if (name === 'kg_consolidation') {
+      const kgConsolidation = require('../services/kgConsolidationService')
+      kgConsolidation.runConsolidationPipeline({ dryRun: false }).catch(() => {})
+      logger.info('Manual trigger: KG consolidation')
+      return res.json({ ok: true, message: 'KG consolidation started' })
+    }
+
+    if (name === 'maintenance_cycle') {
+      // Force one maintenance cycle immediately — useful for testing/debugging
+      const maintenance = require('../workers/autonomousMaintenanceWorker')
+      maintenance.runCycle().catch(() => {})
+      logger.info('Manual trigger: autonomous maintenance cycle')
+      return res.json({ ok: true, message: 'Maintenance cycle started — the mind will decide what to do' })
+    }
+
+    return res.status(400).json({
+      error: `Unknown trigger: ${name}`,
+      available: ['kg_embed', 'kg_consolidation', 'maintenance_cycle'],
+      note: 'Factory maintenance (audit, scan, sweep) is handled autonomously. Tell Cortex if you need specific work done.',
+    })
   } catch (err) {
     next(err)
   }

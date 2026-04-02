@@ -1161,13 +1161,17 @@ async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
     const props = rec.get('a')?.properties || {}
     const labels = rec.get('a')?.labels || []
     if (props.embedding && props.name) {
-      nodePool.push({
-        id: rec.get('a').elementId,
-        name: props.name,
-        labels,
-        embedding: props.embedding,
-        description: props.description || '',
-      })
+      // Neo4j driver may return list properties as array-like objects — normalise to plain JS array
+      const embArr = Array.isArray(props.embedding) ? props.embedding : Array.from(props.embedding)
+      if (embArr.length > 0) {
+        nodePool.push({
+          id: rec.get('a').elementId,
+          name: props.name,
+          labels,
+          embedding: embArr,
+          description: props.description || '',
+        })
+      }
     }
   }
 
@@ -1778,10 +1782,10 @@ async function readGraphState() {
     runQuery(`
       MATCH (n)
       RETURN
-        count(n) FILTER (WHERE n.embedding IS NULL) AS unembedded,
-        count(n) FILTER (WHERE n.is_synthesized = true) AS synthesized,
-        count(n) FILTER (WHERE n.importance IS NULL) AS unscored,
-        count(n) FILTER (WHERE n.stale_since IS NOT NULL) AS stale
+        count(CASE WHEN n.embedding IS NULL THEN n END) AS unembedded,
+        count(CASE WHEN n.is_synthesized = true THEN n END) AS synthesized,
+        count(CASE WHEN n.importance IS NULL THEN n END) AS unscored,
+        count(CASE WHEN n.stale_since IS NOT NULL THEN n END) AS stale
     `).then(([r]) => {
       state.unembedded = r?.get('unembedded')?.toInt?.() ?? 0
       state.synthesized = r?.get('synthesized')?.toInt?.() ?? 0
@@ -1789,7 +1793,7 @@ async function readGraphState() {
       state.stale = r?.get('stale')?.toInt?.() ?? 0
     }).catch(() => {}),
 
-    runQuery(`MATCH ()-[r]->() RETURN count(r) AS total, count(r) FILTER (r.inferred = true) AS inferred`).then(([r]) => {
+    runQuery(`MATCH ()-[r]->() RETURN count(r) AS total, count(CASE WHEN r.inferred = true THEN r END) AS inferred`).then(([r]) => {
       state.totalRelationships = r?.get('total')?.toInt?.() ?? 0
       state.inferredRelationships = r?.get('inferred')?.toInt?.() ?? 0
     }).catch(() => {}),
@@ -1818,9 +1822,11 @@ async function readGraphState() {
     }).catch(() => {}),
 
     // People/Projects without narratives
+    // NARRATES is the rel type created by synthesizeNarratives() — Narrative-[NARRATES]->Subject
     runQuery(`
-      MATCH (n) WHERE n.type IN ['Person', 'Project', 'Client']
-        AND NOT (n)-[:HAS_NARRATIVE]->()
+      MATCH (n)
+      WHERE any(lbl IN labels(n) WHERE lbl IN ['Person', 'Project', 'Organisation'])
+        AND NOT ()-[:NARRATES]->(n)
       RETURN count(n) AS c
     `).then(([r]) => {
       state.entitiesWithoutNarrative = r?.get('c')?.toInt?.() ?? 0

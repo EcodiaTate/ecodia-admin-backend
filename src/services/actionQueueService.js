@@ -111,7 +111,7 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
           (${senderEmail || ''} != '' AND context->>'email' = ${senderEmail || ''})
           OR (${senderName || ''} != '' AND context->>'from' = ${senderName || ''})
         )
-        AND updated_at > now() - interval '2 hours'
+        AND (context->>'dismissed_at')::timestamptz > now() - interval '2 hours'
       LIMIT 1
     `
     if (recentDismissal.length > 0) return null
@@ -147,10 +147,11 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
     : match.priority
 
   // Keep the most recent draft/summary, accumulate source refs
-  const mergedSourceRefs = [...(match.context?.source_ref_ids || [match.source_ref_id]), sourceRefId].filter(Boolean)
+  const existingCtx = match.context || {}
+  const mergedSourceRefs = [...(existingCtx.source_ref_ids || [match.source_ref_id]), sourceRefId].filter(Boolean)
   const mergedContext = {
-    ...match.context,
-    ...context,
+    ...existingCtx,
+    ...(context || {}),
     consolidated_count: newCount,
     source_ref_ids: mergedSourceRefs,
     latest_signal_at: new Date().toISOString(),
@@ -170,7 +171,7 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
     RETURNING *
   `
 
-  logger.info(`Consolidated action queue item ${match.id}: ${title} (${newCount} signals from ${senderEmail || senderName})`)
+  logger.info(`Consolidated action queue item ${match.id}: ${title} (${newCount} signals${senderEmail || senderName ? ` from ${senderEmail || senderName}` : ` by action_type:${actionType}`})`)
 
   broadcast('action_queue:updated', {
     id: updated.id,
@@ -202,9 +203,10 @@ async function execute(actionId) {
 
     broadcast('action_queue:executed', { id: actionId, result })
 
-    // Redis pub/sub + event bus
-    publishRedis('executed', { id: actionId, actionType: item.action_type, result: result?.message })
-    emitEvent('action:executed', { id: actionId, source: item.source, actionType: item.action_type, result: result?.message })
+    // Redis pub/sub + event bus — use message if present, otherwise stringify the result keys
+    const resultSummary = result?.message || (result ? Object.keys(result).join(', ') : 'ok')
+    publishRedis('executed', { id: actionId, actionType: item.action_type, result: resultSummary })
+    emitEvent('action:executed', { id: actionId, source: item.source, actionType: item.action_type, result: resultSummary })
 
     // KG learning signal
     const kgHooks = require('./kgIngestionHooks')

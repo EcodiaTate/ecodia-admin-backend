@@ -688,9 +688,13 @@ function emitEvent(type, payload) {
 // ─── Event Bus Subscription: React to KG Discoveries ───────────────
 // When the KG discovers new patterns, proactively schedule Factory sessions
 // to investigate/act on them — if metabolic pressure allows.
+// Guard prevents duplicate listeners if module cache is ever cleared.
 
+let _oversightListenerAttached = false
 try {
   const eventBus = require('./internalEventBusService')
+  if (!_oversightListenerAttached) {
+    _oversightListenerAttached = true
   eventBus.on('kg:pattern_discovered', async (payload) => {
     try {
       const metabolismBridge = require('./metabolismBridgeService')
@@ -722,6 +726,7 @@ try {
       logger.debug('Pattern-reactive session dispatch failed', { error: err.message })
     }
   })
+  } // end if !_oversightListenerAttached
 } catch {}
 
 module.exports = {

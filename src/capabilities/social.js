@@ -10,7 +10,7 @@ registry.registerMany([
     tier: 'write',
     domain: 'meta',
     params: {
-      pageId: { type: 'string', required: true, description: 'Facebook Page ID' },
+      pageId: { type: 'string', required: true, description: 'Internal meta_pages.id (UUID) — get from the Meta workspace page list' },
       message: { type: 'string', required: true, description: 'Post text content' },
       link: { type: 'string', required: false, description: 'URL to attach' },
       imageUrl: { type: 'string', required: false, description: 'Image URL to include' },
@@ -60,30 +60,31 @@ registry.registerMany([
   // ── LinkedIn ─────────────────────────────────────────────────────────
   {
     name: 'send_linkedin_reply',
-    description: 'Send a reply to a LinkedIn DM using the prepared draft',
+    description: 'Send a reply to a LinkedIn DM using the stored draft (generate draft first if needed)',
     tier: 'write',
     domain: 'linkedin',
     params: {
-      dmId: { type: 'string', required: true, description: 'LinkedIn DM ID' },
-      draft: { type: 'string', required: false, description: 'Override prepared draft text' },
+      dmId: { type: 'string', required: true, description: 'LinkedIn DM internal UUID' },
     },
     handler: async (params) => {
       const linkedin = require('../services/linkedinService')
-      await linkedin.sendReply(params.dmId, params.draft)
+      // sendDMReply uses the draft_reply stored on the DM record in the DB
+      await linkedin.sendDMReply(params.dmId)
       return { message: `LinkedIn reply sent to DM ${params.dmId}` }
     },
   },
   {
     name: 'draft_linkedin_reply',
-    description: 'Generate an AI draft reply for a LinkedIn DM using KG context',
+    description: 'Generate an AI draft reply for a LinkedIn DM and save it to the record',
     tier: 'read',
     domain: 'linkedin',
     params: {
-      dmId: { type: 'string', required: true, description: 'LinkedIn DM ID' },
+      dmId: { type: 'string', required: true, description: 'LinkedIn DM internal UUID' },
     },
     handler: async (params) => {
       const linkedin = require('../services/linkedinService')
-      const draft = await linkedin.generateDraftReply(params.dmId)
+      // draftDMReply generates and saves the draft to the DM record
+      const draft = await linkedin.draftDMReply(params.dmId)
       return { draft, dmId: params.dmId }
     },
   },

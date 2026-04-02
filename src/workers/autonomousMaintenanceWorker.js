@@ -23,6 +23,22 @@ const { recordHeartbeat } = require('./heartbeat')
 
 let running = false
 let cycleTimer = null
+let inCycle = false  // prevent concurrent cycles from event triggers + scheduled timer
+
+// Named handlers so they can be removed on stop()
+async function _onDeployFailed() {
+  if (!running || inCycle) return
+  logger.info('AutonomousMaintenanceWorker: deploy failure detected — requesting immediate cycle')
+  await runCycle()
+}
+
+async function _onKGPrediction(payload) {
+  if (!running || inCycle) return
+  if ((payload.importance || 0) >= 0.8) {
+    logger.info('AutonomousMaintenanceWorker: high-importance KG prediction — considering maintenance')
+    await runCycle()
+  }
+}
 
 // ─── Start ────────────────────────────────────────────────────────────
 
@@ -31,11 +47,21 @@ function start() {
   running = true
   logger.info('AutonomousMaintenanceWorker: started')
   scheduleCycle()
+  try {
+    const eventBus = require('../services/internalEventBusService')
+    eventBus.on('factory:deploy_failed', _onDeployFailed)
+    eventBus.on('kg:prediction_created', _onKGPrediction)
+  } catch {}
 }
 
 function stop() {
   running = false
   if (cycleTimer) clearTimeout(cycleTimer)
+  try {
+    const eventBus = require('../services/internalEventBusService')
+    eventBus.off('factory:deploy_failed', _onDeployFailed)
+    eventBus.off('kg:prediction_created', _onKGPrediction)
+  } catch {}
   logger.info('AutonomousMaintenanceWorker: stopped')
 }
 
@@ -59,6 +85,11 @@ function scheduleCycle() {
 // Read. Think. Act. That's all.
 
 async function runCycle() {
+  if (inCycle) {
+    logger.debug('AutonomousMaintenanceWorker: cycle already in progress — skipping')
+    return
+  }
+  inCycle = true
   const cycleStart = Date.now()
 
   try {
@@ -89,6 +120,8 @@ async function runCycle() {
   } catch (err) {
     logger.error('AutonomousMaintenanceWorker: cycle failed', { error: err.message })
     await recordHeartbeat('autonomous_maintenance', 'error', err.message)
+  } finally {
+    inCycle = false
   }
 }
 
@@ -165,24 +198,24 @@ async function readSystemState() {
       SELECT count(*)::int AS pending, count(*) FILTER (WHERE priority = 'urgent')::int AS urgent
       FROM action_queue WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now())
     `.then(([r]) => { state.actionQueuePressure = r }),
-
-    // Git activity across codebases (last 24h)
-    (async () => {
-      const { execFileSync } = require('child_process')
-      const fs = require('fs')
-      state.gitActivity = []
-      for (const cb of (state.codebases || [])) {
-        if (!cb.repo_path || !fs.existsSync(cb.repo_path)) continue
-        try {
-          const out = execFileSync('git', ['log', '--oneline', '--since=24 hours ago'], {
-            cwd: cb.repo_path, encoding: 'utf-8', timeout: 10_000,
-          }).trim()
-          const commits = out ? out.split('\n').length : 0
-          if (commits > 0) state.gitActivity.push({ name: cb.name, commits })
-        } catch {}
-      }
-    })(),
   ])
+
+  // Git activity runs after DB queries — needs state.codebases populated first
+  state.gitActivity = []
+  if (state.codebases?.length) {
+    const { execFileSync } = require('child_process')
+    const fs = require('fs')
+    for (const cb of state.codebases) {
+      if (!cb.repo_path || !fs.existsSync(cb.repo_path)) continue
+      try {
+        const out = execFileSync('git', ['log', '--oneline', '--since=24 hours ago'], {
+          cwd: cb.repo_path, encoding: 'utf-8', timeout: 10_000,
+        }).trim()
+        const commits = out ? out.split('\n').length : 0
+        if (commits > 0) state.gitActivity.push({ name: cb.name, commits })
+      } catch {}
+    }
+  }
 
   return state
 }
@@ -411,30 +444,5 @@ function fallbackHeuristics(state) {
 
   return decisions
 }
-
-// ─── Event Bus Listener ───────────────────────────────────────────────
-// The mind can also be triggered by specific system events —
-// not just on a cycle, but when something important happens.
-
-try {
-  const eventBus = require('../services/internalEventBusService')
-
-  // Deploy failure — tell the mind immediately
-  eventBus.on('factory:deploy_failed', async (payload) => {
-    if (!running) return
-    logger.info('AutonomousMaintenanceWorker: deploy failure detected — requesting immediate cycle')
-    // Don't wait for the timer — think now
-    await runCycle()
-  })
-
-  // KG prediction with high importance — might need Factory work
-  eventBus.on('kg:prediction_created', async (payload) => {
-    if (!running) return
-    if ((payload.importance || 0) >= 0.8) {
-      logger.info('AutonomousMaintenanceWorker: high-importance KG prediction — considering maintenance')
-      await runCycle()
-    }
-  })
-} catch {}
 
 module.exports = { start, stop, runCycle }

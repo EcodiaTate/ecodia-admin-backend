@@ -14,8 +14,18 @@ registry.registerMany([
     },
     handler: async (params) => {
       const triggers = require('../services/factoryTriggerService')
-      const session = await triggers.dispatchFromCortex({
-        prompt: params.prompt,
+
+      // Guard: if prompt is an object (Cortex sent nested params), stringify it
+      // This happens when AI wraps the task in { prompt: { task: "..." } } or similar
+      let prompt = params.prompt
+      if (prompt && typeof prompt === 'object') {
+        prompt = prompt.task || prompt.description || prompt.content || JSON.stringify(prompt)
+      }
+      if (!prompt || typeof prompt !== 'string') {
+        throw new Error('start_cc_session requires a prompt string — received: ' + JSON.stringify(params.prompt))
+      }
+
+      const session = await triggers.dispatchFromCortex(prompt, {
         codebaseId: params.codebaseId,
         codebaseName: params.codebaseName,
       })

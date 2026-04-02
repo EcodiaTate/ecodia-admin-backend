@@ -17,20 +17,26 @@ registry.registerMany([
       leadScore: { type: 'number', required: false, description: 'Lead quality score 0-1' },
     },
     handler: async (params) => {
-      const clientQueries = require('../db/queries/clients')
-      const client = await clientQueries.createClient({
-        name: params.name,
-        company: params.company || null,
-        email: params.email || null,
-        phone: params.phone || null,
-        linkedin_url: params.linkedinUrl || null,
-        stage: 'lead',
-        priority: (params.leadScore || 0) > 0.7 ? 'high' : 'medium',
-        notes: params.notes
-          ? [{ content: `${params.notes} [source: ${params.source || 'ai'}]`, createdAt: new Date().toISOString(), source: params.source || 'ai' }]
-          : [],
-      })
-      return { message: `Lead created: ${params.name}`, clientId: client.id }
+      const db = require('../config/db')
+      const notes = params.notes
+        ? JSON.stringify([{ content: `${params.notes} [source: ${params.source || 'ai'}]`, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
+        : '[]'
+      const [client] = await db`
+        INSERT INTO clients (name, company, email, phone, linkedin_url, stage, priority, notes, tags)
+        VALUES (
+          ${params.name},
+          ${params.company || null},
+          ${params.email || null},
+          ${params.phone || null},
+          ${params.linkedinUrl || null},
+          'lead',
+          ${(params.leadScore || 0) > 0.7 ? 'high' : 'medium'},
+          ${notes}::jsonb,
+          '[]'::jsonb
+        )
+        RETURNING id, name
+      `
+      return { message: `Lead created: ${client.name}`, clientId: client.id }
     },
   },
   {
@@ -45,21 +51,33 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
-      const [client] = await db`
+
+      // Read current stage before update (needed for pipeline_events)
+      const [current] = await db`SELECT name, stage FROM clients WHERE id = ${params.clientId}`
+      if (!current) throw new Error(`Client ${params.clientId} not found`)
+
+      await db`
         UPDATE clients SET stage = ${params.stage}, updated_at = now()
         WHERE id = ${params.clientId}
-        RETURNING name, stage
       `
-      if (!client) throw new Error(`Client ${params.clientId} not found`)
 
+      // Record the transition in pipeline_events (feeds KG and CRM triage)
+      await db`
+        INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
+        VALUES (${params.clientId}, ${current.stage}, ${params.stage}, ${params.note || null})
+      `
+
+      // If a note was provided, append it to the client notes array
       if (params.note) {
+        const note = JSON.stringify([{ content: params.note, createdAt: new Date().toISOString(), source: 'ai' }])
         await db`
           UPDATE clients
-          SET notes = notes || ${JSON.stringify([{ content: params.note, createdAt: new Date().toISOString(), source: 'ai' }])}::jsonb
+          SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
           WHERE id = ${params.clientId}
         `
       }
-      return { message: `${client.name} moved to ${client.stage}` }
+
+      return { message: `${current.name} moved from ${current.stage} to ${params.stage}` }
     },
   },
   {
@@ -100,10 +118,10 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
-      const note = { content: params.content, createdAt: new Date().toISOString(), source: params.source || 'ai' }
+      const note = JSON.stringify([{ content: params.content, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
       await db`
         UPDATE clients
-        SET notes = notes || ${JSON.stringify([note])}::jsonb, updated_at = now()
+        SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
         WHERE id = ${params.clientId}
       `
       return { message: `Note added to client ${params.clientId}` }

@@ -26,11 +26,11 @@ function buildCortexSystemPrompt() {
       capabilitySection = `\nACTIONS YOU CAN PROPOSE (action_card "action" field — these are live, registered capabilities):\n${
         caps.map(c => {
           const paramStr = Object.entries(c.params || {})
-            .map(([k, v]) => `${k}${v.required ? '*' : ''}`)
+            .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.type || 'string'}`)
             .join(', ')
-          return `- ${c.name}: ${c.description}${paramStr ? ` (${paramStr})` : ''}`
+          return `- ${c.name}: ${c.description}${paramStr ? ` [${paramStr}]` : ''}`
         }).join('\n')
-      }\n\nFields marked * are required. Params are passed directly in action_card.params.`
+      }\n\nFields marked * are required. All param values must be their declared primitive type (string, number, boolean) — never objects. Params go directly into action_card.params.`
     }
   } catch {
     capabilitySection = '\n(Capability registry unavailable — propose actions by name, the system will route them.)'
@@ -123,6 +123,11 @@ Current date/time: ${new Date().toISOString()}`
   // trust it. Only enqueue if urgency >= 0.8 (the card itself signalled it's important).
   autoEnqueueUrgentActions(blocks).catch(() => {})
 
+  // 9. Persist the exchange to the session history
+  if (sessionId) {
+    persistExchange(sessionId, messages, blocks).catch(() => {})
+  }
+
   return { blocks, mentionedNodes, rawKgContext: kgContext }
 }
 
@@ -193,11 +198,13 @@ async function executeAction(action, params) {
   const capabilityName = CORTEX_ALIASES[action] || action
 
   if (!registry.has(capabilityName)) {
-    // Graceful: tell the caller what's available, don't crash
+    // Throw — the route catches this and returns a 500 which the frontend
+    // shows as an error block. The capability list in the message helps
+    // diagnose prompt/registry drift during development.
     const available = registry.list({ enabledOnly: true }).map(c => c.name)
     throw new Error(
-      `Cortex attempted unknown action "${action}". ` +
-      `Available: ${available.slice(0, 20).join(', ')}`
+      `Unknown action "${action}" — not in capability registry. ` +
+      `Registered: ${available.slice(0, 20).join(', ')}`
     )
   }
 
@@ -521,18 +528,13 @@ async function persistExchange(sessionId, messages, responseBlocks) {
     }
 
     // Upsert the session row — append exchange to history JSONB array
+    // Use || for O(1) array append instead of jsonb_agg which re-scans the full array
     await db`
       INSERT INTO cortex_sessions (id, history, updated_at)
       VALUES (${sessionId}, ${JSON.stringify([exchange])}, now())
       ON CONFLICT (id) DO UPDATE
       SET
-        history = (
-          SELECT jsonb_agg(elem) FROM (
-            SELECT elem FROM jsonb_array_elements(cortex_sessions.history) elem
-            UNION ALL
-            SELECT ${JSON.stringify(exchange)}::jsonb
-          ) sub
-        ),
+        history = cortex_sessions.history || ${JSON.stringify(exchange)}::jsonb,
         updated_at = now()
     `
   } catch (err) {
@@ -557,7 +559,7 @@ async function listSessions(limit = 20) {
       SELECT id, updated_at,
         jsonb_array_length(history) AS exchange_count,
         history->0->>'ts' AS started_at,
-        history->(jsonb_array_length(history)-1)->>'user' AS last_message
+        history->-1->>'user' AS last_message
       FROM cortex_sessions
       ORDER BY updated_at DESC
       LIMIT ${limit}

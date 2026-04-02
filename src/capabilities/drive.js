@@ -61,7 +61,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const drive = require('../services/googleDriveService')
-      await drive.writeSheet(params.account || env.GOOGLE_PRIMARY_ACCOUNT, params.spreadsheetId, params.range, params.values)
+      await drive.writeToSheet(params.account || env.GOOGLE_PRIMARY_ACCOUNT, params.spreadsheetId, { range: params.range, values: params.values })
       return { message: `Written to ${params.range}` }
     },
   },
@@ -76,7 +76,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const drive = require('../services/googleDriveService')
-      const folder = await drive.createFolder(params.account || env.GOOGLE_PRIMARY_ACCOUNT, params.name, params.parentFolderId)
+      const folder = await drive.createFolder(params.account || env.GOOGLE_PRIMARY_ACCOUNT, { name: params.name, parentFolderId: params.parentFolderId })
       return { message: `Folder created: ${params.name}`, folderId: folder.id }
     },
   },
@@ -107,7 +107,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const drive = require('../services/googleDriveService')
-      await drive.shareFile(params.account || env.GOOGLE_PRIMARY_ACCOUNT, params.fileId, params.email, params.role || 'reader')
+      await drive.shareFile(params.account || env.GOOGLE_PRIMARY_ACCOUNT, params.fileId, { email: params.email, role: params.role || 'reader' })
       return { message: `File shared with ${params.email}` }
     },
   },
@@ -122,7 +122,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const drive = require('../services/googleDriveService')
-      return drive.searchFiles ? drive.searchFiles(params.query, params.limit || 10) : { error: 'Search not available' }
+      return drive.searchFiles(params.query, { limit: params.limit || 10 })
     },
   },
 ])

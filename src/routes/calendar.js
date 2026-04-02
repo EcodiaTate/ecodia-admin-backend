@@ -78,7 +78,7 @@ const createEventSchema = z.object({
   startTime: z.string(),
   endTime: z.string(),
   attendees: z.array(z.string().email()).optional(),
-  calendar: z.string().email().default('tate@ecodia.au'),
+  calendar: z.string().email().default(require('../config/env').GOOGLE_PRIMARY_ACCOUNT),
 })
 
 router.post('/events', validate(createEventSchema), async (req, res, next) => {

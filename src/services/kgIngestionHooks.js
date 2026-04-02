@@ -615,6 +615,25 @@ async function onFactoryOutcome({ session, outcome, confidence, filesChanged, co
   })
 }
 
+// ─── System Events (maintenance cycles, worker signals) ─────────────
+
+async function onSystemEvent({ type, decisions, actioned, pressure }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `System event: ${type}
+${decisions !== undefined ? `Decisions made: ${decisions}, actioned: ${actioned}` : ''}
+${pressure !== undefined ? `Metabolic pressure: ${pressure}` : ''}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'system',
+      context: 'This is an internal system event from the autonomous maintenance loop. Track system health patterns over time.',
+    })
+  } catch (err) {
+    logger.debug('KG system event ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 // ─── Cognitive Broadcast Helper ─────────────────────────────────────
 // Sends structured percepts to the organism's cognitive cycle (Atune)
 
@@ -654,5 +673,6 @@ module.exports = {
   onActionExecuted,
   onDirectAction,
   onFactoryOutcome,
+  onSystemEvent,
   sendCognitiveBroadcast,
 }

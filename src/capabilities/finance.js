@@ -27,11 +27,19 @@ registry.registerMany([
       let category = params.category
 
       if (!category) {
-        // AI categorization
-        const [tx] = await db`SELECT description, amount_aud, type FROM transactions WHERE id = ${params.transactionId}`
+        // deepseek.categorize expects { description, amount, type, date }
+        const [tx] = await db`
+          SELECT description, amount_aud AS amount, type, date
+          FROM transactions WHERE id = ${params.transactionId}
+        `
         if (!tx) throw new Error(`Transaction ${params.transactionId} not found`)
         const deepseek = require('../services/deepseekService')
-        category = await deepseek.categorize(tx.description, tx.type, tx.amount_aud)
+        category = await deepseek.categorize({
+          description: tx.description,
+          amount: tx.amount,
+          type: tx.type,
+          date: tx.date,
+        })
       }
 
       await db`
@@ -54,7 +62,7 @@ registry.registerMany([
       const db = require('../config/db')
       const deepseek = require('../services/deepseekService')
       const uncategorized = await db`
-        SELECT id, description, amount_aud, type
+        SELECT id, description, amount_aud AS amount, type, date
         FROM transactions WHERE status = 'uncategorized'
         ORDER BY date DESC LIMIT ${params.limit || 50}
       `
@@ -62,16 +70,24 @@ registry.registerMany([
       let categorized = 0
       for (const tx of uncategorized) {
         try {
-          const category = await deepseek.categorize(tx.description, tx.type, tx.amount_aud)
+          const category = await deepseek.categorize({
+            description: tx.description,
+            amount: tx.amount,
+            type: tx.type,
+            date: tx.date,
+          })
           await db`
-            UPDATE transactions SET category = ${category}, status = 'categorized', updated_at = now()
+            UPDATE transactions
+            SET category = ${category}, status = 'categorized', updated_at = now()
             WHERE id = ${tx.id}
           `
           categorized++
-        } catch {}
+        } catch {
+          // continue — don't let one failure stop the batch
+        }
       }
 
-      return { message: `Categorized ${categorized}/${uncategorized.length} transactions`, categorized }
+      return { message: `Categorized ${categorized} of ${uncategorized.length} transactions`, categorized }
     },
   },
 ])
