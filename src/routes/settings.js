@@ -1,6 +1,7 @@
 const { Router } = require('express')
 const auth = require('../middleware/auth')
 const db = require('../config/db')
+const logger = require('../config/logger')
 
 const router = Router()
 router.use(auth)
@@ -19,6 +20,66 @@ router.get('/', async (req, res, next) => {
         ? { connected: true, historyId: gmailSync.history_id, lastSync: gmailSync.updated_at }
         : { connected: false },
     })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/settings/workers/:name/trigger — manually trigger a worker/job
+// Supported names: audit, scan, sweep, self_improvement, kg_embed, kg_consolidation
+router.post('/workers/:name/trigger', async (req, res, next) => {
+  try {
+    const { name } = req.params
+    let message = ''
+
+    switch (name) {
+      case 'audit': {
+        const worker = require('../workers/factoryScheduleWorker')
+        worker.runDependencyAudit().catch(() => {})
+        message = 'Dependency audit triggered'
+        break
+      }
+      case 'scan': {
+        const worker = require('../workers/factoryScheduleWorker')
+        worker.runProactiveScan().catch(() => {})
+        message = 'Proactive scan triggered'
+        break
+      }
+      case 'sweep': {
+        const worker = require('../workers/factoryScheduleWorker')
+        worker.runQualitySweep().catch(() => {})
+        message = 'Quality sweep triggered'
+        break
+      }
+      case 'self_improvement': {
+        const worker = require('../workers/factoryScheduleWorker')
+        worker.runSelfImprovement().catch(() => {})
+        message = 'Self-improvement triggered'
+        break
+      }
+      case 'kg_embed': {
+        const kgWorker = require('../workers/kgEmbeddingWorker')
+        if (kgWorker && typeof kgWorker.runOnce === 'function') {
+          kgWorker.runOnce().catch(() => {})
+        } else {
+          const kgService = require('../services/knowledgeGraphService')
+          kgService.embedStaleNodes().catch(() => {})
+        }
+        message = 'KG embedding triggered'
+        break
+      }
+      case 'kg_consolidation': {
+        const kgConsolidation = require('../services/kgConsolidationService')
+        kgConsolidation.runConsolidationPipeline({ dryRun: false }).catch(() => {})
+        message = 'KG consolidation triggered'
+        break
+      }
+      default:
+        return res.status(400).json({ error: `Unknown worker: ${name}` })
+    }
+
+    logger.info(`Manual worker trigger: ${name}`)
+    res.json({ ok: true, message })
   } catch (err) {
     next(err)
   }

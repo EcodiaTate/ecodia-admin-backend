@@ -4,7 +4,7 @@ const db = require('../config/db')
 const logger = require('../config/logger')
 const kgHooks = require('./kgIngestionHooks')
 
-const CALENDARS = ['tate@ecodia.au']
+const CALENDARS = [env.GOOGLE_PRIMARY_ACCOUNT]
 
 // ─── Calendar Client ────────────────────────────────────────────────────
 

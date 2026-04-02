@@ -24,7 +24,7 @@ async function deploySession(sessionId) {
   const startTime = Date.now()
 
   const [session] = await db`
-    SELECT cs.*, cb.repo_path, cb.name AS codebase_name, cb.meta
+    SELECT cs.*, cb.repo_path, cb.name AS codebase_name, cb.meta, cb.language AS codebase_language
     FROM cc_sessions cs
     LEFT JOIN codebases cb ON cs.codebase_id = cb.id
     WHERE cs.id = ${sessionId}
@@ -101,6 +101,25 @@ async function deploySession(sessionId) {
     }
 
     // 4. Deploy by target
+    // For Python codebases, install dependencies before restarting
+    if (deployTarget === 'pm2' && session.codebase_language === 'python') {
+      const fs = require('fs')
+      const path = require('path')
+      const requirementsFile = path.join(repoPath, 'requirements.txt')
+      if (fs.existsSync(requirementsFile)) {
+        try {
+          const venvPip = path.join(repoPath, '.venv', 'bin', 'pip')
+          const pipBin = fs.existsSync(venvPip) ? venvPip : 'pip'
+          execFileSync(pipBin, ['install', '-r', requirementsFile, '--quiet'], {
+            cwd: repoPath, encoding: 'utf-8', timeout: 120_000,
+          })
+          logger.info(`Python dependencies installed for ${session.codebase_name}`)
+        } catch (pipErr) {
+          logger.warn(`pip install failed for ${session.codebase_name} — continuing`, { error: pipErr.message })
+        }
+      }
+    }
+
     if (deployTarget === 'pm2' && pm2Name) {
       try {
         execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
@@ -132,9 +151,14 @@ async function deploySession(sessionId) {
         throw restartErr
       }
 
-      // For self-modifications, wait for PM2 to stabilize before health check (30s grace period)
+      // Grace period before health check:
+      // - Self-modifications: 30s (Node.js restart + potential migration)
+      // - Python codebases: 15s (FastAPI/uvicorn startup time)
+      // - Other: no wait
       if (isSelfMod) {
         await new Promise(r => setTimeout(r, 30_000))
+      } else if (session.codebase_language === 'python') {
+        await new Promise(r => setTimeout(r, 15_000))
       }
     }
     // Vercel deploys automatically on push — no action needed
@@ -251,4 +275,42 @@ async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, br
   }
 }
 
-module.exports = { deploySession, runHealthCheck }
+// ─── Revert by Session ID (used by symbridge rollback_request) ──────
+// Finds the most recent successful deployment for a session and reverts it.
+
+async function revertSession(sessionId) {
+  const [session] = await db`
+    SELECT cs.*, cb.repo_path, cb.name AS codebase_name, cb.meta
+    FROM cc_sessions cs
+    LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+    WHERE cs.id = ${sessionId}
+  `
+  if (!session) throw new Error(`Session ${sessionId} not found`)
+
+  const [deployment] = await db`
+    SELECT * FROM deployments
+    WHERE cc_session_id = ${sessionId}
+      AND deploy_status IN ('deployed', 'healthy')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `
+  if (!deployment) throw new Error(`No deployed deployment found for session ${sessionId}`)
+
+  const meta = session.meta || {}
+  const branch = meta.branch || 'main'
+  const pm2Name = meta.pm2_name || null
+  const repoPath = session.repo_path || session.working_dir
+  if (!repoPath) throw new Error('No repo path for revert')
+
+  await revertDeployment(
+    deployment.id,
+    sessionId,
+    repoPath,
+    deployment.commit_sha,
+    branch,
+    pm2Name,
+    session.codebase_name,
+  )
+}
+
+module.exports = { deploySession, revertSession, runHealthCheck }

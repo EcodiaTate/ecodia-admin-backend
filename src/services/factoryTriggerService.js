@@ -239,34 +239,46 @@ async function dispatchFromCapabilityRequest(request) {
 
 // ─── Trigger: Self-Modification (Factory modifies itself) ───────────
 
-let selfModToday = 0
-let selfModDayStart = Date.now()
-const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '3', 10)
+// Sliding window: track timestamps of recent dispatches, not a daily counter.
+// Prevents boundary gaming (e.g. 3 at 11:59pm + 3 at 12:01am).
+const selfModTimestamps = []
+// 0 = unlimited. Raise this in .env only if you need to slow things down.
+const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '0', 10)
+const SLIDING_WINDOW_MS = 24 * 60 * 60 * 1000
 
 async function dispatchSelfModification(spec) {
-  // Daily cap reset
   const now = Date.now()
-  if (now - selfModDayStart > 24 * 60 * 60 * 1000) {
-    selfModToday = 0
-    selfModDayStart = now
+  // Evict entries outside the 24h window
+  while (selfModTimestamps.length > 0 && now - selfModTimestamps[0] > SLIDING_WINDOW_MS) {
+    selfModTimestamps.shift()
   }
 
-  if (selfModToday >= SELF_MOD_DAILY_CAP) {
-    logger.warn(`Factory self-modification daily cap reached (${SELF_MOD_DAILY_CAP}/day)`)
+  if (SELF_MOD_DAILY_CAP > 0 && selfModTimestamps.length >= SELF_MOD_DAILY_CAP) {
+    logger.warn(`Factory self-modification sliding-window cap reached (${SELF_MOD_DAILY_CAP} in last 24h)`)
     return null
   }
-  selfModToday++
+  selfModTimestamps.push(now)
 
   // Resolve to Factory's own codebase
-  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = 'ecodia-admin-backend' LIMIT 1`
+  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = 'ecodiaos-backend' LIMIT 1`
   if (!factoryCb) {
-    logger.warn('Factory self-modification: cannot find ecodia-admin-backend codebase')
+    logger.warn('Factory self-modification: cannot find ecodiaos-backend codebase')
     return null
   }
 
   // Get current system state for context
   const migrationCount = await db`SELECT count(*)::int AS count FROM _migrations`
-  const workerList = 'gmailPoller, calendarPoller, linkedinWorker, kgEmbeddingWorker, kgConsolidationWorker, codebaseIndexWorker, factoryScheduleWorker, symbridgeWorker, workspacePoller, financePoller, heartbeat'
+  // Discover workers dynamically from the workers directory (never hardcode)
+  let workerList = 'unknown'
+  try {
+    const { readdirSync } = require('fs')
+    const { join } = require('path')
+    const workersDir = join(__dirname, '../workers')
+    const files = readdirSync(workersDir).filter(f => f.endsWith('.js'))
+    workerList = files.map(f => f.replace('.js', '')).join(', ')
+  } catch (err) {
+    logger.debug('Could not read workers directory for self-mod context', { error: err.message })
+  }
 
   const session = await createAndStartSession({
     codebaseId: factoryCb.id,
@@ -294,34 +306,33 @@ Implement the changes, ensuring they are backward-compatible and won't break the
     await db`UPDATE cc_sessions SET self_modification = true WHERE id = ${session.id}`.catch(() => {})
   }
 
-  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${selfModToday}/${SELF_MOD_DAILY_CAP} today)`)
+  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${selfModTimestamps.length}/${SELF_MOD_DAILY_CAP} today)`)
 
   return session
 }
 
 // ─── Trigger: Prediction-Based (KG Phase 6 actionable predictions) ──
 
-let predictionDispatchesToday = 0
-let predictionDayStart = Date.now()
-const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '5', 10)
+const predictionTimestamps = []
+// 0 = unlimited. Raise this in .env only if you need to slow things down.
+const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '0', 10)
 
 async function dispatchFromPrediction(prediction) {
-  // Daily cap reset
   const now = Date.now()
-  if (now - predictionDayStart > 24 * 60 * 60 * 1000) {
-    predictionDispatchesToday = 0
-    predictionDayStart = now
+  // Sliding 24h window
+  while (predictionTimestamps.length > 0 && now - predictionTimestamps[0] > SLIDING_WINDOW_MS) {
+    predictionTimestamps.shift()
   }
 
-  if (predictionDispatchesToday >= PREDICTION_DAILY_CAP) {
-    logger.debug(`Prediction dispatch daily cap reached (${PREDICTION_DAILY_CAP}/day)`)
+  if (PREDICTION_DAILY_CAP > 0 && predictionTimestamps.length >= PREDICTION_DAILY_CAP) {
+    logger.debug(`Prediction dispatch sliding-window cap reached (${PREDICTION_DAILY_CAP} in last 24h)`)
     return null
   }
-  predictionDispatchesToday++
+  predictionTimestamps.push(now)
 
   const codebaseId = prediction.codebaseId || await resolveCodebase({ prompt: prediction.description })
 
-  logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${predictionDispatchesToday}/${PREDICTION_DAILY_CAP} today)`)
+  logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${predictionTimestamps.length}/${PREDICTION_DAILY_CAP} today)`)
 
   return createAndStartSession({
     codebaseId,

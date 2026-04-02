@@ -8,6 +8,7 @@ const router = Router()
 router.use(auth)
 
 // POST /api/cortex/chat — multi-turn conversational chat
+// If sessionId is provided, history is loaded from DB and merged.
 router.post('/chat', async (req, res, next) => {
   try {
     const { messages, sessionId } = req.body
@@ -27,9 +28,38 @@ router.post('/chat', async (req, res, next) => {
     }
 
     const result = await cortexService.chat(messages, { sessionId })
+
+    // Persist the latest exchange to this session's history
+    if (sessionId) {
+      cortexService.persistExchange(sessionId, messages, result.blocks).catch((err) => {
+        logger.debug('Cortex session persist failed', { error: err.message })
+      })
+    }
+
     res.json(result)
   } catch (err) {
     logger.error('Cortex chat failed', { error: err.message })
+    next(err)
+  }
+})
+
+// GET /api/cortex/sessions — list recent conversation sessions
+router.get('/sessions', async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50)
+    const sessions = await cortexService.listSessions(limit)
+    res.json(sessions)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/cortex/sessions/:sessionId/history — get session history
+router.get('/sessions/:sessionId/history', async (req, res, next) => {
+  try {
+    const history = await cortexService.getSessionHistory(req.params.sessionId)
+    res.json(history)
+  } catch (err) {
     next(err)
   }
 })

@@ -27,16 +27,54 @@ async function cleanupOrphanedSessions() {
 
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
+
   await cleanupOrphanedSessions().catch(err =>
     logger.error('Orphan cleanup failed on startup', { error: err.message })
   )
 
-  // Start workers
-  try { require('./workers/kgEmbeddingWorker') } catch (err) { logger.debug('KG embedding worker not started', { error: err.message }) }
-  try { require('./workers/kgConsolidationWorker') } catch (err) { logger.debug('KG consolidation worker not started', { error: err.message }) }
-  try { require('./workers/calendarPoller') } catch (err) { logger.debug('Calendar poller not started', { error: err.message }) }
-  try { require('./workers/codebaseIndexWorker') } catch (err) { logger.debug('Codebase index worker not started', { error: err.message }) }
-  try { require('./workers/symbridgeWorker') } catch (err) { logger.debug('Symbridge worker not started', { error: err.message }) }
-  try { require('./workers/factoryScheduleWorker') } catch (err) { logger.debug('Factory schedule worker not started', { error: err.message }) }
-  try { require('./workers/workspacePoller') } catch (err) { logger.debug('Workspace poller not started', { error: err.message }) }
+  // ── Boot: Capability Registry ────────────────────────────────────
+  // Must load before any worker that uses execute() or performAction().
+  // Registers all capabilities from all domains into the live registry.
+  try {
+    require('./capabilities/index')
+  } catch (err) {
+    logger.error('Capability registry failed to boot — actions will not work', { error: err.message })
+  }
+
+  // ── Boot: Workers ─────────────────────────────────────────────────
+  // factoryScheduleWorker is replaced by autonomousMaintenanceWorker.
+  // The mind decides what to do — no cron schedules.
+
+  const workers = [
+    { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
+    { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
+    { name: 'calendarPoller',              path: './workers/calendarPoller' },
+    { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
+    { name: 'symbridgeWorker',             path: './workers/symbridgeWorker' },
+    { name: 'workspacePoller',             path: './workers/workspacePoller' },
+    // ↓ replaces factoryScheduleWorker — no crons, the mind decides
+    { name: 'autonomousMaintenanceWorker', path: './workers/autonomousMaintenanceWorker', start: true },
+  ]
+
+  for (const w of workers) {
+    try {
+      const mod = require(w.path)
+      // Workers that export start() are started explicitly
+      if (w.start && typeof mod.start === 'function') {
+        mod.start()
+      }
+    } catch (err) {
+      logger.debug(`${w.name} not started`, { error: err.message })
+    }
+  }
+
+  // Graceful shutdown — stop the maintenance mind cleanly
+  process.on('SIGTERM', () => {
+    logger.info('SIGTERM received — shutting down')
+    try {
+      const maintenance = require('./workers/autonomousMaintenanceWorker')
+      maintenance.stop()
+    } catch {}
+    server.close(() => process.exit(0))
+  })
 })

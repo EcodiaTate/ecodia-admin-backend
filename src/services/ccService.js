@@ -82,18 +82,25 @@ async function buildContextBundle(session) {
   // Get factory learnings (cross-session knowledge)
   bundle.factoryLearnings = { codebase: [], global: [] }
   try {
+    // Exclude learnings that have decayed below threshold or haven't been
+    // applied in 90+ days (stale patterns mislead more than they help).
+    // Rank by recency of last application, then confidence.
     const codebaseLearnings = session.codebase_id ? await db`
-      SELECT id, pattern_type, pattern_description, confidence, times_applied
+      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at
       FROM factory_learnings
-      WHERE codebase_id = ${session.codebase_id} AND confidence > 0.3
-      ORDER BY confidence DESC, updated_at DESC LIMIT 10
+      WHERE codebase_id = ${session.codebase_id}
+        AND confidence > 0.3
+        AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+      ORDER BY last_applied_at DESC NULLS LAST, confidence DESC, updated_at DESC LIMIT 10
     ` : []
 
     const globalLearnings = await db`
-      SELECT id, pattern_type, pattern_description, confidence, times_applied
+      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at
       FROM factory_learnings
-      WHERE codebase_id IS NULL AND confidence > 0.3
-      ORDER BY confidence DESC, updated_at DESC LIMIT 5
+      WHERE codebase_id IS NULL
+        AND confidence > 0.3
+        AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+      ORDER BY last_applied_at DESC NULLS LAST, confidence DESC, updated_at DESC LIMIT 5
     `
 
     bundle.factoryLearnings.codebase = codebaseLearnings
@@ -453,7 +460,8 @@ async function stopSession(sessionId) {
     activeSessions.delete(sessionId)
   }
 
-  await updateSessionStatus(sessionId, 'complete')
+  // 'stopped' distinguishes human-cancelled from naturally-completed sessions
+  await updateSessionStatus(sessionId, 'stopped')
   await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
   logger.info(`CC session ${sessionId} stopped`)
 }

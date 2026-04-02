@@ -323,6 +323,59 @@ function getLastSyncTime() {
   return time
 }
 
+// ─── Sync Factory Learnings to Organism ─────────────────────────────
+// The organism can never see factory_learnings (Postgres table) via its
+// KG — this bridge fills that gap by pushing recent learnings into the
+// organism's KG as Pattern nodes so it can reason about them.
+
+async function syncFactoryLearnings({ limit = 20 } = {}) {
+  if (!env.ORGANISM_API_URL) return { synced: 0 }
+
+  let synced = 0
+  try {
+    const db = require('../config/db')
+    const learnings = await db`
+      SELECT id, codebase_id, pattern_type, pattern_description, confidence, success,
+             times_applied, last_applied_at, updated_at
+      FROM factory_learnings
+      WHERE confidence > 0.4
+        AND (last_applied_at IS NULL OR last_applied_at > now() - interval '60 days')
+      ORDER BY confidence DESC, updated_at DESC
+      LIMIT ${limit}
+    `
+
+    for (const l of learnings) {
+      try {
+        await axios.post(`${env.ORGANISM_API_URL}/api/v1/memory/entities`, {
+          name: `FactoryLearning:${l.id}`,
+          labels: ['Pattern', 'FactoryLearning'],
+          properties: {
+            pattern_type: l.pattern_type,
+            description: l.pattern_description,
+            confidence: l.confidence,
+            success: l.success,
+            times_applied: l.times_applied || 0,
+            last_applied_at: l.last_applied_at,
+            updated_at: l.updated_at,
+            source: 'factory_learnings',
+          },
+          source: 'factory_learnings_bridge',
+        }, { timeout: 5000 })
+        synced++
+      } catch (err) {
+        logger.debug(`Factory learnings sync: failed for learning ${l.id}`, { error: err.message })
+      }
+    }
+  } catch (err) {
+    logger.warn('syncFactoryLearnings failed', { error: err.message })
+  }
+
+  if (synced > 0) {
+    logger.info(`Memory bridge: synced ${synced} factory learnings to organism`)
+  }
+  return { synced }
+}
+
 module.exports = {
   syncToOrganism,
   syncFromOrganism,
@@ -331,4 +384,5 @@ module.exports = {
   syncSingleNode,
   syncImmediateIfImportant,
   syncImmediateIfUrgent,
+  syncFactoryLearnings,
 }

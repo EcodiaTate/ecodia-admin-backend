@@ -151,7 +151,7 @@ async function checkOrganismHealth() {
         factoryTrigger.dispatchFromThymos({
           severity: 'critical',
           affected_system: 'organism',
-          codebase_name: 'organism',
+          codebase_name: 'organism-backend',
           error_message: `Organism unresponsive after ${MAX_CONSECUTIVE_FAILURES} consecutive health check failures. Last error: ${err.message}`,
           description: 'Organism process is down or not responding to health checks on port 8000. Investigate via pm2 logs, check for runtime errors (uncaught exceptions, missing awaits on coroutines, import failures), and restart or fix as needed.',
           stack_trace: '',
@@ -222,8 +222,11 @@ let monitorInterval = null
 function startMonitoring() {
   if (monitorInterval) return
 
+  let cycleCount = 0
   monitorInterval = setInterval(async () => {
     try {
+      cycleCount++
+
       // Check organism health
       await checkOrganismHealth()
 
@@ -232,6 +235,12 @@ function startMonitoring() {
       const anomalies = detectAnomaly(selfHealth)
       if (anomalies.length > 0) {
         await broadcastHealthAnomaly(anomalies, selfHealth)
+      }
+
+      // Report our own vitals to the organism every 4 cycles (~60s)
+      // so Skia stays current without spamming the symbridge
+      if (cycleCount % 4 === 0) {
+        reportVitals().catch(() => {})
       }
     } catch (err) {
       logger.debug('Vital signs check error', { error: err.message })

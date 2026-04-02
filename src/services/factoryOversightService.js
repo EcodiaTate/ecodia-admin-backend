@@ -87,16 +87,28 @@ async function runPostSessionPipeline(sessionId) {
   broadcastToSession(sessionId, 'cc:stage', { stage: 'reviewing', progress: 0.4 })
 
   // Step 1: DeepSeek review of changes
-  // Skip review under extreme metabolic pressure UNLESS self-modification
+  // Review ALWAYS runs. Under high metabolic pressure, non-self-mod reviews run
+  // async (fire-and-forget to KG for learning) and we proceed on validation alone.
+  // Self-modifications always block on review — the oversight pipeline is the safety net.
   const metabolismBridge = require('./metabolismBridgeService')
   const pressure = metabolismBridge.getPressure()
   let review = null
 
-  if (isSelfMod || pressure <= 0.8) {
-    review = await reviewChanges(session, filesChanged)
+  if (!isSelfMod && pressure > 0.8) {
+    // High pressure: start review async (for KG learning) but don't wait for it
+    logger.info(`Factory oversight: high pressure (${pressure.toFixed(2)}) — running review async, not gating deploy`, { sessionId })
+    reviewChanges(session, filesChanged).then(asyncReview => {
+      if (asyncReview && session.codebase_id) {
+        extractLearningPattern(session, asyncReview.approved ? 'success' : 'rejected', {
+          confidence: asyncReview.confidence,
+          reason: 'async_pressure_review',
+          reviewNotes: asyncReview.notes,
+        }).catch(() => {})
+      }
+    }).catch(() => {})
+    review = { approved: true, notes: 'Review deferred (metabolic pressure > 0.8)', confidence: 0, deferred: true }
   } else {
-    logger.info(`Factory oversight: skipping DeepSeek review (pressure: ${pressure.toFixed(2)})`, { sessionId })
-    review = { approved: true, notes: 'Review skipped (metabolic pressure)', confidence: 0 }
+    review = await reviewChanges(session, filesChanged)
   }
 
   // Step 2: Validate (tests, lint, typecheck)
@@ -134,11 +146,16 @@ async function runPostSessionPipeline(sessionId) {
     return
   }
 
-  // Boost confidence with DeepSeek review score when validation couldn't fully run
+  // Boost confidence with DeepSeek review score when validation couldn't fully run.
+  // Boost is proportional to (reviewConfidence - 0.7) — only activates when review is
+  // meaningfully confident, and the boost magnitude scales with that confidence.
+  // Capped at 0.20 to prevent review alone from carrying a session over the line.
   if (reviewApproved && reviewConfidence > 0.7 && confidence < threshold) {
-    const boost = Math.min(0.25, reviewConfidence * 0.3)
+    const reviewStrength = (reviewConfidence - 0.7) / 0.3  // 0.0–1.0 range
+    const boost = Math.min(0.20, reviewStrength * 0.20)
+    const before = confidence
     confidence = Math.min(confidence + boost, 0.95)
-    logger.info(`Factory oversight: boosted confidence ${(confidence - boost).toFixed(2)} → ${confidence.toFixed(2)} (DeepSeek review: ${reviewConfidence})`, { sessionId })
+    logger.info(`Factory oversight: boosted confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (DeepSeek review: ${reviewConfidence.toFixed(2)}, boost: ${boost.toFixed(2)})`, { sessionId })
     await db`UPDATE cc_sessions SET confidence_score = ${confidence} WHERE id = ${sessionId}`
   }
 
@@ -358,8 +375,8 @@ Respond as JSON:
       return { approved: true, notes: response.slice(0, 200) }
     }
   } catch (err) {
-    logger.debug('DeepSeek review failed (non-blocking)', { error: err.message })
-    return { approved: true, notes: 'Review unavailable' }
+    logger.warn('DeepSeek review failed — treating as unapproved for safety', { error: err.message })
+    return { approved: false, notes: 'Review unavailable (API failure)', confidence: 0 }
   }
 }
 

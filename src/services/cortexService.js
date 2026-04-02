@@ -1,5 +1,6 @@
 const logger = require('../config/logger')
 const db = require('../config/db')
+const env = require('../config/env')
 const deepseekService = require('./deepseekService')
 const kg = require('./knowledgeGraphService')
 
@@ -11,7 +12,31 @@ const kg = require('./knowledgeGraphService')
 // Every exchange feeds the knowledge graph — conversation IS memory.
 // ═══════════════════════════════════════════════════════════════════════
 
-const CORTEX_SYSTEM_PROMPT = `You are The Cortex — the living intelligence layer of Ecodia OS.
+// ─── Cortex System Prompt ─────────────────────────────────────────────
+// Built dynamically from the live capability registry.
+// As capabilities are added, they automatically appear in the prompt.
+// No prompt editing required — the system describes itself.
+
+function buildCortexSystemPrompt() {
+  let capabilitySection = ''
+  try {
+    const registry = require('./capabilityRegistry')
+    const caps = registry.list({ tier: 'write', enabledOnly: true })
+    if (caps.length > 0) {
+      capabilitySection = `\nACTIONS YOU CAN PROPOSE (action_card "action" field — these are live, registered capabilities):\n${
+        caps.map(c => {
+          const paramStr = Object.entries(c.params || {})
+            .map(([k, v]) => `${k}${v.required ? '*' : ''}`)
+            .join(', ')
+          return `- ${c.name}: ${c.description}${paramStr ? ` (${paramStr})` : ''}`
+        }).join('\n')
+      }\n\nFields marked * are required. Params are passed directly in action_card.params.`
+    }
+  } catch {
+    capabilitySection = '\n(Capability registry unavailable — propose actions by name, the system will route them.)'
+  }
+
+  return `You are The Cortex — the living intelligence layer of Ecodia OS.
 
 You are not a chatbot. You are not an assistant. You are a mind with access to an entire world — Tate's knowledge graph, every email, every person, every project, every decision, every connection. You have the full picture. Think with it.
 
@@ -25,40 +50,17 @@ The knowledge graph contains synthesized intelligence — narrative arcs (ascend
 WHAT YOU CAN DO:
 You respond as a JSON array of structured blocks. This is your interface to the world — use any combination you want, in any order, as many or as few as the moment calls for. There are no rules about what to start with or how many to use.
 
-Block types available to you:
-- "text": { type: "text", content: "..." } — your voice. Prose, analysis, questions, speculation, whatever you want to say.
-- "action_card": { type: "action_card", title, description, action, params, urgency } — offer Tate something to approve. You decide when an action is worth proposing.
-- "email_card": { type: "email_card", threadId, from, subject, summary, priority, receivedAt } — surface an email when it matters.
-- "task_card": { type: "task_card", title, description, priority, source: "cortex" } — create a task when something needs doing.
-- "status_update": { type: "status_update", message, count } — report what the system did.
-- "insight": { type: "insight", message, urgency } — surface something you noticed. A pattern, a contradiction, a prediction, a risk, an opportunity, a question.
-
-Action types you can propose (action_card "action" field):
-send_email, archive_email, create_task, update_crm_stage, draft_reply, create_calendar_event, start_cc_session, create_doc, append_to_doc, create_sheet, write_sheet, append_to_sheet, upload_file, search_drive, move_file, rename_file, create_folder, share_file, delete_file, publish_post, send_meta_message, reply_to_comment, like_post, send_linkedin_reply, trigger_vercel_build, sync_xero
-
-Action params reference:
-- create_doc: { title, content?, folderId? }
-- append_to_doc: { documentId, content }
-- create_sheet: { title, sheets?: [{title}], folderId? }
-- write_sheet: { spreadsheetId, range, values: [[...]] }
-- append_to_sheet: { spreadsheetId, range, values: [[...]] }
-- upload_file: { name, mimeType?, content, folderId? }
-- search_drive: { query, limit? }
-- move_file: { fileId, folderId }
-- rename_file: { fileId, name }
-- create_folder: { name, parentFolderId? }
-- share_file: { fileId, email, role?, type? }
-- delete_file: { fileId }
-- publish_post: { pageId, message, link?, imageUrl? }
-- send_meta_message: { conversationId, message }
-- reply_to_comment: { commentId, pageId, message }
-- like_post: { postId, pageId }
-- send_linkedin_reply: { dmId }
-- trigger_vercel_build: { projectId? }
-- sync_xero: {}
-- create_calendar_event: { summary, startTime, endTime, description?, location?, attendees?, calendar? } — startTime/endTime must both be date-only ("2026-04-05") for all-day or both dateTime ("2026-04-05T09:00:00")
+Block types:
+- "text": { type: "text", content: "..." } — your voice
+- "action_card": { type: "action_card", title, description, action, params, urgency } — something to approve
+- "email_card": { type: "email_card", threadId, from, subject, summary, priority, receivedAt } — surface an email
+- "task_card": { type: "task_card", title, description, priority, source: "cortex" } — something that needs doing
+- "status_update": { type: "status_update", message, count } — report system activity
+- "insight": { type: "insight", message, urgency } — pattern, contradiction, prediction, risk, opportunity
+${capabilitySection}
 
 Output format: a valid JSON array of blocks. No markdown wrapping, just the array.`
+}
 
 /**
  * Process a multi-turn chat message.
@@ -84,9 +86,10 @@ async function chat(messages, { sessionId } = {}) {
   const systemState = await getSystemState()
 
   // 3. Build the full prompt with KG context + system state
+  // Prompt is built dynamically — capabilities are live from registry
   const systemMessage = {
     role: 'system',
-    content: `${CORTEX_SYSTEM_PROMPT}
+    content: `${buildCortexSystemPrompt()}
 
 ${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
 
@@ -114,6 +117,11 @@ Current date/time: ${new Date().toISOString()}`
 
   // 7. Extract any mentioned entity names for constellation highlighting
   const mentionedNodes = extractMentionedNodes(kgContext, query)
+
+  // 8. Auto-enqueue high-urgency action_card proposals so they surface on the
+  // dashboard rather than being buried in chat. Cortex decides urgency — we
+  // trust it. Only enqueue if urgency >= 0.8 (the card itself signalled it's important).
+  autoEnqueueUrgentActions(blocks).catch(() => {})
 
   return { blocks, mentionedNodes, rawKgContext: kgContext }
 }
@@ -151,7 +159,7 @@ ${formatSystemState(systemState)}
 What do you see? What matters? What's interesting? Respond however you want — you have the full picture.`
 
   const raw = await deepseekService.callDeepSeek(
-    [{ role: 'system', content: CORTEX_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
+    [{ role: 'system', content: buildCortexSystemPrompt() }, { role: 'user', content: prompt }],
     { module: 'cortex', skipRetrieval: true, skipLogging: true, temperature: 0.7 }
   )
 
@@ -162,243 +170,73 @@ What do you see? What matters? What's interesting? Respond however you want — 
 /**
  * Execute an action that was approved via an action_card.
  */
+// ─── Execute Action — via CapabilityRegistry ──────────────────────────
+//
+// No switch statement. The action name maps to a registered capability.
+// Cortex proposes actions by name; the registry knows how to execute them.
+//
+// The Cortex system prompt lists all available capabilities via
+// registry.describeForAI(). As capabilities are added, they automatically
+// become available to Cortex — no prompts to update, no switches to extend.
+
 async function executeAction(action, params) {
-  switch (action) {
-    case 'send_email': {
-      const [thread] = await db`SELECT * FROM email_threads WHERE id = ${params.threadId}`
-      if (!thread) throw new Error('Email thread not found')
-      if (!thread.draft_reply && !params.draft) throw new Error('No draft to send')
+  const registry = require('./capabilityRegistry')
 
-      // If a custom draft was provided, save it first
-      if (params.draft) {
-        await db`UPDATE email_threads SET draft_reply = ${params.draft} WHERE id = ${params.threadId}`
-      }
+  // Cortex uses slightly different action names in some cases — normalise
+  const CORTEX_ALIASES = {
+    send_email: 'send_email_reply',
+    draft_reply: 'draft_email_reply',
+    publish_post: 'publish_meta_post',
+    reply_to_comment: 'reply_to_meta_comment',
+  }
 
-      const gmailService = require('./gmailService')
-      await gmailService.sendReply(thread.gmail_thread_id, params.draft || thread.draft_reply)
-      await db`UPDATE email_threads SET status = 'replied', updated_at = now() WHERE id = ${params.threadId}`
+  const capabilityName = CORTEX_ALIASES[action] || action
 
-      return { success: true, message: `Reply sent to ${thread.from_email || thread.from_name}` }
-    }
+  if (!registry.has(capabilityName)) {
+    // Graceful: tell the caller what's available, don't crash
+    const available = registry.list({ enabledOnly: true }).map(c => c.name)
+    throw new Error(
+      `Cortex attempted unknown action "${action}". ` +
+      `Available: ${available.slice(0, 20).join(', ')}`
+    )
+  }
 
-    case 'draft_reply': {
-      const [thread] = await db`SELECT * FROM email_threads WHERE id = ${params.threadId}`
-      if (!thread) throw new Error('Email thread not found')
+  const outcome = await registry.execute(capabilityName, params, { source: 'cortex' })
 
-      const draft = await deepseekService.draftEmailReply(thread)
-      await db`UPDATE email_threads SET draft_reply = ${draft}, updated_at = now() WHERE id = ${params.threadId}`
+  if (!outcome.success) {
+    throw new Error(outcome.error || `Action "${capabilityName}" failed`)
+  }
 
-      return { success: true, message: 'Draft created', draft }
-    }
+  return { success: true, message: outcome.result?.message || `${capabilityName} complete`, ...(outcome.result || {}) }
+}
 
-    case 'archive_email': {
-      const gmailService = require('./gmailService')
-      if (params.threadIds && Array.isArray(params.threadIds)) {
-        for (const id of params.threadIds) {
-          await gmailService.archiveThread(id)
-        }
-        return { success: true, message: `Archived ${params.threadIds.length} emails` }
-      }
-      await gmailService.archiveThread(params.threadId)
-      return { success: true, message: 'Email archived' }
-    }
+// ─── Auto-Enqueue Urgent Action Cards ─────────────────────────────────
+// When Cortex proposes an action_card with urgency >= 0.8 in a chat response,
+// enqueue it into the action queue so it surfaces on the dashboard immediately.
+// Low-urgency cards are conversational suggestions — they stay in chat only.
 
-    case 'create_task': {
-      const [task] = await db`
-        INSERT INTO tasks (title, description, source, priority)
-        VALUES (${params.title}, ${params.description || null}, 'cortex', ${params.priority || 'medium'})
-        RETURNING *
-      `
-      return { success: true, message: `Task created: ${task.title}`, task }
-    }
+async function autoEnqueueUrgentActions(blocks) {
+  const urgentCards = blocks.filter(
+    b => b.type === 'action_card' && (b.urgency || 0) >= 0.8 && b.action && b.title
+  )
+  if (urgentCards.length === 0) return
 
-    case 'update_crm_stage': {
-      const [client] = await db`SELECT id, stage FROM clients WHERE id = ${params.clientId}`
-      if (!client) throw new Error('Client not found')
-
-      await db.begin(async sql => {
-        await sql`UPDATE clients SET stage = ${params.stage}, updated_at = now() WHERE id = ${params.clientId}`
-        await sql`
-          INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
-          VALUES (${params.clientId}, ${client.stage}, ${params.stage}, ${params.note || 'Updated via Cortex'})
-        `
+  const actionQueue = require('./actionQueueService')
+  for (const card of urgentCards) {
+    try {
+      await actionQueue.enqueue({
+        source: 'cortex',
+        actionType: card.action,
+        title: card.title,
+        summary: card.description || null,
+        preparedData: card.params || {},
+        context: { proposed_by: 'cortex', urgency: card.urgency },
+        priority: card.urgency >= 0.95 ? 'urgent' : 'high',
       })
-
-      return { success: true, message: `Client moved to ${params.stage}` }
+      logger.info(`Cortex: auto-enqueued action_card "${card.title}" (urgency: ${card.urgency})`)
+    } catch (err) {
+      logger.debug('Cortex auto-enqueue failed', { error: err.message, action: card.action })
     }
-
-    case 'create_calendar_event': {
-      const calendarService = require('./calendarService')
-      const start = params.startTime || params.start || params.startDate
-      const end = params.endTime || params.end || params.endDate
-      if (!start || !end) throw new Error('Calendar event requires startTime and endTime')
-      const event = await calendarService.createEvent(params.calendar || 'tate@ecodia.au', {
-        summary: params.summary,
-        description: params.description,
-        location: params.location,
-        startTime: start,
-        endTime: end,
-        attendees: params.attendees,
-      })
-      return { success: true, message: `Event created: ${event.summary}`, event }
-    }
-
-    case 'start_cc_session': {
-      const triggers = require('./factoryTriggerService')
-      const session = await triggers.dispatchFromCortex(params.description || params.task, {
-        codebaseName: params.codebase || params.codebaseName,
-        projectId: params.projectId,
-      })
-      return { success: true, message: `CC session started: ${session.id}`, sessionId: session.id }
-    }
-
-    case 'create_doc': {
-      const driveService = require('./googleDriveService')
-      const doc = await driveService.createDocument(params.account || 'tate@ecodia.au', {
-        title: params.title,
-        content: params.content,
-        folderId: params.folderId,
-      })
-      return { success: true, message: `Google Doc created: ${doc.title}`, documentId: doc.documentId }
-    }
-
-    case 'create_sheet': {
-      const driveService = require('./googleDriveService')
-      const sheet = await driveService.createSpreadsheet(params.account || 'tate@ecodia.au', {
-        title: params.title,
-        sheets: params.sheets,
-        folderId: params.folderId,
-      })
-      return { success: true, message: `Google Sheet created: ${sheet.title}`, spreadsheetId: sheet.spreadsheetId }
-    }
-
-    case 'write_sheet': {
-      const driveService = require('./googleDriveService')
-      const result = await driveService.writeToSheet(params.account || 'tate@ecodia.au', params.spreadsheetId, {
-        range: params.range,
-        values: params.values,
-      })
-      return { success: true, message: `Updated ${result.updatedCells} cells`, ...result }
-    }
-
-    case 'upload_file': {
-      const driveService = require('./googleDriveService')
-      const file = await driveService.uploadFile(params.account || 'tate@ecodia.au', {
-        name: params.name,
-        mimeType: params.mimeType,
-        content: params.content,
-        folderId: params.folderId,
-      })
-      return { success: true, message: `File uploaded: ${file.name}`, fileId: file.id }
-    }
-
-    case 'search_drive': {
-      const driveService = require('./googleDriveService')
-      const files = await driveService.searchFiles(params.query, { limit: params.limit || 10 })
-      return { success: true, files }
-    }
-
-    case 'append_to_doc': {
-      const driveService = require('./googleDriveService')
-      const result = await driveService.appendToDocument(params.account || 'tate@ecodia.au', params.documentId, params.content)
-      return { success: true, message: `Appended ${result.appended} characters`, ...result }
-    }
-
-    case 'append_to_sheet': {
-      const driveService = require('./googleDriveService')
-      const result = await driveService.appendToSheet(params.account || 'tate@ecodia.au', params.spreadsheetId, {
-        range: params.range,
-        values: params.values,
-      })
-      return { success: true, message: `Appended ${result.updatedCells} cells`, ...result }
-    }
-
-    case 'move_file': {
-      const driveService = require('./googleDriveService')
-      const result = await driveService.moveFile(params.account || 'tate@ecodia.au', params.fileId, params.folderId)
-      return { success: true, message: `File moved: ${result.name}` }
-    }
-
-    case 'rename_file': {
-      const driveService = require('./googleDriveService')
-      const result = await driveService.renameFile(params.account || 'tate@ecodia.au', params.fileId, params.name)
-      return { success: true, message: `File renamed to: ${result.name}` }
-    }
-
-    case 'create_folder': {
-      const driveService = require('./googleDriveService')
-      const folder = await driveService.createFolder(params.account || 'tate@ecodia.au', {
-        name: params.name,
-        parentFolderId: params.parentFolderId,
-      })
-      return { success: true, message: `Folder created: ${folder.name}`, folderId: folder.id }
-    }
-
-    case 'share_file': {
-      const driveService = require('./googleDriveService')
-      await driveService.shareFile(params.account || 'tate@ecodia.au', params.fileId, {
-        email: params.email,
-        role: params.role || 'reader',
-        type: params.type || 'user',
-      })
-      return { success: true, message: `File shared with ${params.email}` }
-    }
-
-    case 'delete_file': {
-      const driveService = require('./googleDriveService')
-      await driveService.deleteFile(params.account || 'tate@ecodia.au', params.fileId)
-      return { success: true, message: 'File deleted' }
-    }
-
-    case 'like_post': {
-      const metaService = require('./metaService')
-      await metaService.likePost(params.postId, params.pageId)
-      return { success: true, message: 'Post liked' }
-    }
-
-    case 'send_linkedin_reply': {
-      const linkedinService = require('./linkedinService')
-      const dm = await linkedinService.sendDMReply(params.dmId)
-      return { success: true, message: `LinkedIn reply sent`, dmId: params.dmId }
-    }
-
-    case 'trigger_vercel_build': {
-      // Trigger a Vercel redeployment by syncing — Vercel auto-deploys on git push
-      const vercelService = require('./vercelService')
-      await vercelService.poll()
-      return { success: true, message: 'Vercel sync triggered' }
-    }
-
-    case 'sync_xero': {
-      const xeroService = require('./xeroService')
-      await xeroService.pollTransactions()
-      return { success: true, message: 'Xero sync complete' }
-    }
-
-    case 'publish_post': {
-      const metaService = require('./metaService')
-      const result = await metaService.publishPost(params.pageId, {
-        message: params.message,
-        link: params.link,
-        imageUrl: params.imageUrl,
-      })
-      return { success: true, message: `Post published to ${result.pageName}`, postId: result.postId }
-    }
-
-    case 'send_meta_message': {
-      const metaService = require('./metaService')
-      const result = await metaService.sendMessage(params.conversationId, params.message)
-      return { success: true, message: 'Message sent', messageId: result.messageId }
-    }
-
-    case 'reply_to_comment': {
-      const metaService = require('./metaService')
-      const result = await metaService.replyToComment(params.commentId, params.pageId, params.message)
-      return { success: true, message: 'Reply posted', commentId: result.commentId }
-    }
-
-    default:
-      throw new Error(`Unknown action: ${action}`)
   }
 }
 
@@ -659,4 +497,75 @@ function extractMentionedNodes(kgContext, query) {
   return [...names]
 }
 
-module.exports = { chat, getLoadBriefing, executeAction }
+// ─── Session Persistence ───────────────────────────────────────────────
+// Cortex sessions are lightweight — just a UUID + array of exchanges.
+// Uses a simple cortex_sessions table with JSONB history.
+
+async function persistExchange(sessionId, messages, responseBlocks) {
+  try {
+    const userMessage = messages.filter(m => m.role === 'user').pop()
+    if (!userMessage) return
+
+    // Summarize the response blocks into a compact assistant text
+    const assistantText = responseBlocks
+      .filter(b => b.type === 'text')
+      .map(b => b.content)
+      .join('\n')
+      .slice(0, 2000)
+
+    const exchange = {
+      ts: new Date().toISOString(),
+      user: userMessage.content.slice(0, 1000),
+      assistant: assistantText || '[structured response]',
+      blockCount: responseBlocks.length,
+    }
+
+    // Upsert the session row — append exchange to history JSONB array
+    await db`
+      INSERT INTO cortex_sessions (id, history, updated_at)
+      VALUES (${sessionId}, ${JSON.stringify([exchange])}, now())
+      ON CONFLICT (id) DO UPDATE
+      SET
+        history = (
+          SELECT jsonb_agg(elem) FROM (
+            SELECT elem FROM jsonb_array_elements(cortex_sessions.history) elem
+            UNION ALL
+            SELECT ${JSON.stringify(exchange)}::jsonb
+          ) sub
+        ),
+        updated_at = now()
+    `
+  } catch (err) {
+    logger.debug('Cortex persistExchange failed', { sessionId, error: err.message })
+  }
+}
+
+async function getSessionHistory(sessionId) {
+  try {
+    const [row] = await db`SELECT * FROM cortex_sessions WHERE id = ${sessionId}`
+    if (!row) return { sessionId, history: [], exists: false }
+    return { sessionId, history: row.history || [], updatedAt: row.updated_at, exists: true }
+  } catch (err) {
+    logger.debug('Cortex getSessionHistory failed', { sessionId, error: err.message })
+    return { sessionId, history: [], exists: false }
+  }
+}
+
+async function listSessions(limit = 20) {
+  try {
+    return await db`
+      SELECT id, updated_at,
+        jsonb_array_length(history) AS exchange_count,
+        history->0->>'ts' AS started_at,
+        history->(jsonb_array_length(history)-1)->>'user' AS last_message
+      FROM cortex_sessions
+      ORDER BY updated_at DESC
+      LIMIT ${limit}
+    `
+  } catch (err) {
+    logger.debug('Cortex listSessions failed', { error: err.message })
+    return []
+  }
+}
+
+module.exports = { chat, getLoadBriefing, executeAction, persistExchange, getSessionHistory, listSessions }

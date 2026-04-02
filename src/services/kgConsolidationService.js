@@ -1125,16 +1125,17 @@ Respond as JSON:
 async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
   if (!env.DEEPSEEK_API_KEY) return []
 
-  // FREEDOM UPGRADE: Pressure-modulated dreaming
-  // Low pressure = more rounds (more creative exploration)
-  // High pressure = fewer rounds (conserve resources)
+  // Pressure-modulated dreaming — never fully skipped.
+  // High pressure is EXACTLY when free association matters most: finding unexpected
+  // connections that could open new revenue paths or surface hidden problems.
+  // Low pressure = abundant exploration; high pressure = focused single-round probe.
   if (rounds === undefined) {
     try {
       const metabolismBridge = require('./metabolismBridgeService')
       const pressure = metabolismBridge.getPressure()
-      if (pressure > 0.8) return [] // skip Phase 9 under extreme pressure
-      if (pressure > 0.6) rounds = 3
-      else if (pressure < 0.3) rounds = 10 // abundance = more dreaming
+      if (pressure > 0.8) rounds = 1      // survival mode: one targeted probe
+      else if (pressure > 0.6) rounds = 3  // constrained: focused
+      else if (pressure < 0.3) rounds = 10 // abundance: full creative exploration
       else rounds = 5
     } catch {
       rounds = 5
@@ -1681,7 +1682,258 @@ function parseJSON(content) {
   }
 }
 
+// ─── Consolidation Director ───────────────────────────────────────────
+//
+// Replaces the hardcoded 10-phase sequential pipeline.
+//
+// The Director reads the current graph state and asks: what does this
+// graph actually need right now? It selects and orders phases based on
+// what it observes — not based on what number comes next in a list.
+//
+// It uses DeepSeek to interpret the graph state signal and decide.
+// The phases themselves are unchanged — they're good. What changes is
+// who decides when to run them.
+//
+// The old `runConsolidationPipeline` remains available for direct calls
+// (e.g. from tests or API triggers). The Director is the new default.
+
+async function runConsolidationDirector({ dryRun = false } = {}) {
+  logger.info('KG ConsolidationDirector: reading graph state...')
+  const directorStart = Date.now()
+
+  // 1. Read the graph state — what's there and what hasn't been processed
+  const graphState = await readGraphState()
+
+  // 2. Ask DeepSeek: given this state, what synthesis work is most needed?
+  const workPlan = await directConsolidation(graphState)
+
+  logger.info(`KG ConsolidationDirector: plan — ${workPlan.map(p => p.phase).join(', ')}`)
+
+  // 3. Execute exactly what was decided, in the decided order
+  const results = { directed: true, plan: workPlan, phases: {}, durationMs: 0 }
+
+  function emitPhase(eventType, data = {}) {
+    try {
+      const eventBus = require('./internalEventBusService')
+      eventBus.emit(eventType, data)
+    } catch {}
+  }
+
+  const PHASE_MAP = {
+    deduplicate:  () => deduplicateNodes({ dryRun }),
+    abstract:     () => synthesizePatterns({ dryRun }),
+    thread:       () => threadCausalChains({ dryRun }),
+    validate:     () => validateInferredEdges({ dryRun }),
+    contradict:   () => detectContradictions({ dryRun }),
+    narrate:      () => synthesizeNarratives({ dryRun }),
+    predict:      () => generatePredictions({ dryRun }),
+    score:        () => scoreImportance({ dryRun }),
+    episodic:     () => buildEpisodes({ dryRun }),
+    free_associate: () => freeAssociate({ dryRun }),
+    decay:        () => decayStaleNodes({ dryRun }),
+  }
+
+  for (const step of workPlan) {
+    const fn = PHASE_MAP[step.phase]
+    if (!fn) {
+      logger.warn(`KG Director: unknown phase "${step.phase}" — skipping`)
+      continue
+    }
+
+    try {
+      logger.info(`KG Director: running ${step.phase} — ${step.reason}`)
+      const result = await fn()
+      results.phases[step.phase] = result
+      emitPhase(`kg:phase_complete`, { phase: step.phase, reason: step.reason })
+    } catch (err) {
+      logger.error(`KG Director: phase "${step.phase}" failed`, { error: err.message })
+      results.phases[step.phase] = { error: err.message }
+    }
+  }
+
+  results.durationMs = Date.now() - directorStart
+
+  emitPhase('kg:consolidation_complete', {
+    directed: true,
+    phases: workPlan.map(p => p.phase),
+    durationMs: results.durationMs,
+  })
+
+  logger.info(`KG ConsolidationDirector: complete in ${results.durationMs}ms`, {
+    phasesRun: workPlan.length,
+    phases: workPlan.map(p => p.phase),
+  })
+
+  return results
+}
+
+async function readGraphState() {
+  const state = {}
+
+  await Promise.allSettled([
+    runQuery(`MATCH (n) RETURN count(n) AS total`).then(([r]) => {
+      state.totalNodes = r?.get('total')?.toInt?.() ?? 0
+    }),
+
+    runQuery(`
+      MATCH (n)
+      RETURN
+        count(n) FILTER (WHERE n.embedding IS NULL) AS unembedded,
+        count(n) FILTER (WHERE n.is_synthesized = true) AS synthesized,
+        count(n) FILTER (WHERE n.importance IS NULL) AS unscored,
+        count(n) FILTER (WHERE n.stale_since IS NOT NULL) AS stale
+    `).then(([r]) => {
+      state.unembedded = r?.get('unembedded')?.toInt?.() ?? 0
+      state.synthesized = r?.get('synthesized')?.toInt?.() ?? 0
+      state.unscored = r?.get('unscored')?.toInt?.() ?? 0
+      state.stale = r?.get('stale')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    runQuery(`MATCH ()-[r]->() RETURN count(r) AS total, count(r) FILTER (r.inferred = true) AS inferred`).then(([r]) => {
+      state.totalRelationships = r?.get('total')?.toInt?.() ?? 0
+      state.inferredRelationships = r?.get('inferred')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    runQuery(`MATCH (n:Narrative) RETURN count(n) AS c`).then(([r]) => {
+      state.narratives = r?.get('c')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    runQuery(`MATCH (n:Prediction) RETURN count(n) AS c`).then(([r]) => {
+      state.predictions = r?.get('c')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    runQuery(`MATCH (n:Episode) RETURN count(n) AS c`).then(([r]) => {
+      state.episodes = r?.get('c')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    // Nodes with many connections but no synthesis (abstraction candidates)
+    runQuery(`
+      MATCH (n)
+      WHERE n.is_synthesized IS NULL OR n.is_synthesized = false
+      WITH n, size((n)--()) AS degree
+      WHERE degree >= 5
+      RETURN count(n) AS hubs
+    `).then(([r]) => {
+      state.unsynthesizedHubs = r?.get('hubs')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    // People/Projects without narratives
+    runQuery(`
+      MATCH (n) WHERE n.type IN ['Person', 'Project', 'Client']
+        AND NOT (n)-[:HAS_NARRATIVE]->()
+      RETURN count(n) AS c
+    `).then(([r]) => {
+      state.entitiesWithoutNarrative = r?.get('c')?.toInt?.() ?? 0
+    }).catch(() => {}),
+
+    // Recent ingestions (last 24h) — freshness signal
+    runQuery(`
+      MATCH (n) WHERE n.created_at > datetime() - duration('PT24H')
+      RETURN count(n) AS recent
+    `).then(([r]) => {
+      state.recentIngestions = r?.get('recent')?.toInt?.() ?? 0
+    }).catch(() => {}),
+  ])
+
+  return state
+}
+
+async function directConsolidation(graphState) {
+  const deepseekService = require('./deepseekService')
+  const pressure = (() => {
+    try { return require('./metabolismBridgeService').getPressure() } catch { return 0.3 }
+  })()
+
+  const stateDesc = [
+    `Total nodes: ${graphState.totalNodes}`,
+    `Unembedded: ${graphState.unembedded}`,
+    `Synthesized patterns: ${graphState.synthesized}`,
+    `Unscored nodes: ${graphState.unscored}`,
+    `Stale nodes: ${graphState.stale}`,
+    `Inferred relationships: ${graphState.inferredRelationships}`,
+    `Narratives: ${graphState.narratives}`,
+    `Predictions: ${graphState.predictions}`,
+    `Episodes: ${graphState.episodes}`,
+    `Unsynthesized hubs (≥5 connections): ${graphState.unsynthesizedHubs}`,
+    `Entities without narrative: ${graphState.entitiesWithoutNarrative}`,
+    `Recent ingestions (24h): ${graphState.recentIngestions}`,
+    `Metabolic pressure: ${pressure.toFixed(2)}`,
+  ].join('\n')
+
+  const systemPrompt = `You are the Consolidation Director of a knowledge graph memory system.
+Your job: look at the current graph state and decide which synthesis phases to run, in what order, and why.
+
+Available phases:
+- deduplicate: merge near-identical nodes (run when graph grows, or on first run)
+- abstract: synthesize higher-order patterns from hub clusters
+- thread: discover causal/temporal chains between events
+- validate: audit inferred edges, kill garbage (run after thread, or if inferred count is high)
+- contradict: detect conflicting facts (run when there are many recent ingestions)
+- narrate: synthesize narrative arcs for people and projects (run when entities lack narratives)
+- predict: generate LIKELY_NEXT edges from patterns (run when patterns exist but predictions are low)
+- score: compute importance scores (run when many unscored nodes, or regularly)
+- episodic: group temporal clusters into episodes (run when recent ingestions are high)
+- free_associate: embedding-cluster creative discovery (run at low pressure, speculative)
+- decay: prune stale disconnected nodes (run regularly, especially when stale count is high)
+
+Rules:
+- Maximum 5 phases per run (don't exhaust resources)
+- Under high pressure (>0.7): only deduplicate, validate, score, decay
+- Under low pressure (<0.3): free_associate is welcome
+- Always run score somewhere in the plan if unscored > 100
+- Always run decay if stale > 50
+- Return a JSON array of { phase, reason } objects in execution order`
+
+  try {
+    const raw = await deepseekService.callDeepSeek(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Current graph state:\n${stateDesc}\n\nWhat should this consolidation run do?` },
+      ],
+      { module: 'kg_consolidation_director', skipRetrieval: true, skipLogging: true, temperature: 0.3 }
+    )
+
+    const parsed = (() => {
+      try {
+        const s = raw.trim()
+        const jsonStr = s.startsWith('[') ? s : s.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1] || s
+        return JSON.parse(jsonStr)
+      } catch { return null }
+    })()
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.slice(0, 5).filter(p => p.phase && typeof p.phase === 'string')
+    }
+  } catch (err) {
+    logger.warn('KG Director: DeepSeek call failed — using heuristic plan', { error: err.message })
+  }
+
+  // Heuristic fallback — if the mind is unreachable
+  return buildHeuristicPlan(graphState, pressure)
+}
+
+function buildHeuristicPlan(state, pressure) {
+  const plan = []
+
+  if (pressure > 0.7) {
+    // Survival mode: only essential maintenance
+    if ((state.stale || 0) > 30) plan.push({ phase: 'decay', reason: 'High stale count under pressure' })
+    if ((state.unscored || 0) > 50) plan.push({ phase: 'score', reason: 'Many unscored nodes' })
+    return plan
+  }
+
+  // Normal operation: signal-driven
+  if ((state.totalNodes || 0) > 0) plan.push({ phase: 'deduplicate', reason: 'Baseline deduplication' })
+  if ((state.unsynthesizedHubs || 0) > 5) plan.push({ phase: 'abstract', reason: `${state.unsynthesizedHubs} hub nodes lack synthesis` })
+  if ((state.entitiesWithoutNarrative || 0) > 3) plan.push({ phase: 'narrate', reason: `${state.entitiesWithoutNarrative} entities lack narrative arcs` })
+  if ((state.unscored || 0) > 20) plan.push({ phase: 'score', reason: `${state.unscored} unscored nodes` })
+  if ((state.stale || 0) > 20) plan.push({ phase: 'decay', reason: `${state.stale} stale nodes` })
+
+  return plan.slice(0, 5)
+}
+
 module.exports = {
+  // Individual phases (still available for direct/targeted use)
   deduplicateNodes,
   synthesizePatterns,
   threadCausalChains,
@@ -1693,6 +1945,12 @@ module.exports = {
   buildEpisodes,
   freeAssociate,
   decayStaleNodes,
-  runConsolidationPipeline,
+
+  // The Director — reads the graph, decides what to run (new default)
+  runConsolidationPipeline: runConsolidationDirector,
+
+  // Legacy: the full sequential pipeline (all phases, hardcoded order)
+  runFullPipeline: runConsolidationPipeline,
+
   getConsolidationStats,
 }

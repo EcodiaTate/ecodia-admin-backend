@@ -36,15 +36,24 @@ const envSchema = z.object({
   META_APP_ID: z.string().default(''),
   META_APP_SECRET: z.string().default(''),
   META_USER_ACCESS_TOKEN: z.string().default(''),
-  // Freedom upgrade
+  // Freedom / autonomy config
+  // All daily caps: 0 = unlimited. Raise these only if you need to constrain.
   FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.85'),
-  PREDICTION_SESSION_DAILY_CAP: z.string().default('5'),
+  PREDICTION_SESSION_DAILY_CAP: z.string().default('0'),   // 0 = unlimited
   MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.7'),
+  GOOGLE_PRIMARY_ACCOUNT: z.string().default('tate@ecodia.au'),
   DIRECT_ACTION_READ_ENABLED: z.string().default('true'),
-  DIRECT_ACTION_WRITE_ENABLED: z.string().default('false'),
-  SELF_MOD_DAILY_CAP: z.string().default('3'),
+  DIRECT_ACTION_WRITE_ENABLED: z.string().default('true'),  // organism writes enabled
+  SELF_MOD_DAILY_CAP: z.string().default('0'),              // 0 = unlimited
   EVENT_BUS_PERSIST_DEFAULT: z.string().default('false'),
   COGNITIVE_BROADCAST_ENABLED: z.string().default('true'),
+  // Direct action rate limits (per hour, 0 = unlimited per type)
+  DA_RATE_SEND_EMAIL: z.string().default('0'),
+  DA_RATE_CALENDAR_EVENT: z.string().default('0'),
+  DA_RATE_ARCHIVE_EMAIL: z.string().default('0'),
+  DA_RATE_ENQUEUE_ACTION: z.string().default('0'),
+  DA_RATE_FACTORY_SESSION: z.string().default('0'),
+  DA_RATE_DRIVE_DOC: z.string().default('0'),
 })
 
 const parsed = envSchema.safeParse(process.env)

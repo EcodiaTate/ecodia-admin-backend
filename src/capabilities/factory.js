@@ -1,0 +1,55 @@
+const registry = require('../services/capabilityRegistry')
+
+registry.registerMany([
+  {
+    name: 'start_cc_session',
+    description: 'Start a Claude Code Factory session to implement, fix, or improve code in a codebase',
+    tier: 'write',
+    domain: 'factory',
+    priority: 'critical',  // always allowed even under pressure
+    params: {
+      prompt: { type: 'string', required: true, description: 'What to build, fix, or improve' },
+      codebaseId: { type: 'string', required: false, description: 'Target codebase ID (resolved by AI if omitted)' },
+      codebaseName: { type: 'string', required: false, description: 'Codebase name hint for resolution' },
+    },
+    handler: async (params) => {
+      const triggers = require('../services/factoryTriggerService')
+      const session = await triggers.dispatchFromCortex({
+        prompt: params.prompt,
+        codebaseId: params.codebaseId,
+        codebaseName: params.codebaseName,
+      })
+      return { message: `Factory session started`, sessionId: session?.id }
+    },
+  },
+  {
+    name: 'get_factory_status',
+    description: 'Get the current status of Factory sessions — running, queued, recent completions',
+    tier: 'read',
+    domain: 'factory',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const [active] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
+      const recent = await db`
+        SELECT id, status, initial_prompt, confidence_score, started_at, completed_at
+        FROM cc_sessions ORDER BY started_at DESC LIMIT 5
+      `
+      return { activeSessions: active.count, recent }
+    },
+  },
+  {
+    name: 'trigger_vercel_build',
+    description: 'Trigger a Vercel deployment for a project',
+    tier: 'write',
+    domain: 'factory',
+    params: {
+      projectId: { type: 'string', required: false, description: 'Vercel project ID (triggers all if omitted)' },
+    },
+    handler: async (params) => {
+      const vercel = require('../services/vercelService')
+      const result = await vercel.triggerDeploy ? vercel.triggerDeploy(params.projectId) : { error: 'triggerDeploy not available' }
+      return { message: 'Vercel build triggered', result }
+    },
+  },
+])

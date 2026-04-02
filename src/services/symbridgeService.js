@@ -257,6 +257,30 @@ async function routeMessage(message) {
       }, message.correlationId)
       break
     }
+    case 'query_factory_learnings': {
+      // Organism requests Factory cross-session learnings to inform its reasoning.
+      // Returns top learnings filtered by confidence, optionally by codebase.
+      const codebaseFilter = message.payload?.codebase_id || null
+      const limitFilter = Math.min(parseInt(message.payload?.limit, 10) || 20, 50)
+      const learnings = codebaseFilter
+        ? await db`
+            SELECT pattern_type, pattern_description, confidence, success, times_applied, updated_at
+            FROM factory_learnings
+            WHERE (codebase_id = ${codebaseFilter} OR codebase_id IS NULL)
+              AND confidence > 0.35
+              AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+            ORDER BY confidence DESC, updated_at DESC LIMIT ${limitFilter}
+          `.catch(() => [])
+        : await db`
+            SELECT pattern_type, pattern_description, confidence, success, times_applied, updated_at
+            FROM factory_learnings
+            WHERE confidence > 0.4
+              AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+            ORDER BY confidence DESC, updated_at DESC LIMIT ${limitFilter}
+          `.catch(() => [])
+      await send('factory_learnings_result', { learnings, count: learnings.length }, message.correlationId)
+      break
+    }
     case 'direct_action': {
       // Organism executes integration action directly (no CC session)
       const directAction = require('./directActionService')
@@ -292,6 +316,24 @@ async function routeMessage(message) {
         source: message.source || 'organism',
       })
       logger.debug(`Symbridge: received cognitive broadcast (${message.payload.percept_type}, salience: ${message.payload.salience})`)
+      break
+    }
+    case 'rollback_request': {
+      // Organism (or Factory itself) requests a git revert of a previous session
+      const executionId = message.payload.execution_id || message.payload.session_id || message.correlationId
+      if (!executionId) {
+        logger.warn('Symbridge: rollback_request missing execution_id / session_id')
+        break
+      }
+      const deploymentService = require('./deploymentService')
+      try {
+        await deploymentService.revertSession(executionId)
+        logger.info(`Symbridge: rollback completed for session ${executionId}`)
+        await send('rollback_result', { execution_id: executionId, status: 'reverted' }, message.correlationId)
+      } catch (err) {
+        logger.error(`Symbridge: rollback failed for session ${executionId}`, { error: err.message })
+        await send('rollback_result', { execution_id: executionId, status: 'failed', error: err.message }, message.correlationId)
+      }
       break
     }
     default:
@@ -364,11 +406,14 @@ async function pollNeo4jMessages() {
     for (const record of records) {
       const node = record.get('m').properties
       try {
+        const payload = JSON.parse(node.payload)
         const message = {
           type: node.type,
-          payload: JSON.parse(node.payload),
+          payload,
           source: node.source,
           correlationId: node.correlation_id || null,
+          // Neo4j is an internal transport — re-sign so receiveMessage passes auth
+          signature: signMessage(payload),
         }
         await receiveMessage(message)
         await runWrite(

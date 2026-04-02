@@ -176,14 +176,12 @@ async function validateChanges(sessionId) {
 
     if (history.total >= 5) {
       const historicalRate = history.successes / history.total
-      // Weight shifts from 100% heuristic → 70% historical as data accumulates
+      // Weight shifts from 100% heuristic → 30% heuristic as data accumulates (up to 50 samples)
       const heuristicWeight = Math.max(0.3, 1.0 - (history.total / 50))
       confidence = (heuristic * heuristicWeight) + (historicalRate * (1 - heuristicWeight))
 
-      // Data screaming: if this exact pattern has 0% success rate (>5 samples), cap at 0.4
-      if (historicalRate === 0 && history.total >= 5) {
-        confidence = Math.min(confidence, 0.4)
-      }
+      // No floor cap: if historical data screams 0% success, let confidence go there.
+      // The oversight pipeline needs to know the truth — blocking at 0.4 hides real failure signals.
 
       logger.info(`Validation confidence: heuristic=${heuristic.toFixed(2)}, historical=${historicalRate.toFixed(2)} (n=${history.total}), blended=${confidence.toFixed(2)}`, { sessionId })
     }

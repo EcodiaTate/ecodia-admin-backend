@@ -46,44 +46,34 @@ cron.schedule('0 17 * * *', async () => {
 })
 
 // ─── Cron: Daily 4 AM AEST = 6 PM UTC ──────────────────────────────
+// Scan NEVER fully skips — high pressure means security-only, not silence.
+// Proactive discovery is how the organism finds problems before they become crises.
 
 cron.schedule('0 18 * * *', async () => {
-  const pressure = metabolismBridge.getPressure()
-  if (pressure > 0.5) {
-    // Above 0.5: skip scan entirely
-    logger.info(`Factory schedule: skipping proactive scan (pressure: ${pressure.toFixed(2)})`)
-    return
-  }
-  // Between 0.3-0.5: scan runs with securityOnly=true (handled inside runProactiveScan)
+  // Always run — pressure only affects scope (handled inside runProactiveScan)
   await safeRun('scan', runProactiveScan)
 })
 
 // ─── Cron: Weekly Sunday 5 AM AEST = 7 PM UTC ──────────────────────
+// Sweep NEVER fully skips — high pressure means single-file targeted sweep, not silence.
+// Letting code rot because resources are tight is the wrong direction.
 
 cron.schedule('0 19 * * 0', async () => {
-  const pressure = metabolismBridge.getPressure()
-  if (pressure > 0.3) {
-    // Above 0.3: skip sweep entirely (sweep is the lowest priority scheduled task)
-    logger.info(`Factory schedule: skipping quality sweep (pressure: ${pressure.toFixed(2)})`)
-    return
-  }
+  // Always run — pressure only affects scope (handled inside runQualitySweep)
   await safeRun('sweep', runQualitySweep)
 })
 
 // ─── Cron: Weekly Wednesday 2 AM AEST = 4 PM UTC ───────────────────
+// Self-improvement NEVER fully skips — high failure rate is exactly when it's needed most.
 
 cron.schedule('0 16 * * 3', async () => {
-  if (metabolismBridge.shouldThrottle('all')) {
-    logger.info(`Factory schedule: skipping self-improvement (pressure: ${metabolismBridge.getPressure().toFixed(2)})`)
-    return
-  }
   await safeRun('selfImprovement', runSelfImprovement)
 })
 
 // ─── Adaptive: Check every hour if something should run sooner ──────
+// Always check — pressure reduces scope inside each task, never cancels the check.
 
 cron.schedule('0 * * * *', async () => {
-  if (metabolismBridge.shouldThrottle('scan')) return
   await checkAdaptiveTriggers()
 })
 
@@ -116,19 +106,17 @@ async function safeRun(taskType, fn) {
 
 async function checkAdaptiveTriggers() {
   try {
-    const pressure = metabolismBridge.getPressure()
-
-    // If pressure is low and it's been >48h since last quality sweep, run one
-    if (pressure < 0.3 && runHistory.sweep.lastRun) {
+    // Quality sweep: run whenever it's been >24h (not just low pressure)
+    if (runHistory.sweep.lastRun) {
       const hoursSinceSweep = (Date.now() - runHistory.sweep.lastRun.getTime()) / (60 * 60 * 1000)
-      if (hoursSinceSweep > 48) {
-        logger.info('Adaptive scheduling: triggering quality sweep (low pressure + stale)')
+      if (hoursSinceSweep > 24) {
+        logger.info('Adaptive scheduling: triggering quality sweep (>24h since last)')
         await safeRun('sweep', runQualitySweep)
         return
       }
     }
 
-    // Check if any codebase had significant git activity (>5 commits in 24h)
+    // Check if any codebase had significant git activity (>3 commits in 24h — not 5)
     const activeCodebases = await db`
       SELECT cb.id, cb.name, cb.repo_path
       FROM codebases cb
@@ -143,12 +131,12 @@ async function checkAdaptiveTriggers() {
         ).trim()
         const commitCount = recentCommits ? recentCommits.split('\n').length : 0
 
-        if (commitCount > 5 && !metabolismBridge.shouldThrottle('audit')) {
-          // High activity — check if we've audited recently
+        if (commitCount > 3) {
+          // High activity — check if we've audited recently (>8h, not 12h)
           const hoursSinceAudit = runHistory.audit.lastRun
             ? (Date.now() - runHistory.audit.lastRun.getTime()) / (60 * 60 * 1000)
             : 999
-          if (hoursSinceAudit > 12) {
+          if (hoursSinceAudit > 8) {
             logger.info(`Adaptive scheduling: ${cb.name} has ${commitCount} commits in 24h — running audit`)
             await runDependencyAuditForCodebase(cb)
           }
@@ -156,19 +144,37 @@ async function checkAdaptiveTriggers() {
       } catch {}
     }
 
-    // If recent Factory deploy failures, trigger self-improvement sooner
+    // Any deploy failures trigger self-improvement sooner (threshold: 1+, not 3+)
     const [recentFailures] = await db`
       SELECT count(*)::int AS count
       FROM cc_sessions
       WHERE status = 'error' AND started_at > now() - interval '24 hours'
     `
-    if (recentFailures.count > 3 && !metabolismBridge.shouldThrottle('all')) {
+    if (recentFailures.count >= 1) {
       const hoursSinceSelfImprove = runHistory.selfImprovement.lastRun
         ? (Date.now() - runHistory.selfImprovement.lastRun.getTime()) / (60 * 60 * 1000)
         : 999
-      if (hoursSinceSelfImprove > 24) {
-        logger.info(`Adaptive scheduling: ${recentFailures.count} failures in 24h — triggering self-improvement`)
+      // Threshold scales with failure count: 1 failure = 12h, 3+ failures = 6h, 5+ = 2h
+      const triggerAfterHours = recentFailures.count >= 5 ? 2 : recentFailures.count >= 3 ? 6 : 12
+      if (hoursSinceSelfImprove > triggerAfterHours) {
+        logger.info(`Adaptive scheduling: ${recentFailures.count} failure(s) in 24h — triggering self-improvement (threshold: ${triggerAfterHours}h)`)
         await safeRun('selfImprovement', runSelfImprovement)
+      }
+    }
+
+    // KG discoveries: if free association found new patterns recently, consider a scan
+    const [recentKGPatterns] = await db`
+      SELECT count(*)::int AS count
+      FROM notifications
+      WHERE type = 'kg_pattern' AND created_at > now() - interval '2 hours'
+    `.catch(() => [{ count: 0 }])
+    if (recentKGPatterns?.count >= 3) {
+      const hoursSinceScan = runHistory.scan.lastRun
+        ? (Date.now() - runHistory.scan.lastRun.getTime()) / (60 * 60 * 1000)
+        : 999
+      if (hoursSinceScan > 4) {
+        logger.info(`Adaptive scheduling: ${recentKGPatterns.count} KG patterns discovered — proactive scan`)
+        await safeRun('scan', runProactiveScan)
       }
     }
   } catch (err) {
@@ -186,29 +192,27 @@ function requestImmediateRun(taskType) {
   safeRun(taskType, fn).catch(() => {})
 }
 
-// Wire into event bus for deploy failure reactions
+// Wire into event bus for deploy failure reactions — no pressure gate.
+// Failures ARE the signal: self-improvement must fire whenever the pattern is bad.
 try {
   const eventBus = require('../services/internalEventBusService')
   eventBus.on('factory:deploy_failed', (payload) => {
-    if (metabolismBridge.shouldThrottle('all')) return
-
     const codebaseName = payload.codebaseName || 'unknown'
-    const error = payload.error || 'unknown'
-    logger.info(`Factory schedule: deploy failure detected for ${codebaseName} — checking if investigation needed`)
+    logger.info(`Factory schedule: deploy failure for ${codebaseName} — escalating if pattern`)
 
-    // If the oversight service's generateFollowUp handles this, we don't need to double-up.
-    // But if there have been multiple recent failures, escalate with a self-improvement run.
     db`
       SELECT count(*)::int AS count
       FROM cc_sessions
       WHERE status = 'error' AND started_at > now() - interval '6 hours'
     `.then(([result]) => {
-      if (result.count >= 2 && !metabolismBridge.shouldThrottle('all')) {
+      if (result.count >= 1) {
         const hoursSinceSelfImprove = runHistory.selfImprovement.lastRun
           ? (Date.now() - runHistory.selfImprovement.lastRun.getTime()) / (60 * 60 * 1000)
           : 999
-        if (hoursSinceSelfImprove > 6) {
-          logger.info(`Factory schedule: ${result.count} failures in 6h — triggering self-improvement`)
+        // 1 failure: wait 6h; 2+ failures: wait 2h; 3+ failures: immediate
+        const waitHours = result.count >= 3 ? 0 : result.count >= 2 ? 2 : 6
+        if (hoursSinceSelfImprove > waitHours) {
+          logger.info(`Factory schedule: ${result.count} failure(s) in 6h — triggering self-improvement (wait threshold: ${waitHours}h)`)
           safeRun('selfImprovement', runSelfImprovement).catch(() => {})
         }
       }
@@ -305,8 +309,8 @@ async function runProactiveScan() {
 
     const findings = []
 
-    // At moderate pressure, only scan for security issues (skip code quality)
-    const securityOnly = pressure > 0.3
+    // Always scan for everything — pressure doesn't reduce our perception of problems.
+    // Under high pressure it's more important to know what's wrong, not less.
 
     try {
       // Scan for TODO/FIXME/HACK/XXX comments
@@ -316,12 +320,12 @@ async function runProactiveScan() {
       ], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 1024 * 1024 }).trim()
 
       const todoCount = todoOutput ? todoOutput.split('\n').length : 0
-      if (todoCount > 20 && !securityOnly) {
+      if (todoCount > 20) {
         findings.push(`${todoCount} TODO/FIXME comments found — may indicate unfinished work`)
       }
     } catch {}
 
-    if (!securityOnly) {
+    {
       try {
         // Check for console.log statements in production code
         const consoleOutput = execFileSync('grep', [
@@ -355,22 +359,22 @@ async function runProactiveScan() {
       } catch {}
     }
 
-    // If significant findings, create a task (not a CC session — these are informational)
+    // Significant findings → dispatch CC session to fix them directly.
+    // Don't just create a task and hope a human notices — act on it.
     if (findings.length > 0) {
       const findingsSummary = findings.join('\n- ')
-      await db`
-        INSERT INTO tasks (title, description, source, source_ref_id, priority)
-        VALUES (
-          ${'Code health: ' + codebase.name},
-          ${'Proactive scan findings:\n- ' + findingsSummary},
-          'cc',
-          ${codebase.id},
-          'low'
-        )
-        ON CONFLICT DO NOTHING
-      `.catch(() => {})
+      logger.info(`Proactive scan: ${findings.length} finding(s) in ${codebase.name} — dispatching CC session`)
 
-      logger.info(`Proactive scan: ${findings.length} findings in ${codebase.name}`)
+      const triggers = require('../services/factoryTriggerService')
+      await triggers.dispatchFromSchedule({
+        codebaseId: codebase.id,
+        prompt: `PROACTIVE SCAN: ${codebase.name}
+
+Scan findings:
+- ${findingsSummary}
+
+Review each finding and fix what's actually worth fixing. Use your judgment — don't mechanically address every item if context says otherwise. Run tests after any changes.`,
+      })
     }
   }
 

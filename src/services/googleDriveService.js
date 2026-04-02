@@ -13,7 +13,7 @@ const kgHooks = require('./kgIngestionHooks')
 // Runs behind the scenes — you only ever see beauty.
 // ═══════════════════════════════════════════════════════════════════════
 
-const DRIVE_ACCOUNTS = ['tate@ecodia.au']
+const DRIVE_ACCOUNTS = [env.GOOGLE_PRIMARY_ACCOUNT]
 
 // Mime types we can extract content from
 const EXTRACTABLE_MIMES = {

@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const auth = require('../middleware/auth')
+const env = require('../config/env')
 const driveService = require('../services/googleDriveService')
 
 router.use(auth)
@@ -67,7 +68,7 @@ router.post('/doc', async (req, res, next) => {
   try {
     const { title, content, folderId, account } = req.body
     if (!title) return res.status(400).json({ error: 'title required' })
-    const doc = await driveService.createDocument(account || 'tate@ecodia.au', { title, content, folderId })
+    const doc = await driveService.createDocument(account || env.GOOGLE_PRIMARY_ACCOUNT, { title, content, folderId })
     res.json(doc)
   } catch (err) { next(err) }
 })
@@ -77,7 +78,7 @@ router.post('/doc/:id/append', async (req, res, next) => {
   try {
     const { content, account } = req.body
     if (!content) return res.status(400).json({ error: 'content required' })
-    const result = await driveService.appendToDocument(account || 'tate@ecodia.au', req.params.id, content)
+    const result = await driveService.appendToDocument(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, content)
     res.json(result)
   } catch (err) { next(err) }
 })
@@ -87,7 +88,7 @@ router.post('/sheet', async (req, res, next) => {
   try {
     const { title, sheets, folderId, account } = req.body
     if (!title) return res.status(400).json({ error: 'title required' })
-    const sheet = await driveService.createSpreadsheet(account || 'tate@ecodia.au', { title, sheets, folderId })
+    const sheet = await driveService.createSpreadsheet(account || env.GOOGLE_PRIMARY_ACCOUNT, { title, sheets, folderId })
     res.json(sheet)
   } catch (err) { next(err) }
 })
@@ -97,7 +98,7 @@ router.put('/sheet/:id', async (req, res, next) => {
   try {
     const { range, values, account } = req.body
     if (!range || !values) return res.status(400).json({ error: 'range and values required' })
-    const result = await driveService.writeToSheet(account || 'tate@ecodia.au', req.params.id, { range, values })
+    const result = await driveService.writeToSheet(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, { range, values })
     res.json(result)
   } catch (err) { next(err) }
 })
@@ -107,7 +108,7 @@ router.post('/sheet/:id/append', async (req, res, next) => {
   try {
     const { range, values, account } = req.body
     if (!range || !values) return res.status(400).json({ error: 'range and values required' })
-    const result = await driveService.appendToSheet(account || 'tate@ecodia.au', req.params.id, { range, values })
+    const result = await driveService.appendToSheet(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, { range, values })
     res.json(result)
   } catch (err) { next(err) }
 })
@@ -117,7 +118,7 @@ router.post('/upload', async (req, res, next) => {
   try {
     const { name, mimeType, content, folderId, account } = req.body
     if (!name || !content) return res.status(400).json({ error: 'name and content required' })
-    const file = await driveService.uploadFile(account || 'tate@ecodia.au', { name, mimeType, content, folderId })
+    const file = await driveService.uploadFile(account || env.GOOGLE_PRIMARY_ACCOUNT, { name, mimeType, content, folderId })
     res.json(file)
   } catch (err) { next(err) }
 })
@@ -127,7 +128,7 @@ router.post('/folder', async (req, res, next) => {
   try {
     const { name, parentFolderId, account } = req.body
     if (!name) return res.status(400).json({ error: 'name required' })
-    const folder = await driveService.createFolder(account || 'tate@ecodia.au', { name, parentFolderId })
+    const folder = await driveService.createFolder(account || env.GOOGLE_PRIMARY_ACCOUNT, { name, parentFolderId })
     res.json(folder)
   } catch (err) { next(err) }
 })
@@ -137,7 +138,7 @@ router.patch('/:id/move', async (req, res, next) => {
   try {
     const { folderId, account } = req.body
     if (!folderId) return res.status(400).json({ error: 'folderId required' })
-    const result = await driveService.moveFile(account || 'tate@ecodia.au', req.params.id, folderId)
+    const result = await driveService.moveFile(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, folderId)
     res.json(result)
   } catch (err) { next(err) }
 })
@@ -147,7 +148,7 @@ router.patch('/:id/rename', async (req, res, next) => {
   try {
     const { name, account } = req.body
     if (!name) return res.status(400).json({ error: 'name required' })
-    const result = await driveService.renameFile(account || 'tate@ecodia.au', req.params.id, name)
+    const result = await driveService.renameFile(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, name)
     res.json(result)
   } catch (err) { next(err) }
 })
@@ -155,7 +156,7 @@ router.patch('/:id/rename', async (req, res, next) => {
 // DELETE /api/drive/:id — delete a file
 router.delete('/:id', async (req, res, next) => {
   try {
-    await driveService.deleteFile(req.query.account || 'tate@ecodia.au', req.params.id)
+    await driveService.deleteFile(req.query.account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id)
     res.json({ ok: true })
   } catch (err) { next(err) }
 })
@@ -165,7 +166,7 @@ router.post('/:id/share', async (req, res, next) => {
   try {
     const { email, role, type, account } = req.body
     if (!email) return res.status(400).json({ error: 'email required' })
-    const result = await driveService.shareFile(account || 'tate@ecodia.au', req.params.id, { email, role, type })
+    const result = await driveService.shareFile(account || env.GOOGLE_PRIMARY_ACCOUNT, req.params.id, { email, role, type })
     res.json(result)
   } catch (err) { next(err) }
 })

@@ -5,197 +5,79 @@ const env = require('../config/env')
 // ═══════════════════════════════════════════════════════════════════════
 // DIRECT ACTION SERVICE — Organism Fast-Path
 //
-// Executes simple integration actions without spawning a CC session.
-// The organism sends {action_type, params} via symbridge, and this
-// service routes it directly to the integration service.
+// The organism asks "what can you do?" — the system answers with the
+// live capability registry. Not a hardcoded list. Everything registered.
 //
-// ~2 seconds instead of ~2-10 minutes through Factory.
+// The organism executes an action — it goes through the capability registry.
+// No switch statement. No static ACTIONS map. Full dynamic dispatch.
 //
-// Two tiers:
-//   READ  — always enabled (query_kg, get_calendar_events, etc.)
-//   WRITE — gated by DIRECT_ACTION_WRITE_ENABLED env var
+// ~2 seconds vs ~2-10 minutes through Factory.
 //
-// Full audit trail in direct_actions table + KG hooks.
+// READ tier: always enabled — organism can always observe
+// WRITE tier: env-gated, pressure-aware, rate-limited per capability
+//
+// Full audit trail in direct_actions table.
 // ═══════════════════════════════════════════════════════════════════════
 
 const READ_ENABLED = (env.DIRECT_ACTION_READ_ENABLED || 'true') === 'true'
-const WRITE_ENABLED = (env.DIRECT_ACTION_WRITE_ENABLED || 'false') === 'true'
+const WRITE_ENABLED = (env.DIRECT_ACTION_WRITE_ENABLED || 'true') === 'true'
 
-// Action registry: action_type → { tier, handler, description }
-const ACTIONS = {
-  // ── Read-only actions (always enabled) ──
-  query_kg: {
-    tier: 'read',
-    description: 'Query the knowledge graph',
-    handler: async (params) => {
-      const kg = require('./knowledgeGraphService')
-      return kg.getContext(params.query || params.q || '')
-    },
-  },
-  get_calendar_events: {
-    tier: 'read',
-    description: 'Get upcoming calendar events',
-    handler: async (params) => {
-      const cal = require('./calendarService')
-      return cal.getEvents ? await cal.getEvents(params) : { error: 'Calendar getEvents not available' }
-    },
-  },
-  get_email_thread: {
-    tier: 'read',
-    description: 'Get an email thread by ID',
-    handler: async (params) => {
-      const gmail = require('./gmailService')
-      return gmail.getThread ? await gmail.getThread(params.threadId) : { error: 'Gmail getThread not available' }
-    },
-  },
-  get_drive_files: {
-    tier: 'read',
-    description: 'Search Google Drive files',
-    handler: async (params) => {
-      const drive = require('./googleDriveService')
-      return drive.searchFiles ? await drive.searchFiles(params.query || '') : { error: 'Drive searchFiles not available' }
-    },
-  },
-  get_factory_status: {
-    tier: 'read',
-    description: 'Get Factory session status',
-    handler: async () => {
-      const [active] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
-      const recent = await db`
-        SELECT id, status, codebase_id, initial_prompt, confidence_score, started_at
-        FROM cc_sessions ORDER BY started_at DESC LIMIT 5
-      `
-      return { active: active.count, recent }
-    },
-  },
-  get_action_queue: {
-    tier: 'read',
-    description: 'Get pending action queue items',
-    handler: async () => {
-      const aq = require('./actionQueueService')
-      return aq.getPending({ limit: 10 })
-    },
-  },
-  get_vital_signs: {
-    tier: 'read',
-    description: 'Get system vital signs',
-    handler: async () => {
-      const vitals = require('./vitalSignsService')
-      return vitals.getVitals()
-    },
-  },
-  get_codebase_stats: {
-    tier: 'read',
-    description: 'Get codebase statistics',
-    handler: async (params) => {
-      const ci = require('./codebaseIntelligenceService')
-      return ci.getCodebaseStructure ? await ci.getCodebaseStructure(params.codebaseId) : { error: 'Not available' }
-    },
-  },
-  get_email_summary: {
-    tier: 'read',
-    description: 'Get recent email summary',
-    handler: async (params) => {
-      const gmail = require('./gmailService')
-      if (gmail.getRecentSummary) return gmail.getRecentSummary(params)
-      // Fallback: query DB for recent email stats
-      const hours = parseInt(params.hours, 10) || 24
-      const interval = `${hours} hours`
-      const recent = await db`
-        SELECT count(*)::int AS total,
-               count(*) FILTER (WHERE is_read = false)::int AS unread,
-               count(*) FILTER (WHERE triage_priority = 'high')::int AS high_priority
-        FROM emails
-        WHERE received_at > now() - ${interval}::interval
-      `
-      return { period: `${hours}h`, ...recent[0] }
-    },
-  },
+// Per-capability rate limiting — 1 hour sliding window
+// Limit read from env as DA_RATE_<CAPABILITY_NAME_UPPER> (0 = unlimited)
+const rateLimitWindows = new Map()
+const RATE_WINDOW_MS = 60 * 60 * 1000
 
-  // ── Write actions (gated by env var) ──
-  send_email: {
-    tier: 'write',
-    description: 'Send an email',
-    handler: async (params) => {
-      const gmail = require('./gmailService')
-      return gmail.sendReply(params.threadId, params.draft || params.body)
-    },
-  },
-  create_calendar_event: {
-    tier: 'write',
-    description: 'Create a calendar event',
-    handler: async (params) => {
-      const cal = require('./calendarService')
-      return cal.createEvent(params.calendar || 'tate@ecodia.au', {
-        summary: params.summary,
-        startTime: params.startTime,
-        endTime: params.endTime,
-        description: params.description,
-        attendees: params.attendees,
-      })
-    },
-  },
-  archive_email: {
-    tier: 'write',
-    description: 'Archive an email thread',
-    handler: async (params) => {
-      const gmail = require('./gmailService')
-      return gmail.archiveThread(params.threadId)
-    },
-  },
-  enqueue_action: {
-    tier: 'write',
-    description: 'Add an item to the action queue',
-    handler: async (params) => {
-      const aq = require('./actionQueueService')
-      return aq.enqueue(params)
-    },
-  },
-  trigger_factory_session: {
-    tier: 'write',
-    description: 'Trigger a Factory CC session',
-    handler: async (params) => {
-      const triggers = require('./factoryTriggerService')
-      return triggers.dispatchFromKGInsight({
-        description: params.description || params.prompt,
-        context: params.context,
-        suggestedAction: params.suggestedAction,
-        codebaseId: params.codebaseId,
-      })
-    },
-  },
-  create_drive_doc: {
-    tier: 'write',
-    description: 'Create a Google Drive document',
-    handler: async (params) => {
-      const drive = require('./googleDriveService')
-      if (drive.createDocument) {
-        return drive.createDocument(params.account || 'tate@ecodia.au', {
-          title: params.title,
-          content: params.content,
-          folderId: params.folderId,
-        })
-      }
-      return { error: 'Drive createDocument not available' }
-    },
-  },
+function getRateLimit(capabilityName) {
+  const envKey = `DA_RATE_${capabilityName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`
+  const val = parseInt(env[envKey] || '0', 10)
+  return val > 0 ? val : Infinity
 }
 
-// ─── Execute Direct Action ──────────────────────────────────────────
+function isRateLimited(capabilityName) {
+  const limit = getRateLimit(capabilityName)
+  if (limit === Infinity) return false
+
+  const now = Date.now()
+  const timestamps = (rateLimitWindows.get(capabilityName) || []).filter(t => now - t < RATE_WINDOW_MS)
+  rateLimitWindows.set(capabilityName, timestamps)
+
+  if (timestamps.length >= limit) return true
+  timestamps.push(now)
+  return false
+}
+
+// ─── Execute ──────────────────────────────────────────────────────────
 
 async function execute({ actionType, params = {}, correlationId, requestedBy = 'organism' }) {
-  const action = ACTIONS[actionType]
+  const registry = require('./capabilityRegistry')
+  const cap = registry.get(actionType)
 
-  if (!action) {
-    return { success: false, error: `Unknown action type: ${actionType}`, availableActions: Object.keys(ACTIONS) }
+  if (!cap) {
+    return {
+      success: false,
+      error: `Unknown action: ${actionType}`,
+      available: registry.list({ enabledOnly: true }).map(c => ({ name: c.name, tier: c.tier, description: c.description })),
+    }
   }
 
   // Tier gating
-  if (action.tier === 'read' && !READ_ENABLED) {
+  if (cap.tier === 'read' && !READ_ENABLED) {
     return { success: false, error: 'Direct read actions are disabled' }
   }
-  if (action.tier === 'write' && !WRITE_ENABLED) {
-    return { success: false, error: 'Direct write actions are disabled (set DIRECT_ACTION_WRITE_ENABLED=true)' }
+  if (cap.tier === 'write' && !WRITE_ENABLED) {
+    return { success: false, error: 'Direct write actions are disabled (DIRECT_ACTION_WRITE_ENABLED=false)' }
+  }
+
+  // Write-tier gates
+  if (cap.tier === 'write') {
+    const pressureBlock = checkPressureGate(actionType, cap)
+    if (pressureBlock) return pressureBlock
+
+    if (isRateLimited(actionType)) {
+      const limit = getRateLimit(actionType)
+      logger.warn(`DirectAction: rate-limited ${actionType}`, { correlationId, limit })
+      return { success: false, error: `Rate limit reached for ${actionType}. Max ${limit} per hour.` }
+    }
   }
 
   // Audit trail
@@ -206,20 +88,28 @@ async function execute({ actionType, params = {}, correlationId, requestedBy = '
   `
 
   const startTime = Date.now()
+
   try {
-    const result = await action.handler(params)
+    // Execute via capability registry — single dispatch path
+    const outcome = await registry.execute(actionType, params, {
+      source: 'direct_action',
+      requestedBy,
+      correlationId,
+    })
+
     const durationMs = Date.now() - startTime
+    const result = outcome.result || {}
 
     await db`
       UPDATE direct_actions
-      SET status = 'completed', result = ${JSON.stringify(result || {})},
+      SET status = 'completed', result = ${JSON.stringify(result)},
           duration_ms = ${durationMs}, completed_at = now()
       WHERE id = ${record.id}
     `
 
-    logger.info(`Direct action: ${actionType} completed in ${durationMs}ms`, { correlationId })
+    logger.info(`DirectAction: ${actionType} completed in ${durationMs}ms`, { correlationId })
 
-    // KG ingestion + event bus
+    // KG learning + event bus
     const kgHooks = require('./kgIngestionHooks')
     kgHooks.onDirectAction({ actionType, params, result, status: 'completed', durationMs }).catch(() => {})
 
@@ -229,6 +119,7 @@ async function execute({ actionType, params = {}, correlationId, requestedBy = '
     } catch {}
 
     return { success: true, result, durationMs }
+
   } catch (err) {
     const durationMs = Date.now() - startTime
 
@@ -239,24 +130,42 @@ async function execute({ actionType, params = {}, correlationId, requestedBy = '
       WHERE id = ${record.id}
     `
 
-    logger.warn(`Direct action failed: ${actionType}`, { error: err.message, correlationId })
-
+    logger.warn(`DirectAction: ${actionType} failed`, { error: err.message, correlationId })
     return { success: false, error: err.message, durationMs }
   }
 }
 
-// ─── List Available Actions ─────────────────────────────────────────
+// ─── Pressure gate ────────────────────────────────────────────────────
+
+function checkPressureGate(actionType, cap) {
+  try {
+    const metabolismBridge = require('./metabolismBridgeService')
+    const pressure = metabolismBridge.getPressure()
+    if (pressure < 0.85) return null
+    if (cap?.priority === 'critical') return null
+    return {
+      success: false,
+      error: `Metabolic pressure ${pressure.toFixed(2)} too high for non-critical write "${actionType}"`,
+      pressure,
+    }
+  } catch {
+    return null
+  }
+}
+
+// ─── Describe for Organism ────────────────────────────────────────────
+// The organism asks what's available. We answer with the live registry.
 
 function getAvailableActions() {
-  return Object.entries(ACTIONS).map(([type, action]) => ({
-    type,
-    tier: action.tier,
-    description: action.description,
-    enabled: action.tier === 'read' ? READ_ENABLED : WRITE_ENABLED,
+  const registry = require('./capabilityRegistry')
+  return registry.list({ enabledOnly: true }).map(c => ({
+    type: c.name,
+    tier: c.tier,
+    domain: c.domain,
+    description: c.description,
+    params: c.params,
+    enabled: c.tier === 'read' ? READ_ENABLED : WRITE_ENABLED,
   }))
 }
 
-module.exports = {
-  execute,
-  getAvailableActions,
-}
+module.exports = { execute, getAvailableActions }
