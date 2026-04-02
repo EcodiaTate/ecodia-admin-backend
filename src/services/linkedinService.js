@@ -88,6 +88,49 @@ async function triagePendingDMs() {
         await queries.updateDM(dm.id, { status: 'drafting' })
       }
 
+      // Enqueue actionable items
+      const actionQueue = require('./actionQueueService')
+      if (triage.priority === 'urgent' || triage.priority === 'high') {
+        if (triage.draftReply) {
+          await actionQueue.enqueue({
+            source: 'linkedin',
+            sourceRefId: dm.id,
+            actionType: 'send_linkedin_reply',
+            title: `Reply to ${dm.participant_name}`,
+            summary: triage.summary,
+            preparedData: { draft: triage.draftReply },
+            context: { participantName: dm.participant_name, company: dm.participant_company, headline: dm.participant_headline, leadScore: triage.leadScore },
+            priority: triage.priority,
+            expiresInHours: 72,
+          }).catch(() => {})
+        }
+        if (triage.category === 'lead' && triage.leadScore > 0.5) {
+          await actionQueue.enqueue({
+            source: 'linkedin',
+            sourceRefId: dm.id,
+            actionType: 'create_lead',
+            title: `New lead: ${dm.participant_name}${dm.participant_company ? ` (${dm.participant_company})` : ''}`,
+            summary: triage.summary,
+            preparedData: { name: dm.participant_name, company: dm.participant_company, linkedinUrl: dm.participant_linkedin_url, leadScore: triage.leadScore, notes: triage.summary },
+            context: { leadScore: triage.leadScore, signals: triage.leadSignals },
+            priority: triage.leadScore > 0.7 ? 'high' : 'medium',
+            expiresInHours: 168,
+          }).catch(() => {})
+        }
+      } else if (triage.draftReply && triage.priority === 'normal') {
+        await actionQueue.enqueue({
+          source: 'linkedin',
+          sourceRefId: dm.id,
+          actionType: 'send_linkedin_reply',
+          title: `Reply to ${dm.participant_name}`,
+          summary: triage.summary,
+          preparedData: { draft: triage.draftReply },
+          context: { participantName: dm.participant_name, company: dm.participant_company },
+          priority: 'medium',
+          expiresInHours: 168,
+        }).catch(() => {})
+      }
+
       logger.debug(`Triaged DM ${dm.id}: ${triage.category}/${triage.priority}`)
     } catch (err) {
       logger.warn(`Failed to triage DM ${dm.id}: ${err.message}`)

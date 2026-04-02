@@ -21,6 +21,7 @@ const workerRoutes = require('./routes/workers')
 const driveRoutes = require('./routes/drive')
 const vercelRoutes = require('./routes/vercel')
 const metaRoutes = require('./routes/meta')
+const actionQueueRoutes = require('./routes/actionQueue')
 
 const app = express()
 
@@ -64,6 +65,7 @@ app.use('/api/workers', workerRoutes)
 app.use('/api/drive', driveRoutes)
 app.use('/api/vercel', vercelRoutes)
 app.use('/api/meta', metaRoutes)
+app.use('/api/actions', actionQueueRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)

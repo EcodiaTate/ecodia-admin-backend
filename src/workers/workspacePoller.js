@@ -90,4 +90,15 @@ if (env.META_USER_ACCESS_TOKEN) {
   logger.info('Meta Graph API poller started (every 15 min)')
 }
 
+// ─── Action Queue: expire stale items every hour ───────────────────────
+
+const actionQueue = require('../services/actionQueueService')
+cron.schedule('0 * * * *', async () => {
+  try {
+    await actionQueue.expireStale()
+  } catch (err) {
+    logger.debug('Action queue expiry failed', { error: err.message })
+  }
+})
+
 logger.info('Workspace poller worker started')
