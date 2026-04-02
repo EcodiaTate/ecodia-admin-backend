@@ -189,12 +189,15 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
 // ─── Execute (approve + act) ───────────────────────────────────────────
 
 async function execute(actionId) {
+  // Atomically claim the item: SELECT + UPDATE in one query to avoid race conditions
+  // and reduce DB round trips from 3 to 2
   const [item] = await db`
-    SELECT * FROM action_queue WHERE id = ${actionId} AND status = 'pending'
+    UPDATE action_queue
+    SET status = 'approved', approved_at = now()
+    WHERE id = ${actionId} AND status = 'pending'
+    RETURNING *
   `
   if (!item) throw new Error('Action not found or already handled')
-
-  await db`UPDATE action_queue SET status = 'approved', approved_at = now() WHERE id = ${actionId}`
 
   try {
     const result = await performAction(item)
@@ -203,12 +206,10 @@ async function execute(actionId) {
 
     broadcast('action_queue:executed', { id: actionId, result })
 
-    // Redis pub/sub + event bus — use message if present, otherwise stringify the result keys
     const resultSummary = result?.message || (result ? Object.keys(result).join(', ') : 'ok')
     publishRedis('executed', { id: actionId, actionType: item.action_type, result: resultSummary })
     emitEvent('action:executed', { id: actionId, source: item.source, actionType: item.action_type, result: resultSummary })
 
-    // KG learning signal
     const kgHooks = require('./kgIngestionHooks')
     kgHooks.onActionExecuted({ action: item, result }).catch(() => {})
 
@@ -319,6 +320,62 @@ async function dismiss(actionId, { reason } = {}) {
   emitEvent('action:dismissed', { id: actionId, reason: reason || null })
 }
 
+// ─── Batch Dismiss (single SQL) ──────────────────────────────────────
+
+async function batchDismiss(ids, { reason } = {}) {
+  if (!ids?.length) return 0
+  const dismissed = await db`
+    UPDATE action_queue
+    SET status = 'dismissed', updated_at = now(),
+        context = context || ${JSON.stringify({ dismissed_reason: reason || null, dismissed_at: new Date().toISOString() })}
+    WHERE id = ANY(${ids}) AND status = 'pending'
+    RETURNING id
+  `
+  for (const item of dismissed) {
+    broadcast('action_queue:dismissed', { id: item.id })
+    publishRedis('dismissed', { id: item.id })
+    emitEvent('action:dismissed', { id: item.id, reason: reason || null })
+  }
+  return dismissed.length
+}
+
+// ─── Batch Execute (concurrency-limited, priority-ordered) ───────────
+
+async function batchExecute(ids, { concurrency = 3 } = {}) {
+  if (!ids?.length) return { succeeded: 0, failed: 0, results: [] }
+
+  // Fetch all items and sort by priority so urgent items execute first
+  const items = await db`
+    SELECT id FROM action_queue
+    WHERE id = ANY(${ids}) AND status = 'pending'
+    ORDER BY
+      CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+      created_at ASC
+  `
+  const orderedIds = items.map(i => i.id)
+
+  const results = []
+  let succeeded = 0
+  let failed = 0
+
+  // Process in chunks to avoid overwhelming external APIs
+  for (let i = 0; i < orderedIds.length; i += concurrency) {
+    const chunk = orderedIds.slice(i, i + concurrency)
+    const chunkResults = await Promise.allSettled(chunk.map(id => execute(id)))
+    for (const r of chunkResults) {
+      if (r.status === 'fulfilled') {
+        succeeded++
+        results.push({ status: 'fulfilled', value: r.value })
+      } else {
+        failed++
+        results.push({ status: 'rejected', reason: r.reason?.message || 'unknown' })
+      }
+    }
+  }
+
+  return { succeeded, failed, results }
+}
+
 // ─── Query ─────────────────────────────────────────────────────────────
 
 async function getPending({ limit = 20, priority, source } = {}) {
@@ -350,7 +407,14 @@ async function getStats() {
       count(*) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))::int AS pending,
       count(*) FILTER (WHERE status = 'pending' AND priority IN ('urgent', 'high'))::int AS urgent,
       count(*) FILTER (WHERE status = 'executed' AND executed_at > now() - interval '24 hours')::int AS executed_24h,
-      count(*) FILTER (WHERE status = 'dismissed' AND created_at > now() - interval '24 hours')::int AS dismissed_24h
+      count(*) FILTER (WHERE status = 'dismissed' AND created_at > now() - interval '24 hours')::int AS dismissed_24h,
+      -- Queue health: how long items have been waiting
+      EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))))::int AS oldest_pending_seconds,
+      EXTRACT(EPOCH FROM (now() - avg(created_at) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))))::int AS avg_wait_seconds,
+      -- Execution throughput: avg time from creation to execution in last 24h
+      EXTRACT(EPOCH FROM avg(executed_at - created_at) FILTER (WHERE status = 'executed' AND executed_at > now() - interval '24 hours'))::int AS avg_execution_latency_seconds,
+      -- Error rate: items that failed and were reset to pending
+      count(*) FILTER (WHERE status = 'pending' AND error_message IS NOT NULL)::int AS pending_with_errors
     FROM action_queue
   `
   return stats
@@ -404,6 +468,8 @@ module.exports = {
   enqueue,
   execute,
   dismiss,
+  batchDismiss,
+  batchExecute,
   getPending,
   getPendingForSender,
   getRecent,

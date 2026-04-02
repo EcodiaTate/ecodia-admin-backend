@@ -22,16 +22,21 @@ async function cleanupOrphanedSessions() {
     RETURNING id, started_at
   `
   if (orphans.length > 0) {
-    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (hard kill — not caught by SIGTERM handler)`, {
+    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (hard kill — not caught by SIGTERM/SIGINT handler)`, {
       ids: orphans.map(r => r.id),
+      startedAt: orphans.map(r => r.started_at),
     })
   }
 }
 
 // Graceful shutdown — registered at module level so it fires regardless of
-// whether the server has finished starting. PM2 sends SIGTERM on restart.
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received — shutting down')
+// whether the server has finished starting. PM2 sends SIGTERM on restart/delete
+// and SIGINT in some shutdown paths.
+let shuttingDown = false
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return // Prevent double-shutdown from SIGTERM+SIGINT race
+  shuttingDown = true
+  logger.info(`${signal} received — shutting down`)
 
   // Stop active CC sessions gracefully so they don't become orphans
   try {
@@ -42,7 +47,7 @@ process.on('SIGTERM', async () => {
       // stopAllSessions kills child processes and marks DB as 'stopped'
       await Promise.race([
         ccService.stopAllSessions('Process restarting — session stopped gracefully'),
-        new Promise(resolve => setTimeout(resolve, 8000)), // Don't block shutdown >8s
+        new Promise(resolve => setTimeout(resolve, 10000)), // Don't block shutdown >10s (kill_timeout is 12s)
       ])
     }
   } catch (err) {
@@ -54,7 +59,9 @@ process.on('SIGTERM', async () => {
     maintenance.stop()
   } catch {}
   server.close(() => process.exit(0))
-})
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)

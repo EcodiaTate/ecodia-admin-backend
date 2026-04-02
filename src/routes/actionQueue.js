@@ -52,7 +52,7 @@ router.post('/:id/dismiss', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// POST /api/actions/batch/execute — execute multiple actions
+// POST /api/actions/batch/execute — execute multiple actions (concurrency-limited, priority-ordered)
 router.post('/batch/execute', async (req, res, next) => {
   try {
     const { ids } = req.body
@@ -62,22 +62,20 @@ router.post('/batch/execute', async (req, res, next) => {
     if (ids.length > 20) {
       return res.status(400).json({ error: 'Maximum 20 actions per batch' })
     }
-    const results = await Promise.allSettled(ids.map(id => actionQueue.execute(id)))
-    const succeeded = results.filter(r => r.status === 'fulfilled').length
-    const failed = results.filter(r => r.status === 'rejected').length
-    res.json({ succeeded, failed })
+    const result = await actionQueue.batchExecute(ids)
+    res.json({ succeeded: result.succeeded, failed: result.failed })
   } catch (err) { next(err) }
 })
 
-// POST /api/actions/batch/dismiss — dismiss multiple actions
+// POST /api/actions/batch/dismiss — dismiss multiple actions (single SQL query)
 router.post('/batch/dismiss', async (req, res, next) => {
   try {
-    const { ids } = req.body
+    const { ids, reason } = req.body
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'ids array is required' })
     }
-    await Promise.allSettled(ids.map(id => actionQueue.dismiss(id)))
-    res.json({ ok: true, dismissed: ids.length })
+    const dismissed = await actionQueue.batchDismiss(ids, { reason })
+    res.json({ ok: true, dismissed })
   } catch (err) { next(err) }
 })
 
