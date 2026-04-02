@@ -277,6 +277,8 @@ async function startSession(session) {
 
   // Process exit
   proc.on('close', async (code) => {
+    rl.close()
+    stderrRl.close()
     clearTimeout(sessionData.timeout)
     activeSessions.delete(session.id)
 
@@ -327,6 +329,8 @@ async function startSession(session) {
   })
 
   proc.on('error', async (err) => {
+    rl.close()
+    stderrRl.close()
     clearTimeout(sessionData.timeout)
     activeSessions.delete(session.id)
 
