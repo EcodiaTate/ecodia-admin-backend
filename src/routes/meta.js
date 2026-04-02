@@ -55,4 +55,44 @@ router.post('/discover', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ─── Write Operations ──────────────────────────────────────────────────
+
+// POST /api/meta/pages/:pageId/post — publish a post
+router.post('/pages/:pageId/post', async (req, res, next) => {
+  try {
+    const { message, link, imageUrl } = req.body
+    if (!message && !imageUrl) return res.status(400).json({ error: 'message or imageUrl required' })
+    const result = await metaService.publishPost(req.params.pageId, { message, link, imageUrl })
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// DELETE /api/meta/posts/:postId
+router.delete('/posts/:postId', async (req, res, next) => {
+  try {
+    const result = await metaService.deletePost(req.params.postId)
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// POST /api/meta/comments/:commentId/reply — reply to a comment
+router.post('/comments/:commentId/reply', async (req, res, next) => {
+  try {
+    const { pageId, message } = req.body
+    if (!pageId || !message) return res.status(400).json({ error: 'pageId and message required' })
+    const result = await metaService.replyToComment(req.params.commentId, pageId, message)
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// POST /api/meta/conversations/:id/send — send a Messenger message
+router.post('/conversations/:id/send', async (req, res, next) => {
+  try {
+    const { message } = req.body
+    if (!message) return res.status(400).json({ error: 'message required' })
+    const result = await metaService.sendMessage(req.params.id, message)
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
 module.exports = router

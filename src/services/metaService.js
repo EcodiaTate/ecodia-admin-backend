@@ -287,6 +287,113 @@ async function getStats() {
   return stats
 }
 
+// ─── Write Operations ──────────────────────────────────────────────────
+
+async function publishPost(pageDbId, { message, link, imageUrl }) {
+  const [page] = await db`SELECT page_id, access_token, name FROM meta_pages WHERE id = ${pageDbId}`
+  if (!page) throw new Error('Page not found')
+
+  const params = { message }
+  if (link) params.link = link
+
+  let endpoint = `/${page.page_id}/feed`
+
+  // If imageUrl provided, use photos endpoint
+  if (imageUrl) {
+    endpoint = `/${page.page_id}/photos`
+    params.url = imageUrl
+    if (message) params.caption = message
+    delete params.message
+  }
+
+  const data = await graphFetch(endpoint, page.access_token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+
+  logger.info(`Published post to ${page.name}: ${data.id}`)
+
+  // Sync the new post back immediately
+  await syncPosts(pageDbId, page.page_id, page.access_token, 5)
+
+  return { postId: data.id, pageName: page.name }
+}
+
+async function deletePost(postId) {
+  // Find which page owns this post
+  const [post] = await db`
+    SELECT mp.post_id, pg.access_token FROM meta_posts mp
+    JOIN meta_pages pg ON mp.page_id = pg.id
+    WHERE mp.id = ${postId} OR mp.post_id = ${postId}
+    LIMIT 1
+  `
+  if (!post) throw new Error('Post not found')
+
+  await graphFetch(`/${post.post_id}`, post.access_token, { method: 'DELETE' })
+  await db`DELETE FROM meta_posts WHERE post_id = ${post.post_id}`
+
+  logger.info(`Deleted post ${post.post_id}`)
+  return { deleted: true }
+}
+
+async function replyToComment(commentId, pageDbId, message) {
+  const [page] = await db`SELECT access_token FROM meta_pages WHERE id = ${pageDbId}`
+  if (!page) throw new Error('Page not found')
+
+  const data = await graphFetch(`/${commentId}/comments`, page.access_token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  })
+
+  return { commentId: data.id }
+}
+
+async function sendMessage(conversationId, message) {
+  const [conv] = await db`
+    SELECT mc.participant_id, pg.access_token, pg.page_id
+    FROM meta_conversations mc
+    JOIN meta_pages pg ON mc.page_id = pg.id
+    WHERE mc.id = ${conversationId}
+    LIMIT 1
+  `
+  if (!conv) throw new Error('Conversation not found')
+
+  const data = await graphFetch(`/${conv.page_id}/messages`, conv.access_token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      recipient: { id: conv.participant_id },
+      message: { text: message },
+      messaging_type: 'RESPONSE',
+    }),
+  })
+
+  // Store the sent message locally
+  await db`
+    INSERT INTO meta_messages (
+      message_id, conversation_id, sender_name, sender_id,
+      message_text, is_from_page, created_time
+    ) VALUES (
+      ${data.message_id || `sent_${Date.now()}`}, ${conversationId},
+      ${'Page'}, ${conv.page_id},
+      ${message}, ${true}, ${new Date().toISOString()}
+    ) ON CONFLICT (message_id) DO NOTHING
+  `
+
+  logger.info(`Sent message in conversation ${conversationId}`)
+  return { messageId: data.message_id }
+}
+
+async function likePost(postId, pageDbId) {
+  const [page] = await db`SELECT access_token FROM meta_pages WHERE id = ${pageDbId}`
+  if (!page) throw new Error('Page not found')
+
+  await graphFetch(`/${postId}/likes`, page.access_token, { method: 'POST' })
+  return { liked: true }
+}
+
 module.exports = {
   poll,
   discoverPages,
@@ -296,4 +403,10 @@ module.exports = {
   getPosts,
   getConversations,
   getStats,
+  // Write operations
+  publishPost,
+  deletePost,
+  replyToComment,
+  sendMessage,
+  likePost,
 }

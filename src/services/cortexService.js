@@ -25,6 +25,9 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
    - write_sheet params: { spreadsheetId, range, values: [[row1col1, row1col2], [row2col1, row2col2]] }
    - upload_file params: { name, mimeType?, content, folderId? }
    - search_drive params: { query, limit? }
+   - publish_post params: { pageId, message, link?, imageUrl? } — publish to Facebook/Instagram page
+   - send_meta_message params: { conversationId, message } — send a Messenger/Instagram DM reply
+   - reply_to_comment params: { commentId, pageId, message } — reply to a Facebook/Instagram comment
    - create_calendar_event params: { summary, startTime, endTime, description?, location?, attendees?, calendar? }. IMPORTANT: startTime/endTime must BOTH be date-only ("2026-04-05") for all-day events OR BOTH be dateTime ("2026-04-05T09:00:00") — never mix them.
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
@@ -289,6 +292,28 @@ async function executeAction(action, params) {
       const driveService = require('./googleDriveService')
       const files = await driveService.searchFiles(params.query, { limit: params.limit || 10 })
       return { success: true, files }
+    }
+
+    case 'publish_post': {
+      const metaService = require('./metaService')
+      const result = await metaService.publishPost(params.pageId, {
+        message: params.message,
+        link: params.link,
+        imageUrl: params.imageUrl,
+      })
+      return { success: true, message: `Post published to ${result.pageName}`, postId: result.postId }
+    }
+
+    case 'send_meta_message': {
+      const metaService = require('./metaService')
+      const result = await metaService.sendMessage(params.conversationId, params.message)
+      return { success: true, message: 'Message sent', messageId: result.messageId }
+    }
+
+    case 'reply_to_comment': {
+      const metaService = require('./metaService')
+      const result = await metaService.replyToComment(params.commentId, params.pageId, params.message)
+      return { success: true, message: 'Reply posted', commentId: result.commentId }
     }
 
     default:
