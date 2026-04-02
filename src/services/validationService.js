@@ -139,27 +139,58 @@ async function validateChanges(sessionId) {
     logger.info(`Validation typecheck: ${typeResult.passed ? 'PASS' : 'FAIL'}`, { sessionId })
   }
 
-  // Confidence score
-  let confidence = 0
+  // Confidence score — heuristic baseline, then blend with historical outcomes
+  let heuristic = 0
   const noDepsInstalled = !project.depsInstalled
 
   if (noDepsInstalled) {
-    // No deps installed — can't run tests/lint/typecheck
-    // Give baseline confidence (DeepSeek review is the real gate in this case)
-    confidence = 0.55 // just below auto-deploy threshold — DeepSeek review tips it over if approved
-    logger.info(`Validation: deps not installed for ${project.runtime} project — baseline confidence ${confidence}`, { sessionId })
+    heuristic = 0.55
+    logger.info(`Validation: deps not installed for ${project.runtime} project — baseline confidence ${heuristic}`, { sessionId })
   } else {
-    if (results.testPassed === true) confidence += 0.4
-    else if (results.testPassed === null) confidence += 0.2
-    if (results.lintPassed === true) confidence += 0.2
-    else if (results.lintPassed === null) confidence += 0.1
-    if (results.typecheckPassed === true) confidence += 0.2
-    else if (results.typecheckPassed === null) confidence += 0.1
-    if (results.playwrightPassed === true) confidence += 0.1
-    else if (results.playwrightPassed === null) confidence += 0.05
+    if (results.testPassed === true) heuristic += 0.4
+    else if (results.testPassed === null) heuristic += 0.2
+    if (results.lintPassed === true) heuristic += 0.2
+    else if (results.lintPassed === null) heuristic += 0.1
+    if (results.typecheckPassed === true) heuristic += 0.2
+    else if (results.typecheckPassed === null) heuristic += 0.1
+    if (results.playwrightPassed === true) heuristic += 0.1
+    else if (results.playwrightPassed === null) heuristic += 0.05
     const anyFailed = [results.testPassed, results.lintPassed, results.typecheckPassed].some(v => v === false)
-    if (!anyFailed) confidence += 0.1
+    if (!anyFailed) heuristic += 0.1
   }
+  heuristic = Math.min(heuristic, 1.0)
+
+  // Blend with historical outcome data (learned confidence)
+  let confidence = heuristic
+  try {
+    const [history] = await db`
+      SELECT
+        count(*) FILTER (WHERE outcome = 'success')::int AS successes,
+        count(*)::int AS total
+      FROM validation_runs
+      WHERE codebase_id = ${session.codebase_id}
+        AND test_passed IS NOT DISTINCT FROM ${results.testPassed}
+        AND lint_passed IS NOT DISTINCT FROM ${results.lintPassed}
+        AND outcome IS NOT NULL
+    `
+
+    if (history.total >= 5) {
+      const historicalRate = history.successes / history.total
+      // Weight shifts from 100% heuristic → 70% historical as data accumulates
+      const heuristicWeight = Math.max(0.3, 1.0 - (history.total / 50))
+      confidence = (heuristic * heuristicWeight) + (historicalRate * (1 - heuristicWeight))
+
+      // Data screaming: if this exact pattern has 0% success rate (>5 samples), cap at 0.4
+      if (historicalRate === 0 && history.total >= 5) {
+        confidence = Math.min(confidence, 0.4)
+      }
+
+      logger.info(`Validation confidence: heuristic=${heuristic.toFixed(2)}, historical=${historicalRate.toFixed(2)} (n=${history.total}), blended=${confidence.toFixed(2)}`, { sessionId })
+    }
+  } catch (err) {
+    logger.debug('Historical confidence lookup failed (using heuristic)', { error: err.message })
+  }
+
   confidence = Math.min(confidence, 1.0)
 
   const durationMs = Date.now() - startTime

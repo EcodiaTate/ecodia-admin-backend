@@ -516,9 +516,89 @@ Result: ${result?.message || 'completed'}`
       sourceId: action.id,
       context: 'An action from the unified action queue was approved and executed. Track patterns of what gets approved vs dismissed.',
     })
+
+    // Cognitive broadcast: tell the organism an action was executed
+    sendCognitiveBroadcast('action_outcome', 0.4, {
+      source: action.source,
+      action_type: action.action_type,
+      title: action.title,
+      result: result?.message,
+    })
   } catch (err) {
     logger.debug('KG action queue ingestion failed (non-blocking)', { error: err.message })
   }
+}
+
+// ─── Direct Actions (organism → integration without CC) ─────────────
+
+async function onDirectAction({ actionType, params, result, status, durationMs }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Direct action executed (no CC session):
+Type: ${actionType}
+Status: ${status}
+Duration: ${durationMs}ms
+Result: ${JSON.stringify(result).slice(0, 500)}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'direct_action',
+      context: 'A direct action was executed by the organism through EcodiaOS without a Factory CC session. Track which direct actions are used and their outcomes.',
+    })
+  } catch (err) {
+    logger.debug('KG direct action ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Factory Outcome with Immediate Sync ────────────────────────────
+
+async function onFactoryOutcome({ session, outcome, confidence, filesChanged, commitSha, error }) {
+  if (!isEnabled()) return
+
+  // Sync Factory outcomes to organism immediately — Evo needs this for hypothesis formation
+  try {
+    const memBridge = require('./memoryBridgeService')
+    await memBridge.syncImmediateIfImportant({
+      name: `Factory: ${outcome} — ${(session.initial_prompt || '').slice(0, 60)}`,
+      labels: ['FactoryOutcome'],
+      importance: outcome === 'success' ? 0.7 : outcome === 'deploy_failed' ? 0.9 : 0.6,
+      properties: {
+        outcome,
+        confidence,
+        codebase: session.codebase_name,
+        trigger: session.trigger_source,
+        files_changed: (filesChanged || []).slice(0, 10).join(', '),
+      },
+    })
+  } catch {}
+
+  // Cognitive broadcast to organism's Atune
+  sendCognitiveBroadcast('factory_outcome', confidence || 0.5, {
+    session_id: session.id,
+    outcome,
+    codebase: session.codebase_name,
+    files_changed: filesChanged,
+    commit_sha: commitSha,
+    error,
+  })
+}
+
+// ─── Cognitive Broadcast Helper ─────────────────────────────────────
+// Sends structured percepts to the organism's cognitive cycle (Atune)
+
+function sendCognitiveBroadcast(perceptType, salience, content) {
+  if (env.COGNITIVE_BROADCAST_ENABLED === 'false') return
+
+  try {
+    const symbridge = require('./symbridgeService')
+    symbridge.send('cognitive_broadcast', {
+      percept_type: perceptType,
+      salience: Math.max(0, Math.min(1, salience)),
+      content,
+      source: 'ecodiaos',
+      timestamp: new Date().toISOString(),
+    }).catch(() => {})
+  } catch {}
 }
 
 module.exports = {
@@ -540,4 +620,7 @@ module.exports = {
   onMetaConversationUpdated,
   onSymbridgeMessage,
   onActionExecuted,
+  onDirectAction,
+  onFactoryOutcome,
+  sendCognitiveBroadcast,
 }

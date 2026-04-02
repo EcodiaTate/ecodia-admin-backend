@@ -908,6 +908,33 @@ Include 1-3 predictions. Only include predictions with confidence >= 0.5.`
     }
   }
 
+  // FREEDOM UPGRADE: Dispatch actionable predictions to Factory
+  // High-confidence predictions that involve codebases/projects → CC sessions
+  for (const pred of predictions) {
+    if (pred.action !== 'predicted') continue
+    try {
+      const triggers = require('./factoryTriggerService')
+      const result = await triggers.dispatchFromPrediction({
+        description: pred.prediction,
+        basis: `Pattern analysis for ${pred.person}`,
+        confidence: 0.7, // predictions that made it here already passed 0.5 threshold
+      })
+      if (result) {
+        logger.info(`KG prediction → Factory session: ${pred.prediction.slice(0, 60)}`)
+      }
+    } catch (err) {
+      // dispatchFromPrediction handles its own daily cap — this is expected
+      logger.debug('Prediction dispatch skipped', { error: err.message })
+      break // if capped, stop trying
+    }
+  }
+
+  // Emit to event bus
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('kg:prediction_generated', { count: predictions.length })
+  } catch {}
+
   return predictions
 }
 
@@ -1106,8 +1133,24 @@ What event, session, or activity does this cluster represent? Respond with JSON 
 // This finds connections the structured phases never thought to look for.
 // ────────────────────────────────────────────────────────────────────────
 
-async function freeAssociate({ dryRun = false, rounds = 5, clusterSize = 6 } = {}) {
+async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
   if (!env.DEEPSEEK_API_KEY) return []
+
+  // FREEDOM UPGRADE: Pressure-modulated dreaming
+  // Low pressure = more rounds (more creative exploration)
+  // High pressure = fewer rounds (conserve resources)
+  if (rounds === undefined) {
+    try {
+      const metabolismBridge = require('./metabolismBridgeService')
+      const pressure = metabolismBridge.getPressure()
+      if (pressure > 0.8) return [] // skip Phase 9 under extreme pressure
+      if (pressure > 0.6) rounds = 3
+      else if (pressure < 0.3) rounds = 10 // abundance = more dreaming
+      else rounds = 5
+    } catch {
+      rounds = 5
+    }
+  }
 
   const discoveries = []
 
@@ -1309,6 +1352,39 @@ Return 0-3 discoveries. Only include genuinely meaningful connections (confidenc
       logger.warn(`KG free association round ${round} failed`, { error: err.message })
     }
   }
+
+  // FREEDOM UPGRADE: Discovery → Action Pipeline
+  // High-confidence discoveries feed back into the system
+  for (const disc of discoveries) {
+    if (disc.action === 'would_associate') continue
+
+    try {
+      // Send all discoveries to the organism via symbridge
+      const symbridge = require('./symbridgeService')
+      await symbridge.send('discovery', {
+        type: disc.action,
+        description: disc.description || `${disc.from} → ${disc.to} (${disc.rel})`,
+        source: 'free_association',
+      }).catch(() => {})
+
+      // High-confidence insights → notification for humans too (serendipity bonus)
+      if (disc.action === 'insight') {
+        const { broadcast } = require('../websocket/wsManager')
+        broadcast('notification', {
+          type: 'kg_discovery',
+          message: `KG Discovery: ${(disc.description || '').slice(0, 100)}`,
+        })
+      }
+    } catch {}
+  }
+
+  // Emit to event bus
+  try {
+    const eventBus = require('./internalEventBusService')
+    if (discoveries.length > 0) {
+      eventBus.emit('kg:pattern_discovered', { count: discoveries.length, source: 'free_association' })
+    }
+  } catch {}
 
   return discoveries
 }

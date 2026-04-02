@@ -11,6 +11,9 @@ const logger = require('../config/logger')
 //
 // Selectively mirrors high-value nodes between the two graphs.
 // Newer updated_at wins. Both versions preserved via SUPERSEDED_BY.
+//
+// EVENT-DRIVEN SYNC: High-importance nodes (>0.7) sync immediately.
+// Urgent nodes (>0.9) bypass debounce. 30-min bulk sweep as fallback.
 // ═══════════════════════════════════════════════════════════════════════
 
 function sanitizeLabel(label) {
@@ -24,7 +27,105 @@ const SYNC_TO_ORGANISM_MIN_CONNECTIONS = 2
 // Labels worth pulling from the organism
 const SYNC_FROM_ORGANISM_LABELS = ['Narrative', 'Prediction', 'Pattern', 'Episode', 'CausalChain']
 
-// ─── Sync to Organism ───────────────────────────────────────────────
+// Debounce: no re-sync within 60s per node (except urgent)
+const recentlySynced = new Map()
+const DEBOUNCE_MS = 60_000
+const IMPORTANCE_THRESHOLD = parseFloat(env.MEMORY_SYNC_IMMEDIATE_THRESHOLD || '0.7')
+
+// ─── Immediate Single-Node Sync ─────────────────────────────────────
+
+async function syncSingleNode(name, labels, properties, { priority } = {}) {
+  if (!env.ORGANISM_API_URL) return false
+
+  try {
+    await axios.post(`${env.ORGANISM_API_URL}/api/v1/memory/entities`, {
+      name,
+      labels,
+      properties: sanitizeForSync(properties),
+      source: 'ecodiaos_memory_bridge',
+      priority: priority || 'normal',
+    }, { timeout: 5000 })
+
+    logger.debug(`Memory bridge: immediate sync of "${name}" (priority: ${priority || 'normal'})`)
+    return true
+  } catch (err) {
+    logger.debug(`Memory bridge: immediate sync failed for "${name}"`, { error: err.message })
+    return false
+  }
+}
+
+// ─── Sync if Important (with debounce) ──────────────────────────────
+
+async function syncImmediateIfImportant(node) {
+  if (!env.ORGANISM_API_URL) return
+  if (!node || !node.name) return
+
+  const importance = node.importance || node.properties?.importance || 0
+  if (importance < IMPORTANCE_THRESHOLD) return
+
+  // Debounce check
+  const key = node.name
+  const lastSync = recentlySynced.get(key)
+  if (lastSync && (Date.now() - lastSync) < DEBOUNCE_MS) return
+
+  recentlySynced.set(key, Date.now())
+
+  // Clean up stale debounce entries periodically
+  if (recentlySynced.size > 200) {
+    const cutoff = Date.now() - DEBOUNCE_MS
+    for (const [k, v] of recentlySynced) {
+      if (v < cutoff) recentlySynced.delete(k)
+    }
+  }
+
+  await syncSingleNode(
+    node.name,
+    node.labels || [node.label || 'Entity'],
+    node.properties || node,
+  )
+
+  // Emit to event bus
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('memory:high_importance_node', {
+      name: node.name,
+      importance,
+      labels: node.labels || [node.label],
+    })
+  } catch {}
+}
+
+// ─── Sync if Urgent (bypass debounce) ───────────────────────────────
+
+async function syncImmediateIfUrgent(node) {
+  if (!env.ORGANISM_API_URL) return
+  if (!node || !node.name) return
+
+  const importance = node.importance || node.properties?.importance || 0
+  if (importance < 0.9) return
+
+  // Bypass debounce for urgent nodes
+  recentlySynced.set(node.name, Date.now())
+
+  await syncSingleNode(
+    node.name,
+    node.labels || [node.label || 'Entity'],
+    node.properties || node,
+    { priority: 'urgent' },
+  )
+
+  // Emit to event bus
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('memory:urgent_node', {
+      name: node.name,
+      importance,
+      labels: node.labels || [node.label],
+    })
+  } catch {}
+}
+
+// ─── Bulk Sync to Organism (30-min sweep fallback) ──────────────────
 
 async function syncToOrganism() {
   if (!env.ORGANISM_API_URL) return { synced: 0 }
@@ -227,4 +328,7 @@ module.exports = {
   syncFromOrganism,
   mirrorCriticalNodes,
   receiveFromOrganism,
+  syncSingleNode,
+  syncImmediateIfImportant,
+  syncImmediateIfUrgent,
 }

@@ -1,5 +1,6 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
+const env = require('../config/env')
 
 // ═══════════════════════════════════════════════════════════════════════
 // FACTORY TRIGGER SERVICE — Central Dispatch
@@ -241,6 +242,123 @@ async function dispatchFromCapabilityRequest(request) {
   })
 }
 
+// ─── Trigger: Self-Modification (Factory modifies itself) ───────────
+
+let selfModToday = 0
+let selfModDayStart = Date.now()
+const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '3', 10)
+
+async function dispatchSelfModification(spec) {
+  // Daily cap reset
+  const now = Date.now()
+  if (now - selfModDayStart > 24 * 60 * 60 * 1000) {
+    selfModToday = 0
+    selfModDayStart = now
+  }
+
+  if (selfModToday >= SELF_MOD_DAILY_CAP) {
+    logger.warn(`Factory self-modification daily cap reached (${SELF_MOD_DAILY_CAP}/day)`)
+    return null
+  }
+  selfModToday++
+
+  // Resolve to Factory's own codebase
+  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = 'ecodia-admin-backend' LIMIT 1`
+  if (!factoryCb) {
+    logger.warn('Factory self-modification: cannot find ecodia-admin-backend codebase')
+    return null
+  }
+
+  // Get current system state for context
+  const migrationCount = await db`SELECT count(*)::int AS count FROM _migrations`
+  const workerList = 'gmailPoller, calendarPoller, linkedinWorker, kgEmbeddingWorker, kgConsolidationWorker, codebaseIndexWorker, factoryScheduleWorker, symbridgeWorker, workspacePoller, financePoller, heartbeat'
+
+  const session = await createAndStartSession({
+    codebaseId: factoryCb.id,
+    prompt: `SELF-MODIFICATION: ${spec.description || 'Improve Factory'}
+
+${spec.change_spec ? `Proposed Changes:\n${spec.change_spec}` : ''}
+${spec.motivation ? `Motivation: ${spec.motivation}` : ''}
+
+CONTEXT (current Factory state):
+- Applied migrations: ${migrationCount[0]?.count || 'unknown'}
+- Workers: ${workerList}
+- This is the running EcodiaOS backend. Changes you make will be auto-deployed if confidence is high enough (0.85 threshold for self-modifications).
+- Be careful with: server.js, migrate.js, ecosystem.config.js, and any file that could crash the server.
+- If creating new migration files, name them with the next sequential number.
+- Run tests after changes.
+
+Implement the changes, ensuring they are backward-compatible and won't break the running system.`,
+    triggeredBy: 'self_modification',
+    triggerSource: 'self_modification',
+    triggerRefId: spec.id || null,
+  })
+
+  // Mark as self-modification so oversight applies higher threshold
+  if (session) {
+    await db`UPDATE cc_sessions SET self_modification = true WHERE id = ${session.id}`.catch(() => {})
+  }
+
+  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${selfModToday}/${SELF_MOD_DAILY_CAP} today)`)
+
+  return session
+}
+
+// ─── Trigger: Prediction-Based (KG Phase 6 actionable predictions) ──
+
+let predictionDispatchesToday = 0
+let predictionDayStart = Date.now()
+const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '5', 10)
+
+async function dispatchFromPrediction(prediction) {
+  // Daily cap reset
+  const now = Date.now()
+  if (now - predictionDayStart > 24 * 60 * 60 * 1000) {
+    predictionDispatchesToday = 0
+    predictionDayStart = now
+  }
+
+  if (predictionDispatchesToday >= PREDICTION_DAILY_CAP) {
+    logger.debug(`Prediction dispatch daily cap reached (${PREDICTION_DAILY_CAP}/day)`)
+    return null
+  }
+  predictionDispatchesToday++
+
+  const codebaseId = prediction.codebaseId || await resolveCodebase({ prompt: prediction.description })
+
+  logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${predictionDispatchesToday}/${PREDICTION_DAILY_CAP} today)`)
+
+  return createAndStartSession({
+    codebaseId,
+    prompt: `Proactive: KG Prediction\n\nPrediction: ${prediction.description}\nBasis: ${prediction.basis || 'Pattern analysis'}\nConfidence: ${prediction.confidence || 'N/A'}\nTimeframe: ${prediction.timeframe || 'unknown'}\n\nThe Knowledge Graph's prediction engine identified this as likely to happen. Proactively prepare for it or address it now.`,
+    triggeredBy: 'kg_prediction',
+    triggerSource: 'kg_insight',
+    triggerRefId: prediction.id || null,
+  })
+}
+
+// ─── Trigger: Integration Scaffold ──────────────────────────────────
+
+async function dispatchIntegrationScaffold(discovery) {
+  // Uses self-modification pathway since it modifies EcodiaOS
+  return dispatchSelfModification({
+    description: `Scaffold new integration: ${discovery.name || discovery.description}`,
+    change_spec: `Create a new integration service following the established pattern:
+1. Service file: src/services/${discovery.serviceName || 'newService'}Service.js (poll/webhook, process, KG hooks, action queue)
+2. Route file: src/routes/${discovery.routeName || 'new'}.js (CRUD + manual sync endpoint)
+3. KG hooks: Add ingestion hooks to kgIngestionHooks.js
+4. Worker entry: Add polling to workspacePoller.js or create dedicated worker
+
+Follow the pattern established by gmailService.js as the canonical example.
+
+Integration target: ${discovery.description}
+${discovery.apiUrl ? `API URL: ${discovery.apiUrl}` : ''}
+${discovery.authType ? `Auth type: ${discovery.authType}` : ''}`,
+    motivation: discovery.motivation || 'KG free association discovered an integration opportunity',
+    id: discovery.id,
+  })
+}
+
 module.exports = {
   resolveCodebase,
   dispatchFromCortex,
@@ -250,4 +368,7 @@ module.exports = {
   dispatchFromSchedule,
   dispatchFromKGInsight,
   dispatchFromCapabilityRequest,
+  dispatchSelfModification,
+  dispatchFromPrediction,
+  dispatchIntegrationScaffold,
 }

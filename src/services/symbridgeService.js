@@ -134,6 +134,12 @@ async function send(messageType, payload, correlationId = null) {
     direction: 'outbound', messageType, payload, sourceSystem: 'ecodiaos', correlationId,
   }).catch(() => {})
 
+  // Event bus
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('symbridge:message_sent', { type: messageType, correlationId })
+  } catch {}
+
   return { messageId: message.id, delivered, results }
 }
 
@@ -177,6 +183,12 @@ async function routeMessage(message) {
     sourceSystem: message.source || 'organism', correlationId: message.correlationId,
   }).catch(() => {})
 
+  // Emit to event bus for all inbound messages
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit('symbridge:message_received', { type: message.type, source: message.source })
+  } catch {}
+
   switch (message.type) {
     case 'proposal':
     case 'simula_proposal': {
@@ -194,9 +206,17 @@ async function routeMessage(message) {
       await triggers.dispatchFromCapabilityRequest(message.payload)
       break
     }
-    case 'memory_sync': {
+    case 'memory_sync':
+    case 'memory_sync_immediate': {
       const memBridge = require('./memoryBridgeService')
       await memBridge.receiveFromOrganism(message.payload)
+      break
+    }
+    case 'memory_query': {
+      // Organism queries admin KG directly (read-only)
+      const kgService = require('./knowledgeGraphService')
+      const result = await kgService.getContext(message.payload.query || message.payload.q || '')
+      await send('memory_query_result', { result, query: message.payload.query }, message.correlationId)
       break
     }
     case 'metabolism': {
@@ -207,6 +227,49 @@ async function routeMessage(message) {
     case 'health': {
       const vitals = require('./vitalSignsService')
       await vitals.receiveOrganismHealth(message.payload)
+      break
+    }
+    case 'prediction_action':
+    case 'goal_proposal': {
+      // Organism sends prediction-based or autonomous goal → dispatch to Factory
+      const triggers = require('./factoryTriggerService')
+      await triggers.dispatchFromPrediction(message.payload)
+      break
+    }
+    case 'factory_query': {
+      // Organism queries Factory status
+      const [active] = await require('../config/db')`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
+      const recent = await require('../config/db')`SELECT id, status, initial_prompt, confidence_score, started_at FROM cc_sessions ORDER BY started_at DESC LIMIT 5`
+      const metabolismBridge = require('./metabolismBridgeService')
+      await send('factory_query_result', {
+        active_sessions: active.count,
+        recent_sessions: recent,
+        metabolic_state: metabolismBridge.getState(),
+      }, message.correlationId)
+      break
+    }
+    case 'direct_action': {
+      // Organism executes integration action directly (no CC session)
+      const directAction = require('./directActionService')
+      const result = await directAction.execute({
+        actionType: message.payload.action_type,
+        params: message.payload.params || {},
+        correlationId: message.correlationId,
+        requestedBy: message.source || 'organism',
+      })
+      await send('direct_action_result', result, message.correlationId)
+      break
+    }
+    case 'self_modification': {
+      // Organism requests Factory self-modification
+      const triggers = require('./factoryTriggerService')
+      await triggers.dispatchSelfModification(message.payload)
+      break
+    }
+    case 'scaffold_integration': {
+      // Organism requests new integration scaffolding
+      const triggers = require('./factoryTriggerService')
+      await triggers.dispatchIntegrationScaffold(message.payload)
       break
     }
     default:

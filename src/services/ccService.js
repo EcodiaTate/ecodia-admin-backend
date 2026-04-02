@@ -79,6 +79,39 @@ async function buildContextBundle(session) {
     } catch {}
   }
 
+  // Get factory learnings (cross-session knowledge)
+  bundle.factoryLearnings = { codebase: [], global: [] }
+  try {
+    const codebaseLearnings = session.codebase_id ? await db`
+      SELECT id, pattern_type, pattern_description, confidence, times_applied
+      FROM factory_learnings
+      WHERE codebase_id = ${session.codebase_id} AND confidence > 0.3
+      ORDER BY confidence DESC, updated_at DESC LIMIT 10
+    ` : []
+
+    const globalLearnings = await db`
+      SELECT id, pattern_type, pattern_description, confidence, times_applied
+      FROM factory_learnings
+      WHERE codebase_id IS NULL AND confidence > 0.3
+      ORDER BY confidence DESC, updated_at DESC LIMIT 5
+    `
+
+    bundle.factoryLearnings.codebase = codebaseLearnings
+    bundle.factoryLearnings.global = globalLearnings
+
+    // Track that these learnings were applied
+    const allIds = [...codebaseLearnings, ...globalLearnings].map(l => l.id)
+    if (allIds.length > 0) {
+      await db`
+        UPDATE factory_learnings
+        SET times_applied = times_applied + 1, last_applied_at = now()
+        WHERE id = ANY(${allIds})
+      `
+    }
+  } catch (err) {
+    logger.debug('Failed to fetch factory learnings', { error: err.message })
+  }
+
   return bundle
 }
 
@@ -121,6 +154,24 @@ function assemblePrompt(session, bundle) {
     for (const s of bundle.sessionHistory) {
       const files = (s.files_changed || []).slice(0, 5).join(', ')
       parts.push(`- [${s.status}${s.confidence_score ? `, confidence: ${s.confidence_score}` : ''}] ${(s.initial_prompt || '').slice(0, 120)}${files ? ` → files: ${files}` : ''}${s.error_message ? ` (error: ${s.error_message.slice(0, 80)})` : ''}`)
+    }
+    parts.push('')
+  }
+
+  // Factory learnings (cross-session knowledge)
+  const allLearnings = [
+    ...(bundle.factoryLearnings?.codebase || []),
+    ...(bundle.factoryLearnings?.global || []),
+  ]
+  if (allLearnings.length > 0) {
+    parts.push('## Factory Learnings (from previous sessions)')
+    parts.push('These are patterns learned from previous autonomous sessions. Apply them where relevant.')
+    for (const l of allLearnings) {
+      const icon = l.pattern_type === 'dont_try' ? 'AVOID' :
+        l.pattern_type === 'failure_pattern' ? 'FAILED' :
+        l.pattern_type === 'success_pattern' ? 'WORKED' :
+        l.pattern_type === 'technique' ? 'TECHNIQUE' : 'NOTE'
+      parts.push(`- [${icon}] (confidence: ${l.confidence}) ${l.pattern_description}`)
     }
     parts.push('')
   }

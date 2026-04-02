@@ -3,7 +3,7 @@ const logger = require('../config/logger')
 const { broadcast } = require('../websocket/wsManager')
 
 // ═══════════════════════════════════════════════════════════════════════
-// ACTION QUEUE SERVICE
+// ACTION QUEUE SERVICE — With Redis Pub/Sub
 //
 // Unified queue for pre-processed actionable items from every integration.
 // The system does the thinking — triage, draft, classify, prepare data.
@@ -11,7 +11,38 @@ const { broadcast } = require('../websocket/wsManager')
 //
 // Every source (Gmail, LinkedIn, Meta, Calendar, Factory) enqueues items.
 // The dashboard surfaces them. One tap executes.
+//
+// FREEDOM UPGRADE: Redis pub/sub for real-time event streaming.
+// Postgres remains source of truth. Redis is additive.
+// Services and the organism can subscribe to action events.
 // ═══════════════════════════════════════════════════════════════════════
+
+// Lazy Redis — shared with symbridge
+let redis = null
+function getRedis() {
+  if (redis) return redis
+  try {
+    const env = require('../config/env')
+    if (!env.REDIS_URL) return null
+    const Redis = require('ioredis')
+    redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: true })
+    redis.connect().catch(() => { redis = null })
+    return redis
+  } catch { return null }
+}
+
+function publishRedis(event, data) {
+  const r = getRedis()
+  if (!r) return
+  r.publish('ecodiaos:action_events', JSON.stringify({ event, ...data, timestamp: new Date().toISOString() })).catch(() => {})
+}
+
+function emitEvent(type, payload) {
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit(type, payload)
+  } catch {}
+}
 
 // ─── Enqueue ───────────────────────────────────────────────────────────
 
@@ -41,6 +72,10 @@ async function enqueue({ source, sourceRefId, actionType, title, summary, prepar
     summary: item.summary,
     priority: item.priority,
   })
+
+  // Redis pub/sub + event bus
+  publishRedis('new', { id: item.id, source: item.source, actionType: item.action_type, title: item.title, priority: item.priority })
+  emitEvent('action:enqueued', { id: item.id, source: item.source, actionType: item.action_type, title: item.title, priority: item.priority })
 
   return item
 }
@@ -142,6 +177,10 @@ async function execute(actionId) {
     await db`UPDATE action_queue SET status = 'executed', executed_at = now() WHERE id = ${actionId}`
 
     broadcast('action_queue:executed', { id: actionId, result })
+
+    // Redis pub/sub + event bus
+    publishRedis('executed', { id: actionId, actionType: item.action_type, result: result?.message })
+    emitEvent('action:executed', { id: actionId, source: item.source, actionType: item.action_type, result: result?.message })
 
     // KG learning signal
     const kgHooks = require('./kgIngestionHooks')
@@ -276,6 +315,7 @@ async function performAction(item) {
 async function dismiss(actionId) {
   await db`UPDATE action_queue SET status = 'dismissed' WHERE id = ${actionId} AND status = 'pending'`
   broadcast('action_queue:dismissed', { id: actionId })
+  publishRedis('dismissed', { id: actionId })
 }
 
 // ─── Query ─────────────────────────────────────────────────────────────

@@ -5,23 +5,43 @@ const { callDeepSeek } = require('./deepseekService')
 const kgHooks = require('./kgIngestionHooks')
 
 // ═══════════════════════════════════════════════════════════════════════
-// FACTORY OVERSIGHT SERVICE
+// FACTORY OVERSIGHT SERVICE — Freedom Edition
 //
 // Context-aware intelligence layer that supervises the entire
 // CC → validate → deploy → monitor pipeline. Uses DeepSeek with full
-// KG + codebase context to:
+// KG + codebase context.
 //
-// 1. Review CC output before validation (sanity check)
-// 2. Decide whether to auto-deploy or escalate to human
-// 3. Monitor post-deploy health (Vercel deployment status, errors)
-// 4. Report back to trigger source (Cortex, Thymos, Simula)
-// 5. Generate follow-up actions if deploy fails
+// FREEDOM UPGRADES:
+// - Pressure-adjusted deploy thresholds (gradient, not binary)
+// - Self-modification gate (0.85 threshold, mandatory review)
+// - Cross-session learning extraction (patterns to factory_learnings)
+// - Validation outcome tracking (learned confidence signals)
+// - Cognitive broadcasts (outcomes → organism's Atune)
+// - Internal event bus emission (Factory → services discourse)
+// - Learning decay (stale patterns lose confidence)
 // ═══════════════════════════════════════════════════════════════════════
 
 const env = require('../config/env')
 
-const CONFIDENCE_AUTO_DEPLOY_THRESHOLD = parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.7')
+const BASE_AUTO_DEPLOY_THRESHOLD = parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.7')
+const SELF_MOD_THRESHOLD = parseFloat(env.FACTORY_SELF_MODIFY_THRESHOLD || '0.85')
 const CONFIDENCE_ESCALATE_THRESHOLD = parseFloat(env.FACTORY_ESCALATE_THRESHOLD || '0.4')
+
+// ─── Dynamic Threshold Calculation ──────────────────────────────────
+
+function getAutoDeployThreshold(session) {
+  const metabolismBridge = require('./metabolismBridgeService')
+  const pressure = metabolismBridge.getPressure()
+
+  // Self-modification requires higher confidence
+  if (session.self_modification) return SELF_MOD_THRESHOLD
+
+  // Pressure-adjusted: higher pressure = more conservative, lower pressure = more experimental
+  if (pressure < 0.2) return Math.max(0.6, BASE_AUTO_DEPLOY_THRESHOLD - 0.1) // abundance = experimental
+  if (pressure > 0.8) return Math.min(0.9, BASE_AUTO_DEPLOY_THRESHOLD + 0.15) // survival = conservative
+
+  return BASE_AUTO_DEPLOY_THRESHOLD + (pressure * 0.15)
+}
 
 // ─── Full Pipeline Orchestrator ─────────────────────────────────────
 
@@ -41,6 +61,7 @@ async function runPostSessionPipeline(sessionId) {
       stage: 'execution',
       error: session.error_message,
     })
+    await recordOutcome(session, 'execution_failed', { error: session.error_message })
     return
   }
 
@@ -56,12 +77,25 @@ async function runPostSessionPipeline(sessionId) {
     return
   }
 
+  const threshold = getAutoDeployThreshold(session)
+  const isSelfMod = !!session.self_modification
+
   // Mark pipeline as entering oversight review
   await db`UPDATE cc_sessions SET pipeline_stage = 'testing' WHERE id = ${sessionId}`
   broadcastToSession(sessionId, 'cc:stage', { stage: 'reviewing', progress: 0.4 })
 
   // Step 1: DeepSeek review of changes
-  const review = await reviewChanges(session, filesChanged)
+  // Skip review under extreme metabolic pressure UNLESS self-modification
+  const metabolismBridge = require('./metabolismBridgeService')
+  const pressure = metabolismBridge.getPressure()
+  let review = null
+
+  if (isSelfMod || pressure <= 0.8) {
+    review = await reviewChanges(session, filesChanged)
+  } else {
+    logger.info(`Factory oversight: skipping DeepSeek review (pressure: ${pressure.toFixed(2)})`, { sessionId })
+    review = { approved: true, notes: 'Review skipped (metabolic pressure)', confidence: 0 }
+  }
 
   // Step 2: Validate (tests, lint, typecheck)
   let validation = null
@@ -77,8 +111,29 @@ async function runPostSessionPipeline(sessionId) {
   const reviewApproved = review?.approved !== false
   const reviewConfidence = review?.confidence || 0
 
+  // Self-modification: mandatory review approval, no bypass
+  if (isSelfMod && !reviewApproved) {
+    logger.warn(`Factory oversight: self-modification REJECTED by review`, { sessionId })
+    await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${sessionId}`
+    await reportToTriggerSource(session, {
+      success: false,
+      stage: 'review',
+      error: 'Self-modification rejected by DeepSeek review',
+      reviewNotes: review?.notes,
+    })
+    await recordOutcome(session, 'rejected', { confidence, reason: 'self_mod_review_rejected' })
+    return
+  }
+
+  // Self-modification with review concerns: always escalate, never auto-deploy
+  if (isSelfMod && review?.concerns && review.concerns.length > 0) {
+    logger.info(`Factory oversight: self-modification has concerns — escalating`, { sessionId })
+    await escalateToHuman(session, confidence, review, filesChanged)
+    return
+  }
+
   // Boost confidence with DeepSeek review score when validation couldn't fully run
-  if (reviewApproved && reviewConfidence > 0.7 && confidence < CONFIDENCE_AUTO_DEPLOY_THRESHOLD) {
+  if (reviewApproved && reviewConfidence > 0.7 && confidence < threshold) {
     const boost = Math.min(0.25, reviewConfidence * 0.3)
     confidence = Math.min(confidence + boost, 0.95)
     logger.info(`Factory oversight: boosted confidence ${(confidence - boost).toFixed(2)} → ${confidence.toFixed(2)} (DeepSeek review: ${reviewConfidence})`, { sessionId })
@@ -86,9 +141,9 @@ async function runPostSessionPipeline(sessionId) {
   }
 
   // Step 3: Deploy decision
-  if (confidence >= CONFIDENCE_AUTO_DEPLOY_THRESHOLD && reviewApproved) {
+  if (confidence >= threshold && reviewApproved) {
     // Auto-deploy
-    logger.info(`Factory auto-deploying session ${sessionId} (confidence: ${confidence})`)
+    logger.info(`Factory auto-deploying session ${sessionId} (confidence: ${confidence.toFixed(2)}, threshold: ${threshold.toFixed(2)})`)
     try {
       const deploymentService = require('./deploymentService')
       const deployResult = await deploymentService.deploySession(sessionId)
@@ -96,8 +151,11 @@ async function runPostSessionPipeline(sessionId) {
       // Step 4: Post-deploy monitoring
       await monitorPostDeploy(session, deployResult)
 
-      // Step 5: Outcome learning — record success pattern in KG
+      // Step 5: Outcome learning
       await recordOutcome(session, 'success', { confidence, filesChanged, commitSha: deployResult.commitSha })
+
+      // Track validation outcome for learned confidence
+      await trackValidationOutcome(sessionId, 'success')
 
       // Report success
       await reportToTriggerSource(session, {
@@ -106,6 +164,13 @@ async function runPostSessionPipeline(sessionId) {
         commitSha: deployResult.commitSha,
         confidence,
         filesChanged,
+      })
+
+      // Emit to event bus
+      emitEvent('factory:deploy_success', {
+        sessionId, codebaseName: session.codebase_name,
+        confidence, commitSha: deployResult.commitSha, filesChanged,
+        selfModification: isSelfMod,
       })
     } catch (err) {
       logger.error(`Factory deploy failed for session ${sessionId}`, { error: err.message })
@@ -116,37 +181,19 @@ async function runPostSessionPipeline(sessionId) {
         confidence,
       })
       await recordOutcome(session, 'deploy_failed', { confidence, error: err.message })
+      await trackValidationOutcome(sessionId, 'failure')
       await generateFollowUp(session, 'deploy_failed', err.message)
+
+      emitEvent('factory:deploy_failed', {
+        sessionId, codebaseName: session.codebase_name,
+        confidence, error: err.message,
+      })
     }
   } else if (confidence >= CONFIDENCE_ESCALATE_THRESHOLD) {
-    // Needs human review
-    logger.info(`Factory escalating session ${sessionId} to human review (confidence: ${confidence})`)
-    await db`UPDATE cc_sessions SET pipeline_stage = 'testing', deploy_status = 'pending' WHERE id = ${sessionId}`
-
-    await db`
-      INSERT INTO notifications (type, message, link, metadata)
-      VALUES ('factory_review', ${'Factory needs review: ' + (session.initial_prompt || '').slice(0, 100)},
-              ${null}, ${JSON.stringify({
-                sessionId, confidence, filesChanged,
-                codebaseName: session.codebase_name,
-                reviewNotes: review?.notes,
-              })})
-    `
-    broadcast('notification', {
-      type: 'factory_review',
-      message: `CC session needs review (confidence: ${(confidence * 100).toFixed(0)}%)`,
-      sessionId,
-    })
-
-    await reportToTriggerSource(session, {
-      success: null,
-      stage: 'awaiting_review',
-      confidence,
-      message: 'Changes require human review before deployment',
-    })
+    await escalateToHuman(session, confidence, review, filesChanged)
   } else {
     // Too low confidence — reject
-    logger.warn(`Factory rejecting session ${sessionId} (confidence: ${confidence})`)
+    logger.warn(`Factory rejecting session ${sessionId} (confidence: ${confidence.toFixed(2)}, threshold: ${threshold.toFixed(2)})`)
     await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${sessionId}`
 
     await reportToTriggerSource(session, {
@@ -162,8 +209,41 @@ async function runPostSessionPipeline(sessionId) {
     })
 
     await recordOutcome(session, 'rejected', { confidence, reason: 'low_confidence' })
-    await generateFollowUp(session, 'low_confidence', `Confidence ${confidence} below threshold`)
+    await trackValidationOutcome(sessionId, 'failure')
+    await generateFollowUp(session, 'low_confidence', `Confidence ${confidence} below threshold ${threshold}`)
+
+    emitEvent('factory:session_complete', { sessionId, outcome: 'rejected', confidence })
   }
+}
+
+// ─── Escalate to Human ──────────────────────────────────────────────
+
+async function escalateToHuman(session, confidence, review, filesChanged) {
+  logger.info(`Factory escalating session ${session.id} to human review (confidence: ${confidence})`)
+  await db`UPDATE cc_sessions SET pipeline_stage = 'testing', deploy_status = 'pending' WHERE id = ${session.id}`
+
+  await db`
+    INSERT INTO notifications (type, message, link, metadata)
+    VALUES ('factory_review', ${'Factory needs review: ' + (session.initial_prompt || '').slice(0, 100)},
+            ${null}, ${JSON.stringify({
+              sessionId: session.id, confidence, filesChanged,
+              codebaseName: session.codebase_name,
+              reviewNotes: review?.notes,
+              selfModification: !!session.self_modification,
+            })})
+  `
+  broadcast('notification', {
+    type: 'factory_review',
+    message: `CC session needs review (confidence: ${(confidence * 100).toFixed(0)}%)${session.self_modification ? ' [SELF-MOD]' : ''}`,
+    sessionId: session.id,
+  })
+
+  await reportToTriggerSource(session, {
+    success: null,
+    stage: 'awaiting_review',
+    confidence,
+    message: 'Changes require human review before deployment',
+  })
 }
 
 // ─── DeepSeek Change Review ─────────────────────────────────────────
@@ -207,6 +287,20 @@ async function reviewChanges(session, filesChanged) {
 
     if (!diff) return { approved: true, notes: 'No diff available for review' }
 
+    // Include factory learnings in review context
+    let learningsContext = ''
+    try {
+      const learnings = session.codebase_id ? await db`
+        SELECT pattern_type, pattern_description FROM factory_learnings
+        WHERE codebase_id = ${session.codebase_id} AND confidence > 0.5
+        ORDER BY confidence DESC LIMIT 5
+      ` : []
+      if (learnings.length > 0) {
+        learningsContext = '\n\nPrevious learnings for this codebase:\n' +
+          learnings.map(l => `- [${l.pattern_type}] ${l.pattern_description}`).join('\n')
+      }
+    } catch {}
+
     const response = await callDeepSeek([{
       role: 'user',
       content: `You are a code reviewer for the Ecodia Factory — an autonomous code system. Review this diff and assess:
@@ -215,10 +309,11 @@ async function reviewChanges(session, filesChanged) {
 2. Are there any obvious bugs, security issues, or regressions?
 3. Is the code quality acceptable?
 4. Should this be auto-deployed, or does it need human review?
-
+${session.self_modification ? '\n5. CRITICAL: This is a SELF-MODIFICATION — the Factory modifying its own code. Be extra thorough. Check for: infinite loops, resource leaks, broken imports, missing error handling, and anything that could crash the running server.\n' : ''}
 Task: ${session.initial_prompt}
 Codebase: ${session.codebase_name || 'unknown'}
 Files changed: ${filesChanged.join(', ')}
+${learningsContext}
 
 Diff (truncated to 5000 chars):
 ${diff.slice(0, 5000)}
@@ -255,21 +350,17 @@ async function monitorPostDeploy(session, deployResult) {
 
   // Check Vercel deployment status if applicable
   if (meta.vercel_project_id || meta.deploy_target === 'vercel') {
-    // Vercel auto-deploys on push — check deployment status after a delay
     setTimeout(async () => {
       try {
         await checkVercelDeployment(session, deployResult)
       } catch (err) {
         logger.debug('Vercel deployment check failed', { error: err.message })
       }
-    }, 30_000) // Check after 30s (Vercel usually deploys in 30-60s)
+    }, 30_000)
   }
-
-  // For PM2 services, the health check in deploymentService already handles it
 }
 
 async function checkVercelDeployment(session, deployResult) {
-  // Check if the health URL is responding after Vercel deploy
   const meta = session.codebase_meta || {}
   const healthUrl = meta.health_check_url
 
@@ -288,7 +379,6 @@ async function checkVercelDeployment(session, deployResult) {
               ${JSON.stringify({ sessionId: session.id, commitSha: deployResult.commitSha })})
     `
 
-    // Notify via symbridge if triggered by organism
     if (session.trigger_source === 'simula_proposal' || session.trigger_source === 'thymos_incident') {
       const symbridge = require('./symbridgeService')
       await symbridge.send('factory_result', {
@@ -298,19 +388,21 @@ async function checkVercelDeployment(session, deployResult) {
         commit_sha: deployResult.commitSha,
       }, session.id)
     }
+
+    // Cognitive broadcast: health failure is high-salience
+    kgHooks.sendCognitiveBroadcast('health_anomaly', 0.9, {
+      type: 'deploy_health_failed',
+      codebase: session.codebase_name,
+      commit_sha: deployResult.commitSha,
+    })
   }
 }
 
 // ─── Report to Trigger Source ───────────────────────────────────────
 
 async function reportToTriggerSource(session, result) {
-  // Always broadcast via WS for the UI
   broadcastToSession(session.id, 'cc:pipeline_result', result)
 
-  // Report to Cortex conversation if triggered from there
-  // (The frontend will pick this up from the WS broadcast)
-
-  // Report to organism via symbridge if triggered by Simula/Thymos
   if (['simula_proposal', 'thymos_incident'].includes(session.trigger_source)) {
     try {
       const symbridge = require('./symbridgeService')
@@ -395,9 +487,11 @@ Respond with JSON only:
 }
 
 // ─── Outcome Learning ───────────────────────────────────────────────
+// Records outcomes to KG AND extracts cross-session patterns
 
 async function recordOutcome(session, outcome, details = {}) {
   try {
+    // KG ingestion for institutional memory
     const kg = require('./knowledgeGraphService')
     const content = `Factory session outcome: ${outcome}
 Codebase: ${session.codebase_name || 'unknown'}
@@ -415,7 +509,7 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
       context: `This is a Factory session ${outcome} record. Extract patterns about what kinds of tasks succeed/fail, which codebases have issues, and any causal relationships.`,
     })
 
-    // Also store structured outcome for analytics
+    // Structured notification
     await db`
       INSERT INTO notifications (type, message, metadata)
       VALUES ('factory_outcome', ${`Factory ${outcome}: ${(session.initial_prompt || '').slice(0, 80)}`},
@@ -429,9 +523,131 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
                 ...details,
               })})
     `
+
+    // Cognitive broadcast + immediate memory sync
+    kgHooks.onFactoryOutcome({
+      session,
+      outcome,
+      confidence: details.confidence,
+      filesChanged: details.filesChanged || session.files_changed,
+      commitSha: details.commitSha,
+      error: details.error,
+    }).catch(() => {})
+
+    // Extract cross-session learning patterns via DeepSeek
+    await extractLearningPattern(session, outcome, details)
+
+    // Learning decay: age out old learnings for this codebase
+    if (session.codebase_id) {
+      await db`
+        UPDATE factory_learnings
+        SET confidence = GREATEST(0.1, confidence * 0.98), updated_at = now()
+        WHERE codebase_id = ${session.codebase_id}
+          AND updated_at < now() - interval '30 days'
+      `.catch(() => {})
+    }
+
+    // Emit to event bus
+    emitEvent('factory:session_complete', {
+      sessionId: session.id,
+      outcome,
+      confidence: details.confidence,
+      codebaseName: session.codebase_name,
+    })
+
+    if (outcome === 'success') {
+      emitEvent('factory:learning_recorded', {
+        sessionId: session.id,
+        codebaseName: session.codebase_name,
+      })
+    }
   } catch (err) {
     logger.debug('Failed to record outcome', { error: err.message })
   }
+}
+
+// ─── Extract Learning Patterns ──────────────────────────────────────
+
+async function extractLearningPattern(session, outcome, details) {
+  try {
+    const prompt = outcome === 'success'
+      ? `A Factory CC session SUCCEEDED. Extract a reusable learning pattern.
+
+Task: ${(session.initial_prompt || '').slice(0, 300)}
+Codebase: ${session.codebase_name || 'unknown'}
+Confidence: ${details.confidence || 'N/A'}
+Files changed: ${(session.files_changed || []).join(', ') || 'none'}
+
+What specific technique, approach, or insight made this succeed? This will be injected into future sessions.
+
+Respond with JSON only:
+{
+  "pattern_type": "success_pattern",
+  "pattern_description": "one-sentence reusable insight",
+  "confidence": 0.6
+}`
+      : `A Factory CC session FAILED (${outcome}).
+
+Task: ${(session.initial_prompt || '').slice(0, 300)}
+Codebase: ${session.codebase_name || 'unknown'}
+Error: ${details.error || details.reason || 'unknown'}
+
+What went wrong? What should future sessions AVOID? This will be injected into future sessions.
+
+Respond with JSON only:
+{
+  "pattern_type": "failure_pattern",
+  "pattern_description": "one-sentence warning for future sessions",
+  "confidence": 0.5
+}`
+
+    const response = await callDeepSeek([{ role: 'user', content: prompt }], {
+      module: 'factory_learning',
+      skipRetrieval: true,
+      skipLogging: true,
+    })
+
+    const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    const parsed = JSON.parse(cleaned)
+
+    if (parsed.pattern_description && parsed.pattern_description.length > 10) {
+      await db`
+        INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids)
+        VALUES (${session.codebase_id || null},
+                ${parsed.pattern_type || (outcome === 'success' ? 'success_pattern' : 'failure_pattern')},
+                ${parsed.pattern_description},
+                ${parsed.confidence || 0.5},
+                ${outcome === 'success'},
+                ${[session.id]})
+      `
+      logger.info(`Factory learning extracted: [${parsed.pattern_type}] ${parsed.pattern_description.slice(0, 80)}`)
+    }
+  } catch (err) {
+    logger.debug('Learning pattern extraction failed (non-blocking)', { error: err.message })
+  }
+}
+
+// ─── Track Validation Outcome (feeds learned confidence) ────────────
+
+async function trackValidationOutcome(sessionId, outcome) {
+  try {
+    await db`
+      UPDATE validation_runs
+      SET outcome = ${outcome}, outcome_at = now()
+      WHERE cc_session_id = ${sessionId}
+    `
+  } catch (err) {
+    logger.debug('Failed to track validation outcome', { error: err.message })
+  }
+}
+
+// ─── Event Bus Helper ───────────────────────────────────────────────
+
+function emitEvent(type, payload) {
+  try {
+    const eventBus = require('./internalEventBusService')
+    eventBus.emit(type, payload)
+  } catch {}
 }
 
 module.exports = {

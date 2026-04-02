@@ -83,9 +83,31 @@ async function deploySession(sessionId) {
     // 2. Git push
     git(['push', 'origin', branch], repoPath)
 
-    // 3. Deploy by target
+    // 3. Self-deployment: run migrations if new migration files were added
+    const isSelfMod = !!(session.self_modification || session.context_bundle?.selfModification)
+    if (isSelfMod) {
+      try {
+        const fs = require('fs')
+        const migrationsDir = require('path').join(repoPath, 'src/db/migrations')
+        if (fs.existsSync(migrationsDir)) {
+          logger.info('Self-modification: checking for new migrations...')
+          execFileSync('node', ['src/db/migrate.js'], { cwd: repoPath, encoding: 'utf-8', timeout: 30_000 })
+          logger.info('Self-modification: migrations applied successfully')
+        }
+      } catch (err) {
+        logger.warn('Self-modification: migration execution failed', { error: err.message })
+        // Don't fail the deploy — migrations might not exist or already applied
+      }
+    }
+
+    // 4. Deploy by target
     if (deployTarget === 'pm2' && pm2Name) {
       execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
+
+      // For self-modifications, wait for PM2 to stabilize before health check
+      if (isSelfMod) {
+        await new Promise(r => setTimeout(r, 5000))
+      }
     }
     // Vercel deploys automatically on push — no action needed
 

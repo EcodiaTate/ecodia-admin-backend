@@ -36,6 +36,15 @@ const envSchema = z.object({
   META_APP_ID: z.string().default(''),
   META_APP_SECRET: z.string().default(''),
   META_USER_ACCESS_TOKEN: z.string().default(''),
+  // Freedom upgrade
+  FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.85'),
+  PREDICTION_SESSION_DAILY_CAP: z.string().default('5'),
+  MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.7'),
+  DIRECT_ACTION_READ_ENABLED: z.string().default('true'),
+  DIRECT_ACTION_WRITE_ENABLED: z.string().default('false'),
+  SELF_MOD_DAILY_CAP: z.string().default('3'),
+  EVENT_BUS_PERSIST_DEFAULT: z.string().default('false'),
+  COGNITIVE_BROADCAST_ENABLED: z.string().default('true'),
 })
 
 const parsed = envSchema.safeParse(process.env)
