@@ -38,11 +38,25 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
 // ─── Trigger: Cortex (user command) ─────────────────────────────────
 
 async function dispatchFromCortex(description, params = {}) {
-  // Resolve codebase from params
+  // Resolve codebase — try explicit param first, then fuzzy-match from the prompt
   let codebaseId = params.codebaseId || null
+
   if (!codebaseId && params.codebaseName) {
-    const [cb] = await db`SELECT id FROM codebases WHERE name = ${params.codebaseName} LIMIT 1`
+    const [cb] = await db`SELECT id FROM codebases WHERE name ILIKE ${params.codebaseName} LIMIT 1`
     codebaseId = cb?.id || null
+  }
+
+  // If still no codebase, try to find one mentioned in the prompt itself
+  if (!codebaseId) {
+    const allCodebases = await db`SELECT id, name FROM codebases`
+    const promptLower = description.toLowerCase()
+    for (const cb of allCodebases) {
+      if (promptLower.includes(cb.name.toLowerCase())) {
+        codebaseId = cb.id
+        logger.info(`Factory dispatch: resolved codebase "${cb.name}" from prompt text`)
+        break
+      }
+    }
   }
 
   return createAndStartSession({

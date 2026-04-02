@@ -272,103 +272,49 @@ async function autoAct(thread, triage) {
   const actionQueue = require('./actionQueueService')
 
   try {
-    // URGENT: surface to action queue for immediate human review
-    if (priority === 'urgent') {
-      await actionQueue.enqueue({
-        source: 'gmail',
-        sourceRefId: thread.id,
-        actionType: triage.draftReply ? 'send_reply' : 'follow_up',
-        title: `${thread.from_name || thread.from_email}: ${thread.subject || 'No subject'}`,
-        summary: triage.summary,
-        preparedData: { draft: triage.draftReply, subject: thread.subject },
-        context: { from: thread.from_name || thread.from_email, email: thread.from_email, inbox: thread.inbox },
-        priority: 'urgent',
-        expiresInHours: 48,
-      }).catch(() => {})
-      return
-    }
-
-    // HIGH: enqueue with draft ready + save draft to Gmail
-    if (priority === 'high') {
+    // If the AI says surface to human → enqueue to action queue
+    if (triage.surfaceToHuman) {
+      // Save draft to Gmail if available
       if (triage.draftReply) {
         await saveDraftToGmail(thread, triage.draftReply).catch(err =>
           logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
         )
-        await actionQueue.enqueue({
-          source: 'gmail',
-          sourceRefId: thread.id,
-          actionType: 'send_reply',
-          title: `Reply to ${thread.from_name || thread.from_email}`,
-          summary: triage.summary,
-          preparedData: { draft: triage.draftReply, subject: thread.subject },
-          context: { from: thread.from_name || thread.from_email, email: thread.from_email },
-          priority: 'high',
-          expiresInHours: 72,
-        }).catch(() => {})
-      } else {
-        await actionQueue.enqueue({
-          source: 'gmail',
-          sourceRefId: thread.id,
-          actionType: 'follow_up',
-          title: `${thread.from_name || thread.from_email}: ${thread.subject || 'No subject'}`,
-          summary: triage.summary,
-          preparedData: { subject: thread.subject },
-          context: { from: thread.from_name || thread.from_email, email: thread.from_email },
-          priority: 'high',
-          expiresInHours: 72,
-        }).catch(() => {})
       }
-      return
-    }
 
-    // SPAM / IGNORE → auto-archive in Gmail, mark archived in DB
-    if (priority === 'spam' || action === 'ignore' || action === 'archive') {
-      await silentArchive(thread)
-      logger.info(`Auto-archived [${priority}/${action}]: ${thread.subject}`)
-      return
-    }
-
-    // LOW → auto-archive (receipts, notifications, newsletters)
-    if (priority === 'low') {
-      await silentArchive(thread)
-      logger.info(`Auto-archived [low]: ${thread.subject}`)
-      return
-    }
-
-    // NORMAL + reply → enqueue draft for one-tap send
-    if (priority === 'normal' && action === 'reply' && triage.draftReply) {
-      await saveDraftToGmail(thread, triage.draftReply).catch(err =>
-        logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
-      )
       await actionQueue.enqueue({
         source: 'gmail',
         sourceRefId: thread.id,
-        actionType: 'send_reply',
-        title: `Reply to ${thread.from_name || thread.from_email}`,
-        summary: triage.summary,
-        preparedData: { draft: triage.draftReply, subject: thread.subject },
-        context: { from: thread.from_name || thread.from_email, email: thread.from_email },
-        priority: 'medium',
-        expiresInHours: 168,
+        actionType: triage.draftReply ? 'send_reply' : (action === 'create_task' ? 'create_task' : 'follow_up'),
+        title: `${thread.from_name || thread.from_email}: ${thread.subject || 'No subject'}`,
+        summary: triage.surfaceReason || triage.summary,
+        preparedData: {
+          draft: triage.draftReply || null,
+          subject: thread.subject,
+          title: triage.taskTitle || null,
+          description: triage.taskDescription || null,
+        },
+        context: { from: thread.from_name || thread.from_email, email: thread.from_email, inbox: thread.inbox },
+        priority,
       }).catch(() => {})
-      await silentArchive(thread)
       return
     }
 
-    // NORMAL + create_task → task already created above, archive email
-    if (priority === 'normal' && action === 'create_task') {
+    // AI says don't surface → execute autonomously
+    if (action === 'reply' && triage.draftReply) {
+      // Save draft but don't surface
+      await saveDraftToGmail(thread, triage.draftReply).catch(err =>
+        logger.warn(`Failed to save Gmail draft for ${thread.id}`, { error: err.message })
+      )
       await silentArchive(thread)
-      logger.info(`Auto-archived [normal/create_task]: ${thread.subject}`)
-      return
-    }
-
-    // NORMAL + anything else → archive silently
-    if (priority === 'normal') {
+      logger.info(`Auto-drafted & archived: ${thread.subject}`)
+    } else if (action === 'archive' || action === 'ignore' || priority === 'spam' || priority === 'low') {
       await silentArchive(thread)
-      return
+      logger.info(`Auto-archived [${priority}/${action}]: ${thread.subject}`)
+    } else {
+      // Anything else the AI didn't surface — archive
+      await silentArchive(thread)
     }
   } catch (err) {
-    // Never let auto-act failures crash the triage loop
     logger.error(`Auto-act failed for ${thread.id}`, { error: err.message })
   }
 }

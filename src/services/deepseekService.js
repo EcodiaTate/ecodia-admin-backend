@@ -194,8 +194,12 @@ Respond with JSON only:
   "shouldCreateTask": true or false,
   "taskTitle": "task title if shouldCreateTask is true, null otherwise",
   "taskDescription": "task detail if applicable, null otherwise",
-  "taskPriority": "low|medium|high|urgent (only if shouldCreateTask is true)"
+  "taskPriority": "low|medium|high|urgent (only if shouldCreateTask is true)",
+  "surfaceToHuman": true or false,
+  "surfaceReason": "short reason why this needs Tate's attention (null if surfaceToHuman is false)"
 }
+
+surfaceToHuman guide: set true if you think Tate should see this at all. Most emails should be handled silently (archived, auto-replied). Only surface things where his judgement, approval, or personal attention genuinely adds value. You have full freedom to decide — no rigid rules.
 
 Priority guide:
 - urgent: needs response within hours, money/deadline/legal on the line
