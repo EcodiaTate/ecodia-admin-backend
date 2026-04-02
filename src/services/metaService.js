@@ -58,7 +58,7 @@ async function discoverPages() {
 
 async function syncPosts(pageDbId, pageId, token, limit = 50) {
   const data = await graphFetch(
-    `/${pageId}/posts?fields=id,message,story,permalink_url,type,created_time,likes.summary(true),comments.summary(true),shares&limit=${limit}`,
+    `/${pageId}/posts?fields=id,message,story,permalink_url,type,created_time&limit=${limit}`,
     token
   )
 
@@ -77,9 +77,9 @@ async function syncPosts(pageDbId, pageId, token, limit = 50) {
         ${post.id}, ${pageDbId},
         ${post.message || null}, ${post.story || null},
         ${post.permalink_url || null}, ${post.type || null},
-        ${post.likes?.summary?.total_count || 0},
-        ${post.comments?.summary?.total_count || 0},
-        ${post.shares?.count || 0},
+        ${0},
+        ${0},
+        ${0},
         ${post.created_time || null}
       )
       ON CONFLICT (post_id) DO UPDATE SET
