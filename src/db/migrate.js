@@ -9,8 +9,8 @@ const logger = require('../config/logger')
 // when the main app is running and holding connections
 const db = postgres(env.DATABASE_URL, {
   max: 1,
-  idle_timeout: 10,
-  connect_timeout: 10,
+  idle_timeout: 60,    // was 10s — too short for slow Supabase pooled connections
+  connect_timeout: 30,
 })
 
 async function migrate() {
