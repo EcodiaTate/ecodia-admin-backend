@@ -9,17 +9,20 @@ const server = createServer(app)
 initWS(app, server)
 
 async function cleanupOrphanedSessions() {
+  // Sessions still marked 'running'/'initializing' at startup were NOT
+  // caught by the graceful SIGTERM handler — they survived a hard kill
+  // (OOM, SIGKILL, VPS reboot, kernel upgrade, etc).
   const orphans = await db`
     UPDATE cc_sessions
     SET status = 'error',
-        error_message = 'Session orphaned — VPS reboot or process crash',
+        error_message = 'Session orphaned — process was killed without graceful shutdown',
         completed_at = now()
     WHERE status IN ('running', 'initializing')
       AND started_at < now() - interval '5 minutes'
-    RETURNING id
+    RETURNING id, started_at
   `
   if (orphans.length > 0) {
-    logger.warn(`Marked ${orphans.length} orphaned CC session(s) as error on startup`, {
+    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (hard kill — not caught by SIGTERM handler)`, {
       ids: orphans.map(r => r.id),
     })
   }
@@ -27,8 +30,25 @@ async function cleanupOrphanedSessions() {
 
 // Graceful shutdown — registered at module level so it fires regardless of
 // whether the server has finished starting. PM2 sends SIGTERM on restart.
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   logger.info('SIGTERM received — shutting down')
+
+  // Stop active CC sessions gracefully so they don't become orphans
+  try {
+    const ccService = require('./services/ccService')
+    const activeCount = ccService.getActiveSessionCount()
+    if (activeCount > 0) {
+      logger.info(`Gracefully stopping ${activeCount} active CC session(s) before shutdown`)
+      // stopAllSessions kills child processes and marks DB as 'stopped'
+      await Promise.race([
+        ccService.stopAllSessions('Process restarting — session stopped gracefully'),
+        new Promise(resolve => setTimeout(resolve, 8000)), // Don't block shutdown >8s
+      ])
+    }
+  } catch (err) {
+    logger.debug('CC session cleanup on shutdown failed', { error: err.message })
+  }
+
   try {
     const maintenance = require('./workers/autonomousMaintenanceWorker')
     maintenance.stop()

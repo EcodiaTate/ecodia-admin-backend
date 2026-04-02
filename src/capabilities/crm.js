@@ -32,7 +32,7 @@ registry.registerMany([
           'lead',
           ${(params.leadScore || 0) > 0.7 ? 'high' : 'medium'},
           ${notes}::jsonb,
-          '[]'::jsonb
+          ${[]}
         )
         RETURNING id, name
       `

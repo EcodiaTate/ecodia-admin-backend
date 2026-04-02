@@ -466,6 +466,23 @@ async function stopSession(sessionId) {
   logger.info(`CC session ${sessionId} stopped`)
 }
 
+// ─── Stop All Sessions (graceful shutdown) ─────────────────────────
+
+async function stopAllSessions(reason) {
+  const ids = [...activeSessions.keys()]
+  await Promise.allSettled(ids.map(async (sessionId) => {
+    const sessionData = activeSessions.get(sessionId)
+    if (sessionData) {
+      clearTimeout(sessionData.timeout)
+      try { sessionData.process.kill('SIGTERM') } catch {}
+      activeSessions.delete(sessionId)
+    }
+    await updateSessionStatus(sessionId, 'stopped', { error_message: reason })
+    await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
+    logger.info(`CC session ${sessionId} stopped: ${reason}`)
+  }))
+}
+
 // ─── Get Active Session Info ────────────────────────────────────────
 
 function getActiveSessionInfo(sessionId) {
@@ -487,6 +504,7 @@ module.exports = {
   startSession,
   sendMessage,
   stopSession,
+  stopAllSessions,
   getActiveSessionInfo,
   getActiveSessionCount,
   buildContextBundle,
