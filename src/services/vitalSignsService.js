@@ -117,8 +117,10 @@ async function checkOrganismHealth() {
 // ─── Receive Organism Health (via symbridge) ────────────────────────
 
 async function receiveOrganismHealth(healthData) {
+  // safe_mode and degraded are still "alive" — the organism is responding, just limited
+  const aliveStatuses = ['alive', 'healthy', 'safe_mode', 'degraded']
   organismHealthState = {
-    healthy: healthData.status === 'alive' || healthData.status === 'healthy',
+    healthy: aliveStatuses.includes(healthData.status),
     lastCheck: healthData.timestamp || new Date().toISOString(),
     consecutiveFailures: 0,
     lastResponseMs: null,

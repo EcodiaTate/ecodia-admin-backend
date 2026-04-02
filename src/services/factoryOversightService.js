@@ -47,6 +47,7 @@ async function runPostSessionPipeline(sessionId) {
   const filesChanged = session.files_changed || []
   if (filesChanged.length === 0) {
     logger.info(`Factory oversight: no files changed in session ${sessionId}`)
+    await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
     await reportToTriggerSource(session, {
       success: true,
       stage: 'execution',
@@ -54,6 +55,10 @@ async function runPostSessionPipeline(sessionId) {
     })
     return
   }
+
+  // Mark pipeline as entering oversight review
+  await db`UPDATE cc_sessions SET pipeline_stage = 'testing' WHERE id = ${sessionId}`
+  broadcastToSession(sessionId, 'cc:stage', { stage: 'reviewing', progress: 0.4 })
 
   // Step 1: DeepSeek review of changes
   const review = await reviewChanges(session, filesChanged)

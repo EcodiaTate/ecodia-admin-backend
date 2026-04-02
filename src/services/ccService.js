@@ -284,17 +284,20 @@ async function startSession(session) {
 
     const success = code === 0
     const status = success ? 'complete' : 'error'
-    const pipelineStage = success ? 'complete' : 'failed'
     const errorMessage = !success ? stderrLines.slice(-5).join('\n') || `Exit code ${code}` : null
 
     await updateSessionStatus(session.id, status, {
       error_message: errorMessage,
     })
-    await db`UPDATE cc_sessions SET pipeline_stage = ${pipelineStage} WHERE id = ${session.id}`
+
+    // If failed, mark pipeline as failed immediately
+    if (!success) {
+      await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+    }
 
     broadcastToSession(session.id, 'cc:status', { status, code })
 
-    // Detect changed files via git (modified + staged + untracked)
+    // Detect changed files via git BEFORE triggering oversight
     if (success && cwd) {
       try {
         const { execFileSync } = require('child_process')
@@ -342,9 +345,12 @@ async function startSession(session) {
     logger.info(`CC session ${session.id} completed`, { code, status })
 
     // Trigger full oversight pipeline: review → validate → deploy → monitor
+    // Pipeline will set pipeline_stage through its own stages (testing → deploying → complete/failed)
     const oversight = require('./factoryOversightService')
     oversight.runPostSessionPipeline(session.id).catch(err => {
       logger.error(`Oversight pipeline failed for session ${session.id}`, { error: err.message })
+      // If oversight itself fails, mark as complete (CC succeeded, oversight is best-effort)
+      db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${session.id}`.catch(() => {})
     })
   })
 
