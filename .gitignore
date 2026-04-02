@@ -1,0 +1,13 @@
+.next
+.vite
+__pycache__
+node_modules/
+package-lock.json
+dist
+build
+coverage
+*.log
+*.tmp
+.DS_Store
+.env.*
+.env
