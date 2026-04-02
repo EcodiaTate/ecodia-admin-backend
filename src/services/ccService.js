@@ -301,11 +301,29 @@ async function startSession(session) {
         const diff = execFileSync('git', ['diff', '--name-only'], { cwd, encoding: 'utf-8' }).trim()
         const staged = execFileSync('git', ['diff', '--name-only', '--cached'], { cwd, encoding: 'utf-8' }).trim()
         const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd, encoding: 'utf-8' }).trim()
+
+        // Filter out noise: node_modules, lockfiles, build artifacts
+        const NOISE_PATTERNS = [
+          /^node_modules\//,
+          /^\.next\//,
+          /^dist\//,
+          /^build\//,
+          /^\.cache\//,
+          /^__pycache__\//,
+          /^\.venv\//,
+          /^venv\//,
+          /^\.pytest_cache\//,
+          /package-lock\.json$/,
+          /yarn\.lock$/,
+          /pnpm-lock\.yaml$/,
+        ]
+        const isNoise = (f) => NOISE_PATTERNS.some(p => p.test(f))
+
         const allChanged = [...new Set([
           ...diff.split('\n'),
           ...staged.split('\n'),
           ...untracked.split('\n'),
-        ].filter(Boolean))]
+        ].filter(f => f && !isNoise(f)))]
 
         if (allChanged.length > 0) {
           await db`UPDATE cc_sessions SET files_changed = ${allChanged} WHERE id = ${session.id}`

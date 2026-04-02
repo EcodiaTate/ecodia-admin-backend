@@ -146,10 +146,15 @@ async function receiveMessage(message) {
     return { accepted: false, reason: 'invalid_signature' }
   }
 
-  // Audit log
+  // Audit log — postgres driver rejects undefined, coalesce to safe defaults
+  const msgType = message.type || 'unknown'
+  const msgPayload = message.payload != null ? JSON.stringify(message.payload) : '{}'
+  const msgSource = message.source || 'organism'
+  const msgCorrelationId = message.correlationId || null
+
   const [record] = await db`
     INSERT INTO symbridge_messages (direction, message_type, payload, source_system, status, correlation_id)
-    VALUES ('inbound', ${message.type}, ${JSON.stringify(message.payload)}, ${message.source || 'organism'}, 'processing', ${message.correlationId || null})
+    VALUES ('inbound', ${msgType}, ${msgPayload}, ${msgSource}, 'processing', ${msgCorrelationId})
     RETURNING id
   `
 
