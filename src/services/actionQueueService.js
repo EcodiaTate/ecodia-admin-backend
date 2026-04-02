@@ -16,6 +16,10 @@ const { broadcast } = require('../websocket/wsManager')
 // ─── Enqueue ───────────────────────────────────────────────────────────
 
 async function enqueue({ source, sourceRefId, actionType, title, summary, preparedData, context, priority, expiresInHours }) {
+  // ── Consolidation: merge into existing pending item if same source + similar topic ──
+  const merged = await tryConsolidate({ source, sourceRefId, actionType, title, summary, preparedData, context, priority })
+  if (merged) return merged
+
   const expiresAt = expiresInHours
     ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString()
     : null
@@ -39,6 +43,87 @@ async function enqueue({ source, sourceRefId, actionType, title, summary, prepar
   })
 
   return item
+}
+
+// ─── Consolidation: merge duplicate signals into one action ───────────
+
+const PRIORITY_RANK = { urgent: 0, high: 1, medium: 2, low: 3 }
+
+async function tryConsolidate({ source, sourceRefId, actionType, title, summary, preparedData, context, priority }) {
+  // Find pending items from same source with same sender (via context.email or context.from)
+  const senderEmail = context?.email
+  const senderName = context?.from
+
+  if (!senderEmail && !senderName) return null
+
+  // Look for pending items from same source + same sender in last 7 days
+  const candidates = await db`
+    SELECT * FROM action_queue
+    WHERE source = ${source}
+      AND status = 'pending'
+      AND (expires_at IS NULL OR expires_at > now())
+      AND created_at > now() - interval '7 days'
+    ORDER BY created_at DESC
+    LIMIT 20
+  `
+
+  // Find a match: same sender email or same sender name with similar context
+  const match = candidates.find(c => {
+    const cCtx = c.context || {}
+    // Must be from the same person
+    if (senderEmail && cCtx.email === senderEmail) return true
+    if (senderName && cCtx.from === senderName) return true
+    return false
+  })
+
+  if (!match) return null
+
+  // Merge: keep the existing item but update with latest info
+  const existingConsolidated = match.context?.consolidated_count || 1
+  const newCount = existingConsolidated + 1
+
+  // Escalate priority if the new signal is higher priority
+  const effectivePriority = (PRIORITY_RANK[priority] ?? 2) < (PRIORITY_RANK[match.priority] ?? 2)
+    ? priority
+    : match.priority
+
+  // Keep the most recent draft/summary, accumulate source refs
+  const mergedSourceRefs = [...(match.context?.source_ref_ids || [match.source_ref_id]), sourceRefId].filter(Boolean)
+  const mergedContext = {
+    ...match.context,
+    ...context,
+    consolidated_count: newCount,
+    source_ref_ids: mergedSourceRefs,
+    latest_signal_at: new Date().toISOString(),
+  }
+
+  // Use latest prepared data (most recent draft is most relevant)
+  const mergedPreparedData = { ...(match.prepared_data || {}), ...preparedData }
+
+  const [updated] = await db`
+    UPDATE action_queue SET
+      summary = ${summary || match.summary},
+      prepared_data = ${JSON.stringify(mergedPreparedData)},
+      context = ${JSON.stringify(mergedContext)},
+      priority = ${effectivePriority},
+      updated_at = now()
+    WHERE id = ${match.id}
+    RETURNING *
+  `
+
+  logger.info(`Consolidated action queue item ${match.id}: ${title} (${newCount} signals from ${senderEmail || senderName})`)
+
+  broadcast('action_queue:updated', {
+    id: updated.id,
+    source: updated.source,
+    actionType: updated.action_type,
+    title: updated.title,
+    summary: updated.summary,
+    priority: updated.priority,
+    consolidatedCount: newCount,
+  })
+
+  return updated
 }
 
 // ─── Execute (approve + act) ───────────────────────────────────────────
@@ -241,11 +326,29 @@ async function expireStale() {
   }
 }
 
+// ─── Pending items for a sender (used by triage for context) ──────────
+
+async function getPendingForSender(email, name) {
+  if (!email && !name) return []
+  return db`
+    SELECT title, summary, priority, created_at, context FROM action_queue
+    WHERE status = 'pending'
+      AND (expires_at IS NULL OR expires_at > now())
+      AND (
+        (context->>'email' = ${email || ''})
+        OR (context->>'from' = ${name || ''})
+      )
+    ORDER BY created_at DESC
+    LIMIT 5
+  `
+}
+
 module.exports = {
   enqueue,
   execute,
   dismiss,
   getPending,
+  getPendingForSender,
   getRecent,
   getStats,
   expireStale,

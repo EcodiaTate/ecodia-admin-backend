@@ -204,6 +204,19 @@ async function triagePendingEmails() {
         if (ctx.summary) kgContext = ctx.summary
       } catch { /* KG not available — proceed without */ }
 
+      // Pull existing pending actions for this sender — helps the LLM
+      // avoid re-surfacing the same topic that's already queued
+      let pendingActionsContext = null
+      try {
+        const actionQueue = require('./actionQueueService')
+        const pending = await actionQueue.getPendingForSender(thread.from_email, thread.from_name)
+        if (pending.length > 0) {
+          pendingActionsContext = pending.map(p =>
+            `- [${p.priority}] "${p.title}" — ${p.summary || 'no summary'}${p.context?.consolidated_count > 1 ? ` (${p.context.consolidated_count} signals consolidated)` : ''}`
+          ).join('\n')
+        }
+      } catch { /* proceed without */ }
+
       const triage = await deepseekService.triageEmail({
         subject: thread.subject,
         from: `${thread.from_name || ''} <${thread.from_email}>`,
@@ -212,6 +225,7 @@ async function triagePendingEmails() {
         inbox: thread.inbox,
         clientContext: client,
         kgContext,
+        pendingActionsContext,
       })
 
       await db`
