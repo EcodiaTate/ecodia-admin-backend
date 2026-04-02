@@ -18,8 +18,13 @@ async function cleanupOrphanedSessions() {
         error_message = 'Session orphaned — process was killed without graceful shutdown',
         completed_at = now()
     WHERE status IN ('running', 'initializing')
-      AND started_at < now() - interval '5 minutes'
-    RETURNING id, started_at
+      AND (
+        -- Classic check: session started >5min ago (catches startup cleanup)
+        (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
+        -- Heartbeat check: last heartbeat >3min ago (catches mid-run deaths)
+        OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
+      )
+    RETURNING id, started_at, last_heartbeat_at
   `
   if (orphans.length > 0) {
     logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (hard kill — not caught by SIGTERM/SIGINT handler)`, {
@@ -63,12 +68,36 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
+// Crash handlers — without these, uncaught errors kill the process
+// without triggering SIGTERM/SIGINT, leaving sessions orphaned in DB.
+process.on('uncaughtException', async (err) => {
+  logger.error('Uncaught exception — triggering graceful shutdown', { error: err.message, stack: err.stack })
+  await gracefulShutdown('uncaughtException').catch(() => {})
+  process.exit(1)
+})
+process.on('unhandledRejection', async (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason)
+  logger.error('Unhandled rejection — triggering graceful shutdown', { error: msg })
+  await gracefulShutdown('unhandledRejection').catch(() => {})
+  process.exit(1)
+})
+
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
 
   await cleanupOrphanedSessions().catch(err =>
     logger.error('Orphan cleanup failed on startup', { error: err.message })
   )
+
+  // Run orphan cleanup periodically — catches sessions orphaned by crashes
+  // that happened before the graceful shutdown handlers could fire, or by
+  // other process instances that died without cleanup.
+  const orphanCleanupTimer = setInterval(() => {
+    cleanupOrphanedSessions().catch(err =>
+      logger.debug('Periodic orphan cleanup failed', { error: err.message })
+    )
+  }, 5 * 60 * 1000) // every 5 minutes
+  orphanCleanupTimer.unref()
 
   // ── Boot: Capability Registry ────────────────────────────────────
   // Must load before any worker that uses execute() or performAction().

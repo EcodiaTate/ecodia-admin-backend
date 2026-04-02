@@ -287,8 +287,16 @@ async function startSession(session) {
     startedAt: Date.now(),
     codebaseId: session.codebase_id,
     timeout: null,
+    heartbeatTimer: null,
   }
   activeSessions.set(session.id, sessionData)
+
+  // Write initial heartbeat and start periodic updates
+  db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${session.id}`.catch(() => {})
+  sessionData.heartbeatTimer = setInterval(() => {
+    db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${session.id}`.catch(() => {})
+  }, 60_000) // every 60s
+  sessionData.heartbeatTimer.unref()
 
   // Set timeout
   sessionData.timeout = setTimeout(async () => {
@@ -301,6 +309,7 @@ async function startSession(session) {
     } catch {}
     await updateSessionStatus(session.id, 'error', { error_message: 'Session timed out' })
     await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+    clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
   }, SESSION_TIMEOUT_MS)
 
@@ -339,6 +348,7 @@ async function startSession(session) {
     rl.close()
     stderrRl.close()
     clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
 
     const success = code === 0
@@ -417,6 +427,7 @@ async function startSession(session) {
     rl.close()
     stderrRl.close()
     clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
 
     logger.error(`CC session ${session.id} process error`, { error: err.message })
@@ -448,6 +459,7 @@ async function stopSession(sessionId) {
   const sessionData = activeSessions.get(sessionId)
   if (sessionData) {
     clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
 
     const proc = sessionData.process
     proc.kill('SIGTERM')
@@ -474,6 +486,7 @@ async function stopAllSessions(reason) {
     const sessionData = activeSessions.get(sessionId)
     if (sessionData) {
       clearTimeout(sessionData.timeout)
+      clearInterval(sessionData.heartbeatTimer)
       try { sessionData.process.kill('SIGTERM') } catch {}
       activeSessions.delete(sessionId)
     }
@@ -482,6 +495,51 @@ async function stopAllSessions(reason) {
     logger.info(`CC session ${sessionId} stopped: ${reason}`)
   }))
 }
+
+// ─── Session Watchdog ──────────────────────────────────────────
+// Periodically checks that child processes in activeSessions are still alive.
+// If a child died without triggering 'close'/'error' events (rare but possible
+// with SIGKILL, OOM killer, etc.), this catches the zombie and updates the DB.
+
+const WATCHDOG_INTERVAL_MS = 60_000 // 1 minute
+
+let watchdogTimer = null
+
+function startWatchdog() {
+  if (watchdogTimer) return
+  watchdogTimer = setInterval(async () => {
+    for (const [sessionId, sessionData] of activeSessions) {
+      const proc = sessionData.process
+      // exitCode is non-null once the process has exited
+      if (proc.exitCode !== null || proc.killed) {
+        logger.warn(`Watchdog: CC session ${sessionId} child process is dead (exit: ${proc.exitCode}), cleaning up`)
+        clearTimeout(sessionData.timeout)
+        clearInterval(sessionData.heartbeatTimer)
+        activeSessions.delete(sessionId)
+        try {
+          await updateSessionStatus(sessionId, 'error', {
+            error_message: `Child process died unexpectedly (exit code: ${proc.exitCode})`,
+          })
+          await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`
+        } catch (err) {
+          logger.debug('Watchdog: failed to update dead session', { sessionId, error: err.message })
+        }
+      }
+    }
+  }, WATCHDOG_INTERVAL_MS)
+  // Don't keep process alive just for the watchdog
+  watchdogTimer.unref()
+}
+
+function stopWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer)
+    watchdogTimer = null
+  }
+}
+
+// Start watchdog on module load
+startWatchdog()
 
 // ─── Get Active Session Info ────────────────────────────────────────
 
@@ -505,6 +563,7 @@ module.exports = {
   sendMessage,
   stopSession,
   stopAllSessions,
+  stopWatchdog,
   getActiveSessionInfo,
   getActiveSessionCount,
   buildContextBundle,
