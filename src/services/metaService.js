@@ -58,7 +58,7 @@ async function discoverPages() {
 
 async function syncPosts(pageDbId, pageId, token, limit = 50) {
   const data = await graphFetch(
-    `/${pageId}/posts?fields=id,message,story,permalink_url,type,created_time&limit=${limit}`,
+    `/${pageId}/posts?fields=id,message,story,permalink_url,created_time&limit=${limit}`,
     token
   )
 
