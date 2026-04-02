@@ -179,41 +179,36 @@ async function embedNode(nodeId) {
   )
 }
 
-async function embedStaleNodes(batchSize = 30) {
+async function embedStaleNodes(batchSize = 100) {
   if (!env.OPENAI_API_KEY) {
     logger.debug('KG embedding skipped — no OpenAI API key')
     return 0
   }
 
-  const limit = parseInt(batchSize, 10) || 30
+  const limit = parseInt(batchSize, 10) || 100
+
+  // Single query fetches stale nodes with their relationships in one pass
   const stale = await runQuery(
     `MATCH (n) WHERE n.embedding_stale = true OR n.embedding IS NULL
-     RETURN elementId(n) AS nodeId, n.name AS name
-     LIMIT ${limit}`
+     WITH n LIMIT ${limit}
+     OPTIONAL MATCH (n)-[r]-(neighbor)
+     RETURN elementId(n) AS nodeId, n AS node, labels(n) AS labels,
+            collect(DISTINCT {type: type(r), neighbor: neighbor.name}) AS rels`
   )
 
   if (stale.length === 0) return 0
 
-  // Batch embed — get all texts first
+  // Build embedding texts from the batch query results
   const nodes = []
   for (const record of stale) {
-    const nodeId = record.get('nodeId')
-    const nodeRecords = await runQuery(
-      `MATCH (n) WHERE elementId(n) = $nodeId
-       OPTIONAL MATCH (n)-[r]-(neighbor)
-       RETURN n, labels(n) AS labels, collect(DISTINCT {type: type(r), neighbor: neighbor.name}) AS rels`,
-      { nodeId }
-    )
-
-    if (nodeRecords.length === 0) continue
-
-    const node = nodeRecords[0].get('n').properties
-    const labels = nodeRecords[0].get('labels')
-    const rels = nodeRecords[0].get('rels')
+    const node = record.get('node').properties
+    if (!node.name) continue
+    const labels = record.get('labels')
+    const rels = record.get('rels')
     const relText = rels.filter(r => r.neighbor).map(r => `${r.type}: ${r.neighbor}`).join(', ')
     const text = `[${labels.join(', ')}] ${node.name}${node.description ? ' — ' + node.description : ''}${relText ? ' | ' + relText : ''}`
 
-    nodes.push({ nodeId, text })
+    nodes.push({ nodeId: record.get('nodeId'), text })
   }
 
   if (nodes.length === 0) return 0

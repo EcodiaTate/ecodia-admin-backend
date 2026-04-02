@@ -2,6 +2,8 @@
 .vite
 __pycache__
 node_modules/
+node_modules
+node_modules/*
 package-lock.json
 dist
 build
@@ -11,3 +13,4 @@ coverage
 .DS_Store
 .env.*
 .env
+.git

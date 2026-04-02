@@ -12,10 +12,10 @@ if (!env.NEO4J_URI) {
 
 logger.info('KG embedding worker started')
 
-// Run every 15 minutes — embed any stale nodes
-cron.schedule('*/15 * * * *', async () => {
+// Run every 5 minutes — embed stale nodes in batches of 100
+cron.schedule('*/5 * * * *', async () => {
   try {
-    const count = await kg.embedStaleNodes(30)
+    const count = await kg.embedStaleNodes(100)
     if (count > 0) {
       logger.info(`KG embedding worker: embedded ${count} nodes`)
     }
