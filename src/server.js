@@ -45,7 +45,6 @@ server.listen(env.PORT, async () => {
 
   // ── Boot: Capability Registry ────────────────────────────────────
   // Must load before any worker that uses execute() or performAction().
-  // Registers all capabilities from all domains into the live registry.
   try {
     require('./capabilities/index')
   } catch (err) {
@@ -53,24 +52,26 @@ server.listen(env.PORT, async () => {
   }
 
   // ── Boot: Workers ─────────────────────────────────────────────────
-  // factoryScheduleWorker is replaced by autonomousMaintenanceWorker.
-  // The mind decides what to do — no cron schedules.
+  // Workers that have their own PM2 process in ecosystem.config.js are
+  // NOT started here — they'd register duplicate cron jobs.
+  //
+  // PM2-managed (separate processes, NOT started here):
+  //   gmailPoller, linkedinWorker, financePoller,
+  //   kgEmbeddingWorker, kgConsolidationWorker
+  //
+  // Inline (started here, restart with this process):
+  //   calendarPoller, codebaseIndexWorker, symbridgeWorker,
+  //   workspacePoller, autonomousMaintenanceWorker
 
-  const workers = [
-    { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
-    { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
-    { name: 'gmailPoller',                 path: './workers/gmailPoller' },
+  const inlineWorkers = [
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
-    { name: 'linkedinWorker',              path: './workers/linkedinWorker' },
-    { name: 'financePoller',               path: './workers/financePoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
     { name: 'symbridgeWorker',             path: './workers/symbridgeWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
-    // ↓ replaces factoryScheduleWorker — no crons, the mind decides
     { name: 'autonomousMaintenanceWorker', path: './workers/autonomousMaintenanceWorker', start: true },
   ]
 
-  for (const w of workers) {
+  for (const w of inlineWorkers) {
     try {
       const mod = require(w.path)
       if (w.start && typeof mod.start === 'function') {

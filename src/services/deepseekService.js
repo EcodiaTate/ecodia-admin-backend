@@ -5,6 +5,49 @@ const db = require('../config/db')
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
 
+// ─── Budget circuit breaker ───────────────────────────────────────────
+// DEEPSEEK_MONTHLY_BUDGET_AUD in env (0 = unlimited, which is the default).
+// Tracks spend in-memory + DB. Rejects calls once the monthly ceiling is hit.
+// Cost formula: deepseek-chat prompt=$0.14/1M tokens, completion=$0.28/1M tokens.
+// AUD conversion: ~1.55× USD at time of writing — hardcoded conservatively.
+
+const MONTHLY_BUDGET_AUD = parseFloat(env.DEEPSEEK_MONTHLY_BUDGET_AUD || '0')
+const USD_TO_AUD = 1.55
+
+let _budgetCache = null  // { month: 'YYYY-MM', spentUSD: number, checkedAt: number }
+
+async function checkBudget() {
+  if (MONTHLY_BUDGET_AUD <= 0) return  // unlimited
+
+  const now = new Date()
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+
+  // Re-query at most once per minute to keep DB load low
+  if (!_budgetCache || _budgetCache.month !== month || Date.now() - _budgetCache.checkedAt > 60_000) {
+    try {
+      const [row] = await db`
+        SELECT COALESCE(SUM(cost_usd), 0)::float AS spent
+        FROM deepseek_usage
+        WHERE date_trunc('month', created_at) = date_trunc('month', now())
+      `
+      _budgetCache = { month, spentUSD: row?.spent ?? 0, checkedAt: Date.now() }
+    } catch {
+      return  // if DB check fails, don't block calls
+    }
+  }
+
+  const spentAUD = _budgetCache.spentUSD * USD_TO_AUD
+  if (spentAUD >= MONTHLY_BUDGET_AUD) {
+    logger.warn(`DeepSeek budget exhausted — ${spentAUD.toFixed(2)} AUD spent of ${MONTHLY_BUDGET_AUD} AUD monthly limit`)
+    throw new Error(`DeepSeek monthly budget exhausted (${spentAUD.toFixed(2)} / ${MONTHLY_BUDGET_AUD} AUD). Set DEEPSEEK_MONTHLY_BUDGET_AUD=0 to disable or increase the limit.`)
+  }
+
+  // Warn at 80%
+  if (spentAUD >= MONTHLY_BUDGET_AUD * 0.8) {
+    logger.warn(`DeepSeek budget warning — ${spentAUD.toFixed(2)} AUD of ${MONTHLY_BUDGET_AUD} AUD used (${Math.round(spentAUD / MONTHLY_BUDGET_AUD * 100)}%)`)
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // UNIVERSAL KG-AWARE LLM LAYER
 //
@@ -43,6 +86,9 @@ async function callDeepSeek(messages, {
   sourceId = null,           // source entity ID for KG logging
   temperature = null,        // override temperature (default 0.3, cortex uses higher)
 } = {}) {
+  // ─── 0. BUDGET: Reject if monthly ceiling hit ─────────────────────
+  await checkBudget()
+
   const start = Date.now()
   const { kg } = getKG()
 

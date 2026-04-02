@@ -40,3 +40,5 @@ cron.schedule('0 9 * * *', async () => {
     }).catch(notifErr => logger.error('Failed to create heartbeat notification', { error: notifErr.message }))
   }
 })
+
+module.exports = {}
