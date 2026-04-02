@@ -28,18 +28,21 @@ registry.registerMany([
 
       if (!category) {
         // deepseek.categorize expects { description, amount, type, date }
+        // and returns { category, confidence, xeroAccountCode, notes } — extract .category
         const [tx] = await db`
           SELECT description, amount_aud AS amount, type, date
           FROM transactions WHERE id = ${params.transactionId}
         `
         if (!tx) throw new Error(`Transaction ${params.transactionId} not found`)
         const deepseek = require('../services/deepseekService')
-        category = await deepseek.categorize({
+        const result = await deepseek.categorize({
           description: tx.description,
           amount: tx.amount,
           type: tx.type,
           date: tx.date,
         })
+        category = result?.category || result
+        if (typeof category !== 'string') throw new Error(`categorize returned unexpected shape: ${JSON.stringify(result)}`)
       }
 
       await db`
@@ -70,12 +73,14 @@ registry.registerMany([
       let categorized = 0
       for (const tx of uncategorized) {
         try {
-          const category = await deepseek.categorize({
+          const result = await deepseek.categorize({
             description: tx.description,
             amount: tx.amount,
             type: tx.type,
             date: tx.date,
           })
+          const category = result?.category || result
+          if (typeof category !== 'string') continue
           await db`
             UPDATE transactions
             SET category = ${category}, status = 'categorized', updated_at = now()

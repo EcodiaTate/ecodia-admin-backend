@@ -128,45 +128,45 @@ try {
   const eventBus = require('./internalEventBusService')
   if (!_scaffoldListenerAttached) {
     _scaffoldListenerAttached = true
-  eventBus.on('kg:integration_opportunity', async (payload) => {
-    try {
-      const metabolismBridge = require('./metabolismBridgeService')
-      // Only scaffold new integrations when resources are abundant
-      if (metabolismBridge.getPressure() > 0.4) {
-        logger.debug('Integration scaffold: skipping opportunity (metabolic pressure too high)')
-        return
+    eventBus.on('kg:integration_opportunity', async (payload) => {
+      try {
+        const metabolismBridge = require('./metabolismBridgeService')
+        // Only scaffold new integrations when resources are abundant
+        if (metabolismBridge.getPressure() > 0.4) {
+          logger.debug('Integration scaffold: skipping opportunity (metabolic pressure too high)')
+          return
+        }
+
+        const description = payload.description || ''
+        const nodes = payload.nodes || []
+
+        logger.info(`Integration scaffold: evaluating opportunity — ${description.slice(0, 80)}`)
+
+        // Rate limit: max 1 scaffold per day
+        const db = require('../config/db')
+        const [recent] = await db`
+          SELECT count(*)::int AS count
+          FROM cc_sessions
+          WHERE trigger_source = 'self_modification'
+            AND initial_prompt ILIKE '%scaffold%'
+            AND started_at > now() - interval '24 hours'
+        `
+        if (recent.count >= 1) {
+          logger.debug('Integration scaffold: daily cap reached')
+          return
+        }
+
+        const triggers = require('./factoryTriggerService')
+        await triggers.dispatchIntegrationScaffold({
+          description,
+          name: nodes[0] || 'unknown',
+          motivation: `KG free association discovered an integration opportunity: ${description}`,
+        })
+      } catch (err) {
+        logger.debug('Integration scaffold dispatch failed', { error: err.message })
       }
-
-      const description = payload.description || ''
-      const nodes = payload.nodes || []
-
-      logger.info(`Integration scaffold: evaluating opportunity — ${description.slice(0, 80)}`)
-
-      // Rate limit: max 1 scaffold per day
-      const db = require('../config/db')
-      const [recent] = await db`
-        SELECT count(*)::int AS count
-        FROM cc_sessions
-        WHERE trigger_source = 'self_modification'
-          AND initial_prompt ILIKE '%scaffold%'
-          AND started_at > now() - interval '24 hours'
-      `
-      if (recent.count >= 1) {
-        logger.debug('Integration scaffold: daily cap reached')
-        return
-      }
-
-      const triggers = require('./factoryTriggerService')
-      await triggers.dispatchIntegrationScaffold({
-        description,
-        name: nodes[0] || 'unknown',
-        motivation: `KG free association discovered an integration opportunity: ${description}`,
-      })
-    } catch (err) {
-      logger.debug('Integration scaffold dispatch failed', { error: err.message })
-    }
-  })
-  } // end if !_scaffoldListenerAttached
+    })
+  }
 } catch {}
 
 module.exports = {

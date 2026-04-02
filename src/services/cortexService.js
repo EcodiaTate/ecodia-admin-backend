@@ -555,12 +555,14 @@ async function getSessionHistory(sessionId) {
 
 async function listSessions(limit = 20) {
   try {
+    // history->-1 is not valid in Postgres JSONB — use jsonb_array_length-1 for last element
     return await db`
       SELECT id, updated_at,
         jsonb_array_length(history) AS exchange_count,
         history->0->>'ts' AS started_at,
-        history->-1->>'user' AS last_message
+        history->(jsonb_array_length(history)-1)->>'user' AS last_message
       FROM cortex_sessions
+      WHERE jsonb_array_length(history) > 0
       ORDER BY updated_at DESC
       LIMIT ${limit}
     `

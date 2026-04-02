@@ -1,12 +1,11 @@
-require('../config/env')
 const cron = require('node-cron')
 const logger = require('../config/logger')
 const env = require('../config/env')
 
 if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || env.GOOGLE_SERVICE_ACCOUNT_JSON === '{}') {
   logger.info('Calendar poller skipped — GOOGLE_SERVICE_ACCOUNT_JSON not set')
-  return
-}
+  module.exports = {}
+} else {
 
 const calendarService = require('../services/calendarService')
 const { createNotification } = require('../db/queries/transactions')
@@ -39,3 +38,6 @@ cron.schedule('*/30 * * * *', async () => {
     logger.debug('Calendar meeting prep surfacing failed', { error: err.message })
   }
 })
+
+module.exports = {}
+}

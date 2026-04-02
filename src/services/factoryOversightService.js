@@ -291,7 +291,12 @@ async function escalateToHuman(session, confidence, review, filesChanged) {
 async function reviewChanges(session, filesChanged) {
   try {
     const { execFileSync } = require('child_process')
-    const cwd = session.repo_path || session.working_dir
+    const cwd = session.repo_path
+
+    if (!cwd) {
+      logger.debug('reviewChanges: no repo_path on session — returning no diff', { sessionId: session.id })
+      return { approved: true, notes: 'No repo_path available for diff review', confidence: 0 }
+    }
 
     // Get the actual diff (tracked changes + new file contents)
     let diff = ''
@@ -695,38 +700,38 @@ try {
   const eventBus = require('./internalEventBusService')
   if (!_oversightListenerAttached) {
     _oversightListenerAttached = true
-  eventBus.on('kg:pattern_discovered', async (payload) => {
-    try {
-      const metabolismBridge = require('./metabolismBridgeService')
-      if (metabolismBridge.shouldThrottle('scan')) return // not under growth mode
+    eventBus.on('kg:pattern_discovered', async (payload) => {
+      try {
+        const metabolismBridge = require('./metabolismBridgeService')
+        if (metabolismBridge.getPressure() > 0.8) return // only block at survival pressure
 
-      const count = payload.count || 0
-      const source = payload.source || 'unknown'
+        const count = payload.count || 0
+        const source = payload.source || 'unknown'
 
-      // Only act on significant pattern batches from creative phases
-      if (count < 2 || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
+        // Only act on significant pattern batches from creative phases
+        if (count < 2 || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
 
-      logger.info(`Factory oversight: ${count} patterns discovered (${source}) — evaluating for proactive session`)
+        logger.info(`Factory oversight: ${count} patterns discovered (${source}) — evaluating for proactive session`)
 
-      // Rate limit: max 2 pattern-reactive sessions per day
-      const [recentPatternSessions] = await db`
-        SELECT count(*)::int AS count
-        FROM cc_sessions
-        WHERE trigger_source = 'kg_insight' AND started_at > now() - interval '24 hours'
-      `
-      if (recentPatternSessions.count >= 2) return
+        // Rate limit: max 2 pattern-reactive sessions per day
+        const [recentPatternSessions] = await db`
+          SELECT count(*)::int AS count
+          FROM cc_sessions
+          WHERE trigger_source = 'kg_insight' AND started_at > now() - interval '24 hours'
+        `
+        if (recentPatternSessions.count >= 2) return
 
-      const triggers = require('./factoryTriggerService')
-      await triggers.dispatchFromKGInsight({
-        description: `KG discovered ${count} new patterns via ${source}. Investigate the most actionable ones and determine if any codebase improvements are warranted.`,
-        context: `Pattern discovery source: ${source}. Count: ${count}. This is a proactive session triggered by KG consolidation findings.`,
-        suggestedAction: 'Review the latest KG patterns and implement any high-value improvements.',
-      })
-    } catch (err) {
-      logger.debug('Pattern-reactive session dispatch failed', { error: err.message })
-    }
-  })
-  } // end if !_oversightListenerAttached
+        const triggers = require('./factoryTriggerService')
+        await triggers.dispatchFromKGInsight({
+          description: `KG discovered ${count} new patterns via ${source}. Investigate the most actionable ones and determine if any codebase improvements are warranted.`,
+          context: `Pattern discovery source: ${source}. Count: ${count}. This is a proactive session triggered by KG consolidation findings.`,
+          suggestedAction: 'Review the latest KG patterns and implement any high-value improvements.',
+        })
+      } catch (err) {
+        logger.debug('Pattern-reactive session dispatch failed', { error: err.message })
+      }
+    })
+  }
 } catch {}
 
 module.exports = {

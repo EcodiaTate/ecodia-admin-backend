@@ -23,3 +23,5 @@ cron.schedule('*/3 * * * *', async () => {
     }).catch(notifErr => logger.error('Failed to create gmail poller notification', { error: notifErr.message }))
   }
 })
+
+module.exports = {}
