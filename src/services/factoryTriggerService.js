@@ -18,10 +18,16 @@ const env = require('../config/env')
 // ───────────────────────────────────────────────────────────────────
 
 async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
-  // 1. Explicit ID — trust it
+  // 1. Explicit ID — only query if it looks like a UUID
   if (codebaseId) {
-    const [cb] = await db`SELECT id FROM codebases WHERE id = ${codebaseId} LIMIT 1`
-    if (cb) return cb.id
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(codebaseId)
+    if (isUUID) {
+      const [cb] = await db`SELECT id FROM codebases WHERE id = ${codebaseId} LIMIT 1`
+      if (cb) return cb.id
+    } else {
+      // Treat non-UUID codebaseId as a name hint — fall through to name match
+      if (!codebaseName) codebaseName = codebaseId
+    }
   }
 
   // 2. Exact name match (case-insensitive)
