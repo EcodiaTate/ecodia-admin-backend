@@ -1,4 +1,9 @@
-const { chromium } = require('playwright')
+let chromium
+try {
+  chromium = require('playwright').chromium
+} catch {
+  chromium = null
+}
 const logger = require('../config/logger')
 const db = require('../config/db')
 const { encrypt, decrypt } = require('../utils/encryption')
@@ -250,6 +255,7 @@ async function withBrowser(callback) {
   let context = null
 
   try {
+    if (!chromium) throw new Error('Playwright not installed — run npm install playwright')
     browser = await chromium.launch({
       headless: true,
       args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
