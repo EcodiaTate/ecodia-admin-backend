@@ -4,6 +4,8 @@ const auth = require('../middleware/auth')
 const validate = require('../middleware/validate')
 const db = require('../config/db')
 const { broadcast } = require('../websocket/wsManager')
+const kgHooks = require('../services/kgIngestionHooks')
+const logger = require('../config/logger')
 
 const router = Router()
 router.use(auth)
@@ -55,6 +57,10 @@ router.post('/clients', validate(createClientSchema), async (req, res, next) => 
               ${b.linkedinUrl || null}, ${b.xeroContactId || null}, ${b.stage}, ${b.priority}, ${b.tags})
       RETURNING *
     `
+
+    // Fire-and-forget KG ingestion
+    kgHooks.onClientUpdated({ client }).catch(() => {})
+
     res.status(201).json(client)
   } catch (err) {
     next(err)
@@ -168,6 +174,61 @@ router.patch('/clients/:id/stage', validate(stageSchema), async (req, res, next)
       },
     })
 
+    // Fire-and-forget: KG ingestion for stage change
+    const [fullClient] = await db`SELECT * FROM clients WHERE id = ${req.params.id}`
+    if (fullClient) {
+      kgHooks.onClientUpdated({ client: fullClient, previousStage: fromStage }).catch(() => {})
+    }
+
+    // Fire-and-forget: AI-driven CRM stage automation (CC sessions, follow-up actions)
+    const triggers = require('../services/factoryTriggerService')
+    triggers.dispatchFromCRM({
+      clientId: req.params.id,
+      previousStage: fromStage,
+      newStage: toStage,
+      clientName: fullClient?.name,
+    }).catch(err => logger.debug('CRM dispatch failed (non-blocking)', { error: err.message }))
+
+    // Fire-and-forget: Enqueue follow-up action for AI to decide
+    const actionQueue = require('../services/actionQueueService')
+    const deepseekService = require('../services/deepseekService')
+    ;(async () => {
+      try {
+        const response = await deepseekService.callDeepSeek([{
+          role: 'user',
+          content: `CRM client "${fullClient?.name || 'Unknown'}" just moved from "${fromStage}" to "${toStage}".
+${req.body.note ? `Note: ${req.body.note}` : ''}
+
+Should any follow-up action be surfaced to the human? Examples: send a congratulations email, schedule a kickoff call, update project documentation, send an invoice, etc.
+
+Respond with JSON only:
+{
+  "shouldSurface": true or false,
+  "actionType": "create_task" or "schedule_meeting" or "send_email" or "follow_up",
+  "title": "short action title",
+  "summary": "what needs to happen and why",
+  "priority": "low|medium|high"
+}`
+        }], { module: 'crm', skipRetrieval: true })
+
+        const parsed = JSON.parse(response.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+        if (parsed.shouldSurface) {
+          await actionQueue.enqueue({
+            source: 'crm',
+            sourceRefId: req.params.id,
+            actionType: parsed.actionType || 'follow_up',
+            title: parsed.title,
+            summary: parsed.summary,
+            preparedData: { clientName: fullClient?.name, fromStage, toStage, note: req.body.note },
+            context: { clientId: req.params.id, fromStage, toStage },
+            priority: parsed.priority || 'medium',
+          })
+        }
+      } catch (err) {
+        logger.debug('CRM stage action queue failed (non-blocking)', { error: err.message })
+      }
+    })()
+
     res.json({ status: 'ok', from: fromStage, to: toStage })
   } catch (err) {
     next(err)
@@ -237,6 +298,11 @@ router.post('/projects', validate(createProjectSchema), async (req, res, next) =
               ${b.repoUrl || null}, ${b.techStack}, ${b.budgetAud || null}, ${b.hourlyRate || null})
       RETURNING *
     `
+
+    // Fire-and-forget KG ingestion
+    const [ownerClient] = await db`SELECT name FROM clients WHERE id = ${b.clientId}`
+    kgHooks.onProjectCreated({ project, clientName: ownerClient?.name }).catch(() => {})
+
     res.status(201).json(project)
   } catch (err) {
     next(err)

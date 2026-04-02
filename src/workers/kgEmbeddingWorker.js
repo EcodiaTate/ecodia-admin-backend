@@ -3,6 +3,7 @@ const cron = require('node-cron')
 const logger = require('../config/logger')
 const kg = require('../services/knowledgeGraphService')
 const env = require('../config/env')
+const { recordHeartbeat } = require('./heartbeat')
 
 if (!env.NEO4J_URI) {
   logger.info('KG embedding worker skipped — NEO4J_URI not set')
@@ -18,8 +19,10 @@ cron.schedule('*/15 * * * *', async () => {
     if (count > 0) {
       logger.info(`KG embedding worker: embedded ${count} nodes`)
     }
+    await recordHeartbeat('kg_embedding', 'active')
   } catch (err) {
     logger.error('KG embedding worker failed', { error: err.message })
+    await recordHeartbeat('kg_embedding', 'error', err.message)
   }
 })
 

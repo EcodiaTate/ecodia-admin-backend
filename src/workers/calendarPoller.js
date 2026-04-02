@@ -30,3 +30,12 @@ cron.schedule('*/5 * * * *', async () => {
     }).catch(notifErr => logger.error('Failed to create calendar poller notification', { error: notifErr.message }))
   }
 })
+
+// Proactive meeting prep — check every 30 minutes for upcoming meetings needing prep
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    await calendarService.surfaceUpcomingMeetingPrep()
+  } catch (err) {
+    logger.debug('Calendar meeting prep surfacing failed', { error: err.message })
+  }
+})

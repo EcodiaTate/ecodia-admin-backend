@@ -19,15 +19,26 @@ CRITICAL: You must respond with a JSON array of structured blocks. Each block ha
 
 1. "text" — narrative prose. Fields: { "type": "text", "content": "..." }
 2. "action_card" — a pending action for Tate to approve/decline. Fields: { "type": "action_card", "title": "...", "description": "...", "action": "...", "params": {...}, "urgency": "low|medium|high" }
-   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session", "create_doc", "create_sheet", "write_sheet", "upload_file", "search_drive"
+   - action values: "send_email", "archive_email", "create_task", "update_crm_stage", "draft_reply", "create_calendar_event", "start_cc_session", "create_doc", "append_to_doc", "create_sheet", "write_sheet", "append_to_sheet", "upload_file", "search_drive", "move_file", "rename_file", "create_folder", "share_file", "delete_file", "publish_post", "send_meta_message", "reply_to_comment", "like_post", "send_linkedin_reply", "trigger_vercel_build", "sync_xero"
    - create_doc params: { title, content?, folderId? }
+   - append_to_doc params: { documentId, content }
    - create_sheet params: { title, sheets?: [{title}], folderId? }
    - write_sheet params: { spreadsheetId, range, values: [[row1col1, row1col2], [row2col1, row2col2]] }
+   - append_to_sheet params: { spreadsheetId, range, values: [[...]] }
    - upload_file params: { name, mimeType?, content, folderId? }
    - search_drive params: { query, limit? }
+   - move_file params: { fileId, folderId } — move a Drive file to a folder
+   - rename_file params: { fileId, name } — rename a Drive file
+   - create_folder params: { name, parentFolderId? } — create a Drive folder
+   - share_file params: { fileId, email, role?, type? } — share a Drive file
+   - delete_file params: { fileId } — delete a Drive file
    - publish_post params: { pageId, message, link?, imageUrl? } — publish to Facebook/Instagram page
    - send_meta_message params: { conversationId, message } — send a Messenger/Instagram DM reply
    - reply_to_comment params: { commentId, pageId, message } — reply to a Facebook/Instagram comment
+   - like_post params: { postId, pageId } — like a Facebook/Instagram post
+   - send_linkedin_reply params: { dmId } — send a prepared LinkedIn DM reply
+   - trigger_vercel_build params: { projectId? } — trigger a Vercel redeployment
+   - sync_xero params: {} — trigger a Xero transaction sync
    - create_calendar_event params: { summary, startTime, endTime, description?, location?, attendees?, calendar? }. IMPORTANT: startTime/endTime must BOTH be date-only ("2026-04-05") for all-day events OR BOTH be dateTime ("2026-04-05T09:00:00") — never mix them.
 3. "email_card" — an email summary. Fields: { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 4. "task_card" — a task. Fields: { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
@@ -45,6 +56,19 @@ RULES:
 - If you don't have enough information in the knowledge graph, say so plainly
 - When referencing people, include what you know about their role and relationship to Tate
 - Include specific details — names, dates, decisions, status
+
+AVAILABLE INTEGRATIONS:
+- Gmail: Read, archive, reply, draft, send. Emails are auto-triaged by AI.
+- Google Calendar: Read events, create/update/delete events, Google Meet auto-added. Upcoming meetings trigger AI prep reminders.
+- Google Drive: Full read/write — create docs, sheets, upload files, move, rename, share, delete, create folders. Content is extracted and fed into the knowledge graph.
+- LinkedIn: DM reading, AI triage, draft replies, send replies, profile scraping, connection requests, post publishing, lead scoring.
+- Meta (Facebook/Instagram): Page management, post publishing, comment replies, Messenger/Instagram DM replies, DM triage, post likes.
+- Vercel: Deployment monitoring, build logs, error surfacing. Build failures auto-surface to action queue.
+- Xero: Transaction sync, AI categorization. Low-confidence categorizations surface to action queue.
+- CRM: Client/project management. Stage changes trigger AI-driven follow-up actions and optional CC sessions.
+- Factory (Claude Code): Autonomous code sessions with full oversight pipeline. Can be triggered from any integration.
+- Knowledge Graph: Neo4j-backed institutional memory. Every integration feeds into it. Semantic search, narrative arcs, predictions.
+- Action Queue: Universal inbox for AI-prepared actions. Every integration surfaces items here.
 
 SPECIAL NODE TYPES IN THE KNOWLEDGE GRAPH:
 The graph contains synthesized intelligence nodes created by the consolidation engine:
@@ -294,6 +318,83 @@ async function executeAction(action, params) {
       return { success: true, files }
     }
 
+    case 'append_to_doc': {
+      const driveService = require('./googleDriveService')
+      const result = await driveService.appendToDocument(params.account || 'tate@ecodia.au', params.documentId, params.content)
+      return { success: true, message: `Appended ${result.appended} characters`, ...result }
+    }
+
+    case 'append_to_sheet': {
+      const driveService = require('./googleDriveService')
+      const result = await driveService.appendToSheet(params.account || 'tate@ecodia.au', params.spreadsheetId, {
+        range: params.range,
+        values: params.values,
+      })
+      return { success: true, message: `Appended ${result.updatedCells} cells`, ...result }
+    }
+
+    case 'move_file': {
+      const driveService = require('./googleDriveService')
+      const result = await driveService.moveFile(params.account || 'tate@ecodia.au', params.fileId, params.folderId)
+      return { success: true, message: `File moved: ${result.name}` }
+    }
+
+    case 'rename_file': {
+      const driveService = require('./googleDriveService')
+      const result = await driveService.renameFile(params.account || 'tate@ecodia.au', params.fileId, params.name)
+      return { success: true, message: `File renamed to: ${result.name}` }
+    }
+
+    case 'create_folder': {
+      const driveService = require('./googleDriveService')
+      const folder = await driveService.createFolder(params.account || 'tate@ecodia.au', {
+        name: params.name,
+        parentFolderId: params.parentFolderId,
+      })
+      return { success: true, message: `Folder created: ${folder.name}`, folderId: folder.id }
+    }
+
+    case 'share_file': {
+      const driveService = require('./googleDriveService')
+      await driveService.shareFile(params.account || 'tate@ecodia.au', params.fileId, {
+        email: params.email,
+        role: params.role || 'reader',
+        type: params.type || 'user',
+      })
+      return { success: true, message: `File shared with ${params.email}` }
+    }
+
+    case 'delete_file': {
+      const driveService = require('./googleDriveService')
+      await driveService.deleteFile(params.account || 'tate@ecodia.au', params.fileId)
+      return { success: true, message: 'File deleted' }
+    }
+
+    case 'like_post': {
+      const metaService = require('./metaService')
+      await metaService.likePost(params.postId, params.pageId)
+      return { success: true, message: 'Post liked' }
+    }
+
+    case 'send_linkedin_reply': {
+      const linkedinService = require('./linkedinService')
+      const dm = await linkedinService.sendDMReply(params.dmId)
+      return { success: true, message: `LinkedIn reply sent`, dmId: params.dmId }
+    }
+
+    case 'trigger_vercel_build': {
+      // Trigger a Vercel redeployment by syncing — Vercel auto-deploys on git push
+      const vercelService = require('./vercelService')
+      await vercelService.poll()
+      return { success: true, message: 'Vercel sync triggered' }
+    }
+
+    case 'sync_xero': {
+      const xeroService = require('./xeroService')
+      await xeroService.pollTransactions()
+      return { success: true, message: 'Xero sync complete' }
+    }
+
     case 'publish_post': {
       const metaService = require('./metaService')
       const result = await metaService.publishPost(params.pageId, {
@@ -336,6 +437,10 @@ async function getSystemState() {
     highEmailDetails: [],
     calendarToday: [],
     calendarNext24h: 0,
+    actionQueueStats: null,
+    vercelStats: null,
+    linkedinPending: 0,
+    metaUnread: 0,
   }
 
   try {
@@ -404,6 +509,45 @@ async function getSystemState() {
   }
 
   try {
+    const actionQueue = require('./actionQueueService')
+    state.actionQueueStats = await actionQueue.getStats()
+  } catch (err) {
+    logger.debug('Cortex action queue stats failed', { error: err.message })
+  }
+
+  try {
+    const [vercelStats] = await db`
+      SELECT
+        count(*) FILTER (WHERE state = 'ERROR' AND created_at > now() - interval '24 hours')::int AS failed_24h,
+        count(*) FILTER (WHERE state = 'BUILDING')::int AS building
+      FROM vercel_deployments
+    `
+    state.vercelStats = vercelStats
+  } catch (err) {
+    logger.debug('Cortex vercel stats failed', { error: err.message })
+  }
+
+  try {
+    const [liStats] = await db`
+      SELECT count(*)::int AS pending FROM linkedin_dms
+      WHERE triage_status IN ('pending', 'pending_retry') OR (status = 'unread' AND triage_status IS NULL)
+    `
+    state.linkedinPending = liStats?.pending || 0
+  } catch (err) {
+    logger.debug('Cortex linkedin stats failed', { error: err.message })
+  }
+
+  try {
+    const [metaStats] = await db`
+      SELECT count(*)::int AS unread FROM meta_conversations
+      WHERE triage_status IS NULL OR triage_status = 'pending'
+    `
+    state.metaUnread = metaStats?.unread || 0
+  } catch (err) {
+    logger.debug('Cortex meta stats failed', { error: err.message })
+  }
+
+  try {
     const todayEvents = await db`
       SELECT id, summary, start_time, end_time, location, attendees, conference_link, all_day
       FROM calendar_events
@@ -433,6 +577,26 @@ function formatSystemState(state) {
   lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
   lines.push(`Tasks: ${state.pendingTasks} pending`)
   lines.push(`Calendar: ${state.calendarNext24h} events in next 24 hours, ${state.calendarToday.length} today`)
+
+  if (state.actionQueueStats) {
+    const aq = state.actionQueueStats
+    lines.push(`Action Queue: ${aq.pending} pending (${aq.urgent} urgent), ${aq.executed_24h} executed today, ${aq.dismissed_24h} dismissed today`)
+  }
+
+  if (state.vercelStats) {
+    const v = state.vercelStats
+    if (v.building > 0 || v.failed_24h > 0) {
+      lines.push(`Vercel: ${v.building} building now, ${v.failed_24h} failed in last 24h`)
+    }
+  }
+
+  if (state.linkedinPending > 0) {
+    lines.push(`LinkedIn: ${state.linkedinPending} DMs pending triage`)
+  }
+
+  if (state.metaUnread > 0) {
+    lines.push(`Meta DMs: ${state.metaUnread} conversations pending triage`)
+  }
 
   if (state.calendarToday.length) {
     lines.push('\nTODAY\'S CALENDAR:')

@@ -113,27 +113,59 @@ async function dispatchFromCortex(description, params = {}) {
 
 // ─── Trigger: CRM Stage Change ──────────────────────────────────────
 
-async function dispatchFromCRM({ clientId, previousStage, newStage }) {
-  if (newStage !== 'development') return null
-
-  // Look up the project for this client
+async function dispatchFromCRM({ clientId, previousStage, newStage, clientName }) {
+  // Look up the project and client context for this client
   const [project] = await db`
-    SELECT p.id, p.name, cb.id AS codebase_id
+    SELECT p.id, p.name, p.description, cb.id AS codebase_id
     FROM projects p
     LEFT JOIN codebases cb ON cb.project_id = p.id
     WHERE p.client_id = ${clientId} AND p.status = 'active'
     ORDER BY p.created_at DESC LIMIT 1
   `
 
-  return createAndStartSession({
-    codebaseId: project?.codebase_id || null,
-    prompt: `Client moved to development stage. Project: ${project?.name || 'Unknown'}. Set up the initial development environment and scaffolding based on the project requirements.`,
-    triggeredBy: 'crm_stage',
-    triggerSource: 'crm_stage',
-    triggerRefId: clientId,
-    projectId: project?.id || null,
-    clientId,
-  })
+  // Let the AI decide whether this stage change warrants a CC session
+  try {
+    const { callDeepSeek } = require('./deepseekService')
+    const response = await callDeepSeek([{
+      role: 'user',
+      content: `A CRM client just moved from "${previousStage}" to "${newStage}".
+Client: ${clientName || 'Unknown'}
+Project: ${project?.name || 'No active project'}
+Project description: ${project?.description || 'N/A'}
+
+Should this stage transition trigger an autonomous code session? Consider:
+- "development" stage might need scaffolding/setup
+- "live" stage might need deployment verification
+- "archived" stage might need cleanup
+- Other transitions might need documentation, testing, or nothing at all
+
+Respond with JSON only:
+{
+  "shouldTrigger": true or false,
+  "prompt": "the task description for the CC session if shouldTrigger is true, null otherwise",
+  "reasoning": "brief explanation"
+}`
+    }], { module: 'factory_dispatch', skipRetrieval: true })
+
+    const parsed = JSON.parse(response.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+    if (!parsed.shouldTrigger) {
+      logger.info(`CRM stage change ${previousStage}→${newStage}: AI decided no CC session needed (${parsed.reasoning})`)
+      return null
+    }
+
+    return createAndStartSession({
+      codebaseId: project?.codebase_id || null,
+      prompt: parsed.prompt || `Client ${clientName || 'Unknown'} moved from ${previousStage} to ${newStage}. Project: ${project?.name || 'Unknown'}. Take appropriate action.`,
+      triggeredBy: 'crm_stage',
+      triggerSource: 'crm_stage',
+      triggerRefId: clientId,
+      projectId: project?.id || null,
+      clientId,
+    })
+  } catch (err) {
+    logger.warn('AI CRM dispatch decision failed, skipping', { error: err.message })
+    return null
+  }
 }
 
 // ─── Trigger: Simula Proposal ───────────────────────────────────────

@@ -4,6 +4,7 @@ const scraper = require('./linkedinScraper')
 const ai = require('./linkedinAI')
 const queries = require('../db/queries/linkedin')
 const { findClientByLinkedIn } = require('../db/queries/clients')
+const kgHooks = require('./kgIngestionHooks')
 
 // ═══════════════════════════════════════════════════════════════════════
 // DM Operations
@@ -36,6 +37,9 @@ async function checkDMs() {
           await queries.updateDM(dm.id, { client_id: existingClient.id })
         }
       }
+
+      // Fire-and-forget KG ingestion for new DMs
+      kgHooks.onLinkedInDMProcessed({ dm }).catch(() => {})
 
       upserted++
     }
@@ -211,7 +215,12 @@ async function scrapeAndSaveProfile(profileUrl) {
     return scraper.scrapeProfile(tools, profileUrl)
   })
 
-  return queries.upsertProfile(data)
+  const profile = await queries.upsertProfile(data)
+
+  // Fire-and-forget KG ingestion
+  kgHooks.onLinkedInProfileProcessed({ profile: { ...data, id: profile?.id } }).catch(() => {})
+
+  return profile
 }
 
 async function linkProfileToClient(profileId, clientId) {

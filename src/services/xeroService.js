@@ -4,6 +4,7 @@ const env = require('../config/env')
 const logger = require('../config/logger')
 const { encrypt, decrypt } = require('../utils/encryption')
 const { createNotification } = require('../db/queries/transactions')
+const kgHooks = require('./kgIngestionHooks')
 
 const XERO_TOKEN_URL = 'https://identity.xero.com/connect/token'
 const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0'
@@ -128,6 +129,36 @@ async function pollTransactions() {
             updated_at = now()
           WHERE id = ${inserted.id}
         `
+
+        // Fire-and-forget KG ingestion
+        kgHooks.onTransactionCategorized({
+          transaction: {
+            description: tx.Reference || tx.Contact?.Name || 'Unknown',
+            amount_aud: tx.Total,
+            type: tx.Type === 'SPEND' ? 'debit' : 'credit',
+            date: txDate,
+            category: result.category,
+          },
+          clientName: tx.Contact?.Name || null,
+        }).catch(() => {})
+
+        // Surface low-confidence categorizations to action queue for human review
+        if (result.confidence < 0.7) {
+          const actionQueue = require('./actionQueueService')
+          actionQueue.enqueue({
+            source: 'xero',
+            sourceRefId: String(inserted.id),
+            actionType: 'create_task',
+            title: `Review: ${tx.Reference || tx.Contact?.Name || 'Unknown'} ($${Math.abs(tx.Total)})`,
+            summary: `Auto-categorized as "${result.category}" with ${(result.confidence * 100).toFixed(0)}% confidence. ${result.notes || ''}`,
+            preparedData: {
+              title: `Review transaction categorization: ${tx.Reference || tx.Contact?.Name}`,
+              description: `Amount: $${Math.abs(tx.Total)} (${tx.Type === 'SPEND' ? 'debit' : 'credit'})\nAuto-category: ${result.category} (${(result.confidence * 100).toFixed(0)}% confidence)\nRationale: ${result.notes}`,
+            },
+            context: { transactionId: inserted.id, amount: tx.Total, category: result.category },
+            priority: Math.abs(tx.Total) > 500 ? 'high' : 'medium',
+          }).catch(() => {})
+        }
       } catch (catErr) {
         logger.warn(`Failed to categorize transaction ${inserted.id}`, { error: catErr.message })
       }

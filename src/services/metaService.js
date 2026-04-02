@@ -2,6 +2,7 @@ const env = require('../config/env')
 const db = require('../config/db')
 const logger = require('../config/logger')
 const kgHooks = require('./kgIngestionHooks')
+const deepseekService = require('./deepseekService')
 
 // ═══════════════════════════════════════════════════════════════════════
 // META GRAPH API SERVICE
@@ -216,6 +217,95 @@ async function syncConversations(pageDbId, pageId, token, platform = 'messenger'
   return newMessages
 }
 
+// ─── AI Triage for Meta DMs ───────────────────────────────────────────
+
+async function triagePendingConversations() {
+  if (!env.DEEPSEEK_API_KEY) return
+
+  // Get conversations with new unread messages that haven't been triaged recently
+  const conversations = await db`
+    SELECT mc.*, pg.name AS page_name,
+      (SELECT json_agg(json_build_object('sender', mm.sender_name, 'text', mm.message_text, 'from_page', mm.is_from_page, 'time', mm.created_time)
+       ORDER BY mm.created_time DESC)
+       FROM meta_messages mm WHERE mm.conversation_id = mc.id LIMIT 10
+      ) AS recent_messages
+    FROM meta_conversations mc
+    JOIN meta_pages pg ON mc.page_id = pg.id
+    WHERE mc.triage_status IS NULL OR mc.triage_status = 'pending'
+    ORDER BY mc.last_message_at DESC NULLS LAST
+    LIMIT 10
+  `
+
+  if (conversations.length === 0) return
+
+  const actionQueue = require('./actionQueueService')
+
+  for (const conv of conversations) {
+    try {
+      const messages = (conv.recent_messages || []).reverse()
+      const lastFromCustomer = messages.filter(m => !m.from_page).slice(-1)[0]
+      if (!lastFromCustomer) continue // No customer message to triage
+
+      const prompt = `You are managing social media DMs for Ecodia (software development company). A ${conv.platform || 'messenger'} conversation needs triage.
+
+Page: ${conv.page_name}
+Participant: ${conv.participant_name || 'Unknown'}
+
+Recent messages:
+${messages.map(m => `${m.from_page ? 'Page' : conv.participant_name || 'Customer'}: ${m.text || '(no text)'}`).join('\n')}
+
+Classify and decide what to do. Respond with JSON only:
+{
+  "priority": "urgent|high|medium|low|spam",
+  "summary": "one sentence summary",
+  "suggestedAction": "reply|ignore|escalate|create_task",
+  "draftReply": "draft reply if suggestedAction is reply, null otherwise",
+  "surfaceToHuman": true or false,
+  "surfaceReason": "reason to surface (null if not surfacing)"
+}`
+
+      const raw = await deepseekService.callDeepSeek(
+        [{ role: 'user', content: prompt }],
+        { module: 'meta_triage', skipRetrieval: true }
+      )
+
+      const triage = JSON.parse(raw.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+
+      await db`
+        UPDATE meta_conversations SET
+          triage_status = 'complete',
+          triage_priority = ${triage.priority},
+          triage_summary = ${triage.summary},
+          updated_at = now()
+        WHERE id = ${conv.id}
+      `
+
+      // Surface to action queue if AI says so
+      if (triage.surfaceToHuman) {
+        await actionQueue.enqueue({
+          source: 'meta',
+          sourceRefId: String(conv.id),
+          actionType: triage.draftReply ? 'send_meta_message' : 'follow_up',
+          title: `${conv.platform || 'Messenger'}: ${conv.participant_name || 'Unknown'}`,
+          summary: triage.surfaceReason || triage.summary,
+          preparedData: {
+            message: triage.draftReply || null,
+            conversationId: conv.id,
+            participantName: conv.participant_name,
+          },
+          context: { platform: conv.platform, pageName: conv.page_name, participantName: conv.participant_name },
+          priority: triage.priority === 'spam' ? 'low' : triage.priority,
+        }).catch(() => {})
+      }
+
+      logger.debug(`Meta DM triaged: ${conv.participant_name} → ${triage.priority}/${triage.suggestedAction}`)
+    } catch (err) {
+      logger.warn(`Meta DM triage failed for ${conv.id}`, { error: err.message })
+      await db`UPDATE meta_conversations SET triage_status = 'pending', updated_at = now() WHERE id = ${conv.id}`.catch(() => {})
+    }
+  }
+}
+
 // ─── Full Poll ─────────────────────────────────────────────────────────
 
 async function poll() {
@@ -236,6 +326,9 @@ async function poll() {
       logger.error(`Meta sync failed for page ${page.name}`, { error: err.message })
     }
   }
+
+  // After sync, triage new conversations (like Gmail does for emails)
+  await triagePendingConversations()
 }
 
 // ─── Queries ───────────────────────────────────────────────────────────
@@ -399,6 +492,7 @@ module.exports = {
   discoverPages,
   syncPosts,
   syncConversations,
+  triagePendingConversations,
   getPages,
   getPosts,
   getConversations,

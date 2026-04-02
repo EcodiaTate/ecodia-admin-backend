@@ -97,7 +97,7 @@ cron.schedule('0 * * * *', async () => {
   try {
     await actionQueue.expireStale()
   } catch (err) {
-    logger.debug('Action queue expiry failed', { error: err.message })
+    logger.warn('Action queue expiry failed', { error: err.message })
   }
 })
 

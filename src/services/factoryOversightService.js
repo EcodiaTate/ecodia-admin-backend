@@ -172,12 +172,16 @@ async function reviewChanges(session, filesChanged) {
     let diff = ''
     try {
       diff = execFileSync('git', ['diff'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
-    } catch {}
+    } catch (err) {
+      logger.debug('git diff failed', { error: err.message, cwd })
+    }
 
     if (!diff) {
       try {
         diff = execFileSync('git', ['diff', '--cached'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
-      } catch {}
+      } catch (err) {
+        logger.debug('git diff --cached failed', { error: err.message, cwd })
+      }
     }
 
     // For new untracked files, read their content directly
@@ -189,7 +193,9 @@ async function reviewChanges(session, filesChanged) {
         try {
           const content = fs.readFileSync(path.join(cwd, f), 'utf-8')
           newFileContents.push(`--- /dev/null\n+++ ${f}\n${content.slice(0, 2000)}`)
-        } catch {}
+        } catch (err) {
+          logger.debug(`Failed to read new file ${f}`, { error: err.message })
+        }
       }
       diff = newFileContents.join('\n\n')
     }
@@ -355,7 +361,8 @@ Respond with JSON only:
     try {
       const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
       followUp = JSON.parse(cleaned)
-    } catch {
+    } catch (err) {
+      logger.warn('Failed to parse oversight follow-up response', { error: err.message, response: response?.slice(0, 200) })
       return
     }
 

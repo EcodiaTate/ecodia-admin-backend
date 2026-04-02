@@ -38,12 +38,18 @@ async function checkSelfHealth() {
   try {
     await db`SELECT 1`
     checks.db = true
-  } catch {}
+  } catch (err) {
+    checks.db = false
+    logger.warn('Vital signs: DB health check failed', { error: err.message })
+  }
 
   // Neo4j
   try {
     checks.neo4j = await neo4jHealth()
-  } catch {}
+  } catch (err) {
+    checks.neo4j = false
+    logger.debug('Vital signs: Neo4j health check failed', { error: err.message })
+  }
 
   // Memory
   const used = process.memoryUsage()

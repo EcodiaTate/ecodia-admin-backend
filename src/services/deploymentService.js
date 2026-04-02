@@ -146,7 +146,9 @@ async function runHealthCheck(url) {
       const res = await axios.get(url, { timeout: 10_000, maxRedirects: 0, validateStatus: () => true })
       if (res.status >= 200 && res.status < 300) return true
       logger.debug(`Health check returned ${res.status}`, { url })
-    } catch {}
+    } catch (err) {
+      logger.debug(`Health check request failed`, { url, error: err.message, attempt: i + 1 })
+    }
 
     if (i < HEALTH_CHECK_RETRIES - 1) {
       await new Promise(r => setTimeout(r, HEALTH_CHECK_INTERVAL))

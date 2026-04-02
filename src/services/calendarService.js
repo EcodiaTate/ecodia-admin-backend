@@ -15,8 +15,7 @@ function getCalendarClient(userEmail) {
     email: credentials.client_email,
     key: privateKey,
     scopes: [
-      'https://www.googleapis.com/auth/calendar.readonly',
-      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/calendar',
     ],
     subject: userEmail,
   })
@@ -360,6 +359,80 @@ async function getStats() {
   return stats
 }
 
+// ─── Proactive Meeting Prep ────────────────────────────────────────────
+// Surfaces upcoming meetings that might need prep work to the action queue.
+// Runs after each poll cycle — AI decides what needs attention.
+
+async function surfaceUpcomingMeetingPrep() {
+  const deepseekService = require('./deepseekService')
+  const actionQueue = require('./actionQueueService')
+
+  // Get meetings in the next 4 hours that haven't been surfaced yet
+  const upcoming = await db`
+    SELECT ce.*,
+      NOT EXISTS (
+        SELECT 1 FROM action_queue aq
+        WHERE aq.source = 'calendar' AND aq.source_ref_id = ce.id::text
+        AND aq.created_at > now() - interval '24 hours'
+      ) AS not_surfaced
+    FROM calendar_events ce
+    WHERE ce.start_time >= now()
+      AND ce.start_time <= now() + interval '4 hours'
+      AND ce.status = 'confirmed'
+      AND NOT ce.all_day
+    ORDER BY ce.start_time ASC
+  `
+
+  const needsSurfacing = upcoming.filter(e => e.not_surfaced)
+  if (needsSurfacing.length === 0) return
+
+  for (const event of needsSurfacing) {
+    try {
+      const attendees = typeof event.attendees === 'string' ? JSON.parse(event.attendees) : (event.attendees || [])
+      const people = attendees.filter(a => !a.self).map(a => a.name || a.email).join(', ')
+
+      const prompt = `An upcoming calendar event needs review. Should Tate be reminded or do any prep?
+
+Event: ${event.summary}
+Time: ${new Date(event.start_time).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })}
+${event.location ? `Location: ${event.location}` : ''}
+${people ? `Attendees: ${people}` : ''}
+${event.description ? `Description: ${(event.description || '').slice(0, 500)}` : ''}
+${event.conference_link ? 'Has video call link' : ''}
+
+Respond with JSON only:
+{
+  "shouldSurface": true or false,
+  "title": "short prep reminder title",
+  "summary": "what Tate should know or do before this meeting",
+  "priority": "low|medium|high"
+}`
+
+      const raw = await deepseekService.callDeepSeek(
+        [{ role: 'user', content: prompt }],
+        { module: 'calendar', skipRetrieval: false, contextQuery: `${event.summary} ${people}` }
+      )
+
+      const result = JSON.parse(raw.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+      if (result.shouldSurface) {
+        await actionQueue.enqueue({
+          source: 'calendar',
+          sourceRefId: String(event.id),
+          actionType: 'follow_up',
+          title: result.title || `Prep: ${event.summary}`,
+          summary: result.summary,
+          preparedData: { eventSummary: event.summary, startTime: event.start_time, attendees: people },
+          context: { googleEventId: event.google_event_id, conferenceLink: event.conference_link },
+          priority: result.priority || 'medium',
+          expiresInHours: 4,
+        })
+      }
+    } catch (err) {
+      logger.debug(`Calendar prep surfacing failed for ${event.id}`, { error: err.message })
+    }
+  }
+}
+
 module.exports = {
   pollCalendars,
   createEvent,
@@ -369,4 +442,5 @@ module.exports = {
   getToday,
   getStats,
   getCalendarClient,
+  surfaceUpcomingMeetingPrep,
 }

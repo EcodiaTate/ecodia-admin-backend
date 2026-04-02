@@ -116,7 +116,7 @@ async function syncDeployments(limit = 50) {
         projectName: dep.name,
       }).catch(() => {})
 
-      // Notify on errors
+      // Surface errors to action queue (not just notification)
       if (dep.state === 'ERROR') {
         const { createNotification } = require('../db/queries/transactions')
         await createNotification({
@@ -128,6 +128,22 @@ async function syncDeployments(limit = 50) {
             error: dep.errorMessage,
             commitSha: dep.meta?.githubCommitSha,
           },
+        }).catch(() => {})
+
+        // Enqueue actionable item — human can trigger a CC fix session
+        const actionQueue = require('./actionQueueService')
+        actionQueue.enqueue({
+          source: 'vercel',
+          sourceRefId: dep.uid,
+          actionType: 'create_task',
+          title: `Build failed: ${dep.name} (${dep.meta?.githubCommitRef || 'unknown'})`,
+          summary: `${dep.errorMessage || 'Unknown error'}. Commit: ${dep.meta?.githubCommitMessage || 'N/A'}`,
+          preparedData: {
+            title: `Fix Vercel build failure: ${dep.name}`,
+            description: `Branch: ${dep.meta?.githubCommitRef || 'unknown'}\nCommit: ${dep.meta?.githubCommitMessage || 'N/A'}\nError: ${dep.errorMessage || 'Check build logs'}\nDeployment: ${dep.uid}`,
+          },
+          context: { deploymentId: dep.uid, project: dep.name, branch: dep.meta?.githubCommitRef },
+          priority: dep.target === 'production' ? 'urgent' : 'high',
         }).catch(() => {})
       }
     }

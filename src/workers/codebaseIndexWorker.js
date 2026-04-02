@@ -2,6 +2,7 @@ const cron = require('node-cron')
 const logger = require('../config/logger')
 const db = require('../config/db')
 const codebaseIntelligence = require('../services/codebaseIntelligenceService')
+const { recordHeartbeat } = require('./heartbeat')
 
 // ═══════════════════════════════════════════════════════════════════════
 // CODEBASE INDEX WORKER
@@ -45,8 +46,10 @@ async function runIndexCycle() {
     if (embedded > 0) {
       logger.info(`Embedded ${embedded} stale code chunks`)
     }
+    await recordHeartbeat('codebase_index', 'active')
   } catch (err) {
     logger.error('Codebase index cycle failed', { error: err.message })
+    await recordHeartbeat('codebase_index', 'error', err.message)
   } finally {
     running = false
   }

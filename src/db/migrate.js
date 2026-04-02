@@ -1,8 +1,17 @@
 require('../config/env')
 const fs = require('fs')
 const path = require('path')
-const db = require('../config/db')
+const postgres = require('postgres')
+const env = require('../config/env')
 const logger = require('../config/logger')
+
+// Use a single connection for migrations — avoids pool exhaustion
+// when the main app is running and holding connections
+const db = postgres(env.DATABASE_URL, {
+  max: 1,
+  idle_timeout: 10,
+  connect_timeout: 10,
+})
 
 async function migrate() {
   // Ensure _migrations table exists

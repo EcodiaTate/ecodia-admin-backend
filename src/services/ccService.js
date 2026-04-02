@@ -310,7 +310,9 @@ async function startSession(session) {
         if (allChanged.length > 0) {
           await db`UPDATE cc_sessions SET files_changed = ${allChanged} WHERE id = ${session.id}`
         }
-      } catch {}
+      } catch (err) {
+        logger.debug('Failed to detect changed files for CC session', { sessionId: session.id, error: err.message })
+      }
     }
 
     // KG learning hook

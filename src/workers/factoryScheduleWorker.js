@@ -5,6 +5,7 @@ const path = require('path')
 const db = require('../config/db')
 const logger = require('../config/logger')
 const metabolismBridge = require('../services/metabolismBridgeService')
+const { recordHeartbeat } = require('./heartbeat')
 
 // ═══════════════════════════════════════════════════════════════════════
 // FACTORY SCHEDULE WORKER
@@ -22,8 +23,10 @@ cron.schedule('0 17 * * *', async () => {
   }
   try {
     await runDependencyAudit()
+    await recordHeartbeat('factory_schedule', 'active')
   } catch (err) {
     logger.error('Factory dependency audit failed', { error: err.message })
+    await recordHeartbeat('factory_schedule', 'error', err.message)
   }
 })
 

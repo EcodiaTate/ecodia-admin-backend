@@ -2,6 +2,7 @@ require('../config/env')
 const cron = require('node-cron')
 const logger = require('../config/logger')
 const env = require('../config/env')
+const { recordHeartbeat } = require('./heartbeat')
 
 if (!env.NEO4J_URI || !env.DEEPSEEK_API_KEY) {
   logger.info('KG consolidation worker skipped — NEO4J_URI or DEEPSEEK_API_KEY not set')
@@ -19,8 +20,10 @@ cron.schedule('0 17 * * *', async () => {
   try {
     const results = await consolidation.runConsolidationPipeline()
     logger.info('KG consolidation: nightly pipeline complete', results)
+    await recordHeartbeat('kg_consolidation', 'active')
   } catch (err) {
     logger.error('KG consolidation: nightly pipeline failed', { error: err.message })
+    await recordHeartbeat('kg_consolidation', 'error', err.message)
   }
 })
 

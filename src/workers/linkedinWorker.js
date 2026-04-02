@@ -31,7 +31,8 @@ async function runJob(jobName, fn) {
       logger.warn(`LinkedIn worker suspended (${status.reason}), skipping ${jobName}`)
       return
     }
-  } catch {
+  } catch (err) {
+    logger.warn(`LinkedIn worker status check failed, skipping ${jobName}`, { error: err.message })
     return
   }
 
