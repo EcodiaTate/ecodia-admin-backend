@@ -136,7 +136,7 @@ async function syncToOrganism() {
       const records = await runQuery(
         `MATCH (n:\`${label}\`)
          WHERE n.updated_at > datetime() - duration('PT30M')
-           OR (n.importance IS NOT NULL AND n.importance > 0.5)
+           OR (n.importance IS NOT NULL AND n.importance > ${parseFloat(env.MEMORY_BRIDGE_BULK_IMPORTANCE_MIN || '0.5')})
          WITH n, size([(n)-[]-() | 1]) AS connections
          WHERE connections >= $minConnections
          RETURN n, labels(n) AS labels
@@ -226,7 +226,7 @@ async function mirrorCriticalNodes() {
   try {
     const records = await runQuery(
       `MATCH (n)
-       WHERE n.importance IS NOT NULL AND n.importance > 0.7
+       WHERE n.importance IS NOT NULL AND n.importance > ${parseFloat(env.MEMORY_BRIDGE_PULL_IMPORTANCE_MIN || '0.7')}
          AND (n.last_mirrored IS NULL OR n.last_mirrored < datetime() - duration('PT1H'))
        RETURN n, labels(n) AS labels
        LIMIT 10`
@@ -337,7 +337,7 @@ async function syncFactoryLearnings({ limit = 20 } = {}) {
       SELECT id, codebase_id, pattern_type, pattern_description, confidence, success,
              times_applied, last_applied_at, updated_at
       FROM factory_learnings
-      WHERE confidence > 0.4
+      WHERE confidence > ${parseFloat(env.MEMORY_BRIDGE_CONFIDENCE_MIN || '0.4')}
         AND (last_applied_at IS NULL OR last_applied_at > now() - interval '60 days')
       ORDER BY confidence DESC, updated_at DESC
       LIMIT ${limit}

@@ -42,8 +42,8 @@ async function checkBudget() {
     throw new Error(`DeepSeek monthly budget exhausted (${spentAUD.toFixed(2)} / ${MONTHLY_BUDGET_AUD} AUD). Set DEEPSEEK_MONTHLY_BUDGET_AUD=0 to disable or increase the limit.`)
   }
 
-  // Warn at 80%
-  if (spentAUD >= MONTHLY_BUDGET_AUD * 0.8) {
+  const warningFraction = parseFloat(env.DEEPSEEK_BUDGET_WARNING_FRACTION || '0.8')
+  if (warningFraction > 0 && spentAUD >= MONTHLY_BUDGET_AUD * warningFraction) {
     logger.warn(`DeepSeek budget warning — ${spentAUD.toFixed(2)} AUD of ${MONTHLY_BUDGET_AUD} AUD used (${Math.round(spentAUD / MONTHLY_BUDGET_AUD * 100)}%)`)
   }
 }
@@ -84,7 +84,7 @@ async function callDeepSeek(messages, {
   skipRetrieval = false,     // skip KG retrieval (for KG ingestion calls to avoid loops)
   skipLogging = false,       // skip KG logging (for KG ingestion calls)
   sourceId = null,           // source entity ID for KG logging
-  temperature = null,        // override temperature (default 0.3, cortex uses higher)
+  temperature = null,        // null = provider default (no override)
 } = {}) {
   // ─── 0. BUDGET: Reject if monthly ceiling hit ─────────────────────
   await checkBudget()
@@ -133,7 +133,7 @@ ${kgContext}
   // ─── 3. EXECUTE: Call DeepSeek ─────────────────────────────────────
   const response = await axios.post(
     DEEPSEEK_API_URL,
-    { model, messages: enrichedMessages, temperature: temperature ?? 0.3 },
+    { model, messages: enrichedMessages, ...(temperature !== null && { temperature }) },
     { headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' } }
   )
 
@@ -145,7 +145,7 @@ ${kgContext}
   await db`
     INSERT INTO deepseek_usage (model, prompt_tokens, completion_tokens, cost_usd, module, duration_ms)
     VALUES (${model}, ${usage.prompt_tokens}, ${usage.completion_tokens},
-            ${(usage.prompt_tokens * 0.14 + usage.completion_tokens * 0.28) / 1_000_000},
+            ${(usage.prompt_tokens * parseFloat(env.DEEPSEEK_COST_PROMPT_PER_1M || '0.14') + usage.completion_tokens * parseFloat(env.DEEPSEEK_COST_COMPLETION_PER_1M || '0.28')) / 1_000_000},
             ${module}, ${durationMs})
   `.catch(err => logger.warn('Failed to track DeepSeek usage', { error: err.message }))
 

@@ -1,4 +1,5 @@
 const logger = require('../config/logger')
+const env = require('../config/env')
 
 // ═══════════════════════════════════════════════════════════════════════
 // CAPABILITY REGISTRY
@@ -135,7 +136,8 @@ function checkPressureGate(name, cap) {
   try {
     const metabolismBridge = require('./metabolismBridgeService')
     const pressure = metabolismBridge.getPressure()
-    if (pressure < 0.95) return null
+    const gate = parseFloat(env.SURVIVAL_PRESSURE_GATE || '0.95')
+    if (gate <= 0 || pressure < gate) return null
     if (cap?.priority === 'critical') return null
 
     return {

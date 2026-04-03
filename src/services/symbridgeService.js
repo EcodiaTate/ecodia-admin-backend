@@ -245,7 +245,7 @@ async function routeMessage(message) {
       const aqStats = await actionQueue.getStats().catch(() => ({}))
       const [learningStats] = await db`
         SELECT count(*)::int AS total,
-               count(*) FILTER (WHERE confidence > 0.5)::int AS high_confidence
+               count(*) FILTER (WHERE confidence > ${parseFloat(env.SYMBRIDGE_LEARNINGS_HIGH_CONFIDENCE || '0.5')})::int AS high_confidence
         FROM factory_learnings
       `.catch(() => [{}])
       await send('factory_query_result', {
@@ -267,14 +267,14 @@ async function routeMessage(message) {
             SELECT pattern_type, pattern_description, confidence, success, times_applied, updated_at
             FROM factory_learnings
             WHERE (codebase_id = ${codebaseFilter} OR codebase_id IS NULL)
-              AND confidence > 0.35
+              AND confidence > ${parseFloat(env.SYMBRIDGE_LEARNINGS_CODEBASE_MIN || '0.35')}
               AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
             ORDER BY confidence DESC, updated_at DESC LIMIT ${limitFilter}
           `.catch(() => [])
         : await db`
             SELECT pattern_type, pattern_description, confidence, success, times_applied, updated_at
             FROM factory_learnings
-            WHERE confidence > 0.4
+            WHERE confidence > ${parseFloat(env.SYMBRIDGE_LEARNINGS_GLOBAL_MIN || '0.4')}
               AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
             ORDER BY confidence DESC, updated_at DESC LIMIT ${limitFilter}
           `.catch(() => [])

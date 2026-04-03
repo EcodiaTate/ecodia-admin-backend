@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const db = require('../config/db')
 const logger = require('../config/logger')
+const env = require('../config/env')
 
 // ═══════════════════════════════════════════════════════════════════════
 // VALIDATION SERVICE
@@ -140,23 +141,39 @@ async function validateChanges(sessionId) {
   }
 
   // Confidence score — heuristic baseline, then blend with historical outcomes
+  const W = {
+    baselineNoDeps:   parseFloat(env.VALIDATION_BASELINE_NO_DEPS       || '0.55'),
+    testsPass:        parseFloat(env.VALIDATION_WEIGHT_TESTS_PASS       || '0.4'),
+    testsNull:        parseFloat(env.VALIDATION_WEIGHT_TESTS_NULL       || '0.2'),
+    lintPass:         parseFloat(env.VALIDATION_WEIGHT_LINT_PASS        || '0.2'),
+    lintNull:         parseFloat(env.VALIDATION_WEIGHT_LINT_NULL        || '0.1'),
+    typecheckPass:    parseFloat(env.VALIDATION_WEIGHT_TYPECHECK_PASS   || '0.2'),
+    typecheckNull:    parseFloat(env.VALIDATION_WEIGHT_TYPECHECK_NULL   || '0.1'),
+    playwrightPass:   parseFloat(env.VALIDATION_WEIGHT_PLAYWRIGHT_PASS  || '0.1'),
+    playwrightNull:   parseFloat(env.VALIDATION_WEIGHT_PLAYWRIGHT_NULL  || '0.05'),
+    allPassBonus:     parseFloat(env.VALIDATION_WEIGHT_ALL_PASS_BONUS   || '0.1'),
+    historyMinSamples: parseInt(env.VALIDATION_HISTORY_MIN_SAMPLES     || '5', 10),
+    historyMaxSamples: parseInt(env.VALIDATION_HISTORY_MAX_SAMPLES     || '50', 10),
+    historyMinWeight:  parseFloat(env.VALIDATION_HISTORY_MIN_WEIGHT    || '0.3'),
+  }
+
   let heuristic = 0
   const noDepsInstalled = !project.depsInstalled
 
   if (noDepsInstalled) {
-    heuristic = 0.55
+    heuristic = W.baselineNoDeps
     logger.info(`Validation: deps not installed for ${project.runtime} project — baseline confidence ${heuristic}`, { sessionId })
   } else {
-    if (results.testPassed === true) heuristic += 0.4
-    else if (results.testPassed === null) heuristic += 0.2
-    if (results.lintPassed === true) heuristic += 0.2
-    else if (results.lintPassed === null) heuristic += 0.1
-    if (results.typecheckPassed === true) heuristic += 0.2
-    else if (results.typecheckPassed === null) heuristic += 0.1
-    if (results.playwrightPassed === true) heuristic += 0.1
-    else if (results.playwrightPassed === null) heuristic += 0.05
+    if (results.testPassed === true) heuristic += W.testsPass
+    else if (results.testPassed === null) heuristic += W.testsNull
+    if (results.lintPassed === true) heuristic += W.lintPass
+    else if (results.lintPassed === null) heuristic += W.lintNull
+    if (results.typecheckPassed === true) heuristic += W.typecheckPass
+    else if (results.typecheckPassed === null) heuristic += W.typecheckNull
+    if (results.playwrightPassed === true) heuristic += W.playwrightPass
+    else if (results.playwrightPassed === null) heuristic += W.playwrightNull
     const anyFailed = [results.testPassed, results.lintPassed, results.typecheckPassed].some(v => v === false)
-    if (!anyFailed) heuristic += 0.1
+    if (!anyFailed) heuristic += W.allPassBonus
   }
   heuristic = Math.min(heuristic, 1.0)
 
@@ -174,10 +191,10 @@ async function validateChanges(sessionId) {
         AND outcome IS NOT NULL
     `
 
-    if (history.total >= 5) {
+    if (history.total >= W.historyMinSamples) {
       const historicalRate = history.successes / history.total
-      // Weight shifts from 100% heuristic → 30% heuristic as data accumulates (up to 50 samples)
-      const heuristicWeight = Math.max(0.3, 1.0 - (history.total / 50))
+      // Weight shifts from 100% heuristic → min weight as data accumulates
+      const heuristicWeight = Math.max(W.historyMinWeight, 1.0 - (history.total / W.historyMaxSamples))
       confidence = (heuristic * heuristicWeight) + (historicalRate * (1 - heuristicWeight))
 
       // No floor cap: if historical data screams 0% success, let confidence go there.

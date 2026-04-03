@@ -223,7 +223,7 @@ async function embedStaleNodes(batchSize = 100) {
 
 // ─── Trace-Based Retrieval ───────────────────────────────────────────
 
-async function getContext(query, { maxSeeds = 15, maxDepth = 5, minSimilarity = 0.4 } = {}) {
+async function getContext(query, { maxSeeds = parseInt(env.KG_CONTEXT_MAX_SEEDS || '15', 10), maxDepth = parseInt(env.KG_CONTEXT_MAX_DEPTH || '5', 10), minSimilarity = parseFloat(env.KG_CONTEXT_MIN_SIMILARITY || '0.4') } = {}) {
   if (!env.NEO4J_URI) return { traces: [], summary: '' }
 
   const seedLimit = parseInt(maxSeeds, 10) || 5

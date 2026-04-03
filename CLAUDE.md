@@ -75,6 +75,17 @@ CC sessions flow through: execute → DeepSeek review → validate (test/lint/ty
 | Hardcoding urgency/importance thresholds in memoryBridgeService | Use `MEMORY_SYNC_URGENT_THRESHOLD`, `MEMORY_SYNC_IMMEDIATE_THRESHOLD`, `MEMORY_SYNC_DEBOUNCE_MS` env vars |
 | Hardcoding deployment health check retries/timeouts | Use `HEALTH_CHECK_RETRIES`, `HEALTH_CHECK_TIMEOUT_MS`, `HEALTH_CHECK_INTERVAL_MS` env vars |
 | Hardcoding organism vital-signs failure threshold | Use `ORGANISM_MAX_CONSECUTIVE_FAILURES`, `ORGANISM_HEALTH_CHECK_INTERVAL_MS` env vars |
+| Hardcoding pressure gates (0.95 in capabilityRegistry, 0.85 in directActionService) | Use `SURVIVAL_PRESSURE_GATE`, `METABOLIC_PRESSURE_GATE` env vars (0 = never block) |
+| Hardcoding validation confidence weights (0.55, 0.4, 0.2...) | Use `VALIDATION_BASELINE_NO_DEPS`, `VALIDATION_WEIGHT_TESTS_PASS`, etc. env vars |
+| Hardcoding KG similarity thresholds (0.95 dedup, 0.5/0.95 free associate filter) | Use `KG_DEDUP_SIMILARITY_THRESHOLD`, `KG_CONSOLIDATION_SIMILARITY_MIN/MAX` env vars |
+| Hardcoding KG importance scoring weights | Use `KG_IMPORTANCE_*` env vars (connectivity, recency, type, synth) |
+| Hardcoding free-associate pressure thresholds/rounds | Use `KG_FREE_ASSOC_PRESSURE_HIGH/MED/LOW`, `KG_FREE_ASSOC_ROUNDS_*` env vars |
+| Hardcoding memory bridge bulk/pull importance thresholds | Use `MEMORY_BRIDGE_BULK_IMPORTANCE_MIN`, `MEMORY_BRIDGE_PULL_IMPORTANCE_MIN`, `MEMORY_BRIDGE_CONFIDENCE_MIN` |
+| Hardcoding symbridge learnings confidence filters | Use `SYMBRIDGE_LEARNINGS_HIGH_CONFIDENCE`, `SYMBRIDGE_LEARNINGS_CODEBASE_MIN`, `SYMBRIDGE_LEARNINGS_GLOBAL_MIN` |
+| Hardcoding cortex urgency threshold | Use `CORTEX_URGENCY_THRESHOLD` env var |
+| Hardcoding Xero/Gmail confidence gates | Use `XERO_CATEGORIZATION_CONFIDENCE_MIN`, `GMAIL_TRIAGE_DEFAULT_CONFIDENCE` env vars |
+| Hardcoding DeepSeek cost rates or budget warning fraction | Use `DEEPSEEK_COST_PROMPT_PER_1M`, `DEEPSEEK_COST_COMPLETION_PER_1M`, `DEEPSEEK_BUDGET_WARNING_FRACTION` |
+| Mood instructions in CC session prompts ("Be careful with...", "Run tests after...") | State facts and context only — the AI knows what careful means |
 
 ---
 

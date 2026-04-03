@@ -64,7 +64,7 @@ async function deduplicateNodes({ dryRun = false } = {}) {
       AND a.embedding IS NOT NULL
       AND b.embedding IS NOT NULL
       AND a.name <> b.name
-      AND gds.similarity.cosine(a.embedding, b.embedding) > 0.95
+      AND gds.similarity.cosine(a.embedding, b.embedding) > ${parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.95')}
     WITH a, b
     OPTIONAL MATCH (a)--(shared)--(b)
     WITH a, b, count(shared) AS sharedNeighbors
@@ -956,31 +956,31 @@ async function scoreImportance({ dryRun = false } = {}) {
     OPTIONAL MATCH (n)-[r]-()
     WITH n, count(r) AS degree
 
-    // Connectivity score (0-0.4)
-    WITH n, degree, toFloat(degree) / toFloat(${maxDegree}) * 0.4 AS connectivityScore
+    // Connectivity score
+    WITH n, degree, toFloat(degree) / toFloat(${maxDegree}) * ${parseFloat(env.KG_IMPORTANCE_CONNECTIVITY_WEIGHT || '0.4')} AS connectivityScore
 
-    // Recency score (0-0.25) — nodes updated in last 7 days get full score
+    // Recency score — nodes updated recently get higher score
     WITH n, degree, connectivityScore,
       CASE
-        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P1D') THEN 0.25
-        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P7D') THEN 0.18
-        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P30D') THEN 0.08
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P1D') THEN ${parseFloat(env.KG_IMPORTANCE_RECENCY_1D || '0.25')}
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P7D') THEN ${parseFloat(env.KG_IMPORTANCE_RECENCY_7D || '0.18')}
+        WHEN n.updated_at IS NOT NULL AND n.updated_at > datetime() - duration('P30D') THEN ${parseFloat(env.KG_IMPORTANCE_RECENCY_30D || '0.08')}
         ELSE 0.0
       END AS recencyScore
 
-    // Type bonus (0-0.2)
+    // Type bonus
     WITH n, degree, connectivityScore, recencyScore,
       CASE
-        WHEN any(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation']) THEN 0.2
-        WHEN any(lbl IN labels(n) WHERE lbl IN ['Project', 'Narrative']) THEN 0.15
-        WHEN any(lbl IN labels(n) WHERE lbl IN ['Strategic_Direction', 'Prediction']) THEN 0.12
-        WHEN any(lbl IN labels(n) WHERE lbl IN ['Decision', 'Event']) THEN 0.08
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation']) THEN ${parseFloat(env.KG_IMPORTANCE_TYPE_PERSON || '0.2')}
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Project', 'Narrative']) THEN ${parseFloat(env.KG_IMPORTANCE_TYPE_PROJECT || '0.15')}
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Strategic_Direction', 'Prediction']) THEN ${parseFloat(env.KG_IMPORTANCE_TYPE_STRATEGIC || '0.12')}
+        WHEN any(lbl IN labels(n) WHERE lbl IN ['Decision', 'Event']) THEN ${parseFloat(env.KG_IMPORTANCE_TYPE_EVENT || '0.08')}
         ELSE 0.0
       END AS typeBonus
 
-    // Synthesized bonus (0-0.15) — synthesized nodes are inherently valuable
+    // Synthesized bonus — synthesized nodes are inherently valuable
     WITH n, connectivityScore, recencyScore, typeBonus,
-      CASE WHEN n.is_synthesized = true THEN 0.15 ELSE 0.0 END AS synthBonus
+      CASE WHEN n.is_synthesized = true THEN ${parseFloat(env.KG_IMPORTANCE_SYNTH_BONUS || '0.15')} ELSE 0.0 END AS synthBonus
 
     WITH n, connectivityScore + recencyScore + typeBonus + synthBonus AS importance
 
@@ -1128,10 +1128,13 @@ async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
     try {
       const metabolismBridge = require('./metabolismBridgeService')
       const pressure = metabolismBridge.getPressure()
-      if (pressure > 0.8) rounds = 1      // survival mode: one targeted probe
-      else if (pressure > 0.6) rounds = 3  // constrained: focused
-      else if (pressure < 0.3) rounds = 10 // abundance: full creative exploration
-      else rounds = 5
+      const pHigh = parseFloat(env.KG_FREE_ASSOC_PRESSURE_HIGH || '0.8')
+      const pMed  = parseFloat(env.KG_FREE_ASSOC_PRESSURE_MED  || '0.6')
+      const pLow  = parseFloat(env.KG_FREE_ASSOC_PRESSURE_LOW  || '0.3')
+      if (pressure > pHigh)      rounds = parseInt(env.KG_FREE_ASSOC_ROUNDS_HIGH    || '1',  10)
+      else if (pressure > pMed)  rounds = parseInt(env.KG_FREE_ASSOC_ROUNDS_MED     || '3',  10)
+      else if (pressure < pLow)  rounds = parseInt(env.KG_FREE_ASSOC_ROUNDS_LOW     || '10', 10)
+      else                       rounds = parseInt(env.KG_FREE_ASSOC_ROUNDS_DEFAULT || '5',  10)
     } catch {
       rounds = 5
     }
@@ -1200,7 +1203,7 @@ async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
     const similarities = nodePool
       .filter(n => n.name !== anchor.name)
       .map(n => ({ ...n, sim: cosineSim(anchor.embedding, n.embedding) }))
-      .filter(n => n.sim > 0.5 && n.sim < 0.95) // Similar but not duplicates
+      .filter(n => n.sim > parseFloat(env.KG_CONSOLIDATION_SIMILARITY_MIN || '0.5') && n.sim < parseFloat(env.KG_CONSOLIDATION_SIMILARITY_MAX || '0.95')) // Similar but not duplicates
       .sort((a, b) => b.sim - a.sim)
       .slice(0, clusterSize - 1)
 

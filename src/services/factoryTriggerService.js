@@ -294,12 +294,10 @@ ${spec.motivation ? `Motivation: ${spec.motivation}` : ''}
 CONTEXT (current Factory state):
 - Applied migrations: ${migrationCount[0]?.count || 'unknown'}
 - Workers: ${workerList}
-- This is the running EcodiaOS backend. Changes you make will be auto-deployed if confidence is high enough (0.85 threshold for self-modifications).
-- Be careful with: server.js, migrate.js, ecosystem.config.js, and any file that could crash the server.
-- If creating new migration files, name them with the next sequential number.
-- Run tests after changes.
+- This is the live EcodiaOS backend. Changes deploy automatically via the oversight pipeline.
+- Migration files: sequential numbering, tracked in \`_migrations\` table.
 
-Implement the changes, ensuring they are backward-compatible and won't break the running system.`,
+Implement the proposed changes.`,
     triggeredBy: 'self_modification',
     triggerSource: 'self_modification',
     triggerRefId: spec.id || null,

@@ -141,7 +141,8 @@ function checkPressureGate(actionType, cap) {
   try {
     const metabolismBridge = require('./metabolismBridgeService')
     const pressure = metabolismBridge.getPressure()
-    if (pressure < 0.85) return null
+    const gate = parseFloat(env.METABOLIC_PRESSURE_GATE || '0.85')
+    if (gate <= 0 || pressure < gate) return null
     if (cap?.priority === 'critical') return null
     return {
       success: false,

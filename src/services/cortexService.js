@@ -95,7 +95,7 @@ Current date/time: ${new Date().toISOString()}`
     skipRetrieval: true,  // We already retrieved KG context
     skipLogging: false,   // Log the conversation to KG — conversation IS memory
     sourceId: sessionId,
-    temperature: 0.7,     // Cortex is the thinking layer — needs creative latitude
+    temperature: process.env.CORTEX_TEMPERATURE ? parseFloat(process.env.CORTEX_TEMPERATURE) : null,
   })
 
   // 6. Parse structured blocks
@@ -223,7 +223,7 @@ async function autoEnqueueUrgentActions(blocks) {
         summary: card.description || null,
         preparedData: card.params || {},
         context: { proposed_by: 'cortex', urgency: card.urgency },
-        priority: card.urgency >= 0.7 ? 'urgent' : 'high',
+        priority: card.urgency >= parseFloat(env.CORTEX_URGENCY_THRESHOLD || '0.7') ? 'urgent' : 'high',
       })
       logger.info(`Cortex: auto-enqueued action_card "${card.title}" (urgency: ${card.urgency})`)
     } catch (err) {

@@ -329,7 +329,7 @@ async function triagePendingEmails() {
 async function autoAct(thread, triage) {
   const action = triage.autonomousAction || triage.suggestedAction // backwards compat
   const priority = triage.priority
-  const confidence = typeof triage.confidence === 'number' ? triage.confidence : 0.8
+  const confidence = typeof triage.confidence === 'number' ? triage.confidence : parseFloat(env.GMAIL_TRIAGE_DEFAULT_CONFIDENCE || '0.8')
   const actionQueue = require('./actionQueueService')
 
   try {

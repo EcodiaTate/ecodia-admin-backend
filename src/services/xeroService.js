@@ -143,7 +143,7 @@ async function pollTransactions() {
         }).catch(() => {})
 
         // Surface low-confidence categorizations to action queue for human review
-        if (result.confidence < 0.7) {
+        if (result.confidence < parseFloat(env.XERO_CATEGORIZATION_CONFIDENCE_MIN || '0.7')) {
           const actionQueue = require('./actionQueueService')
           actionQueue.enqueue({
             source: 'xero',

@@ -261,11 +261,9 @@ async function thinkAboutMaintenance(state) {
   // Build a compact, honest system brief
   const brief = buildSystemBrief(state)
 
-  const systemPrompt = `EcodiaOS maintenance mind. Full system state follows. Recent maintenance history is included — avoid redundant work.
+  const systemPrompt = `System state as of ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}.
 
-Metabolic pressure: ${pressure.toFixed(2)}
-
-Respond as JSON — an array of decisions, or [] if nothing is needed:
+Respond as JSON — an array of maintenance decisions, or [] if nothing is needed:
 [{
   "intent": "specific Factory session prompt",
   "reason": "why now",
@@ -274,11 +272,7 @@ Respond as JSON — an array of decisions, or [] if nothing is needed:
   "type": "fix | improvement | security | cleanup | investigation"
 }]`
 
-  const userMessage = `System state — ${new Date().toISOString()}
-
-${brief}
-
-What does this system need right now?`
+  const userMessage = brief
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -290,7 +284,6 @@ What does this system need right now?`
         module: 'autonomous_maintenance',
         skipRetrieval: false,
         skipLogging: false,
-        temperature: 0.5,
         contextQuery: 'system health maintenance codebase quality',
       }
     )
@@ -307,27 +300,47 @@ What does this system need right now?`
   }
 }
 
-// ─── Act On Decision ─────────────────────────────────────────────────
+// ─── Poll Registry ───────────────────────────────────────────────────
+// Open registry — any module can register a poll function at runtime.
+// The AI can request any name; if it's registered it runs, if not a warning is logged.
 
-// Integration poll types the AI can request directly
-const POLL_ACTIONS = {
-  poll_gmail:        async () => { if (gmailPoller.pollOnce) { await gmailPoller.pollOnce(); _lastPolled.gmail = Date.now() } },
-  poll_drive:        async () => { if (workspacePollers.pollDrive) { await workspacePollers.pollDrive(); _lastPolled.google_drive = Date.now() } },
-  extract_drive:     async () => { if (workspacePollers.extractDriveContent) await workspacePollers.extractDriveContent() },
-  embed_drive:       async () => { if (workspacePollers.embedDriveFiles) await workspacePollers.embedDriveFiles() },
-  poll_vercel:       async () => { if (workspacePollers.pollVercel) { await workspacePollers.pollVercel(); _lastPolled.vercel = Date.now() } },
-  poll_meta:         async () => { if (workspacePollers.pollMeta) { await workspacePollers.pollMeta(); _lastPolled.meta = Date.now() } },
-  expire_queue:      async () => { if (workspacePollers.expireStaleActions) await workspacePollers.expireStaleActions() },
+const pollRegistry = new Map([
+  ['poll_gmail',    async () => { if (gmailPoller.pollOnce) { await gmailPoller.pollOnce(); _lastPolled.gmail = Date.now() } }],
+  ['poll_drive',    async () => { if (workspacePollers.pollDrive) { await workspacePollers.pollDrive(); _lastPolled.google_drive = Date.now() } }],
+  ['extract_drive', async () => { if (workspacePollers.extractDriveContent) await workspacePollers.extractDriveContent() }],
+  ['embed_drive',   async () => { if (workspacePollers.embedDriveFiles) await workspacePollers.embedDriveFiles() }],
+  ['poll_vercel',   async () => { if (workspacePollers.pollVercel) { await workspacePollers.pollVercel(); _lastPolled.vercel = Date.now() } }],
+  ['poll_meta',     async () => { if (workspacePollers.pollMeta) { await workspacePollers.pollMeta(); _lastPolled.meta = Date.now() } }],
+  ['expire_queue',  async () => { if (workspacePollers.expireStaleActions) await workspacePollers.expireStaleActions() }],
+])
+
+/**
+ * Register a poll function so the AI can request it by name.
+ * Other modules call this at boot time to expand what the AI can poll.
+ *
+ * @param {string} name  - the poll name the AI will use in decision.intent
+ * @param {Function} fn  - async function to execute
+ */
+function registerPoll(name, fn) {
+  pollRegistry.set(name, fn)
+  logger.debug(`AutonomousMaintenanceWorker: poll registered — ${name}`)
 }
+
+// ─── Act On Decision ─────────────────────────────────────────────────
 
 async function actOnDecision(decision, state) {
   if (!decision.intent) return false
 
   // Direct integration poll — no Factory session needed
-  if (decision.type === 'poll' && POLL_ACTIONS[decision.intent]) {
+  if (decision.type === 'poll') {
+    const pollFn = pollRegistry.get(decision.intent)
+    if (!pollFn) {
+      logger.warn(`AutonomousMaintenanceWorker: unknown poll name — ${decision.intent} (not in registry)`)
+      return false
+    }
     try {
       logger.info(`AutonomousMaintenanceWorker: polling — ${decision.intent}`)
-      await POLL_ACTIONS[decision.intent]()
+      await pollFn()
       return true
     } catch (err) {
       logger.warn(`AutonomousMaintenanceWorker: poll failed — ${decision.intent}`, { error: err.message })
@@ -483,10 +496,13 @@ function fallbackHeuristics(state) {
   const decisions = []
   const pressure = state.pressure
 
+  const pressureThreshold = parseFloat(process.env.MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD || '0.7')
+  const minOccurrences = parseInt(process.env.MAINTENANCE_FALLBACK_MIN_OCCURRENCES || '3')
+
   // Only react under high pressure (mind should handle everything else)
-  if (pressure > 0.7 && state.errorPatterns?.length > 0) {
+  if (pressure > pressureThreshold && state.errorPatterns?.length > 0) {
     const worst = state.errorPatterns[0]
-    if (worst.occurrences >= 3) {
+    if (worst.occurrences >= minOccurrences) {
       decisions.push({
         intent: `Investigate and fix recurring error pattern (${worst.occurrences} occurrences in 7 days): ${worst.error_message?.slice(0, 200)}`,
         reason: 'High error frequency detected during mind outage — fallback heuristic',
@@ -499,4 +515,4 @@ function fallbackHeuristics(state) {
   return decisions
 }
 
-module.exports = { start, stop, runCycle }
+module.exports = { start, stop, runCycle, registerPoll }
