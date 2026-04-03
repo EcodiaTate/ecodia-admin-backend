@@ -133,17 +133,22 @@ async function dispatchFromCRM({ clientId, previousStage, newStage, clientName }
     const { callDeepSeek } = require('./deepseekService')
     const response = await callDeepSeek([{
       role: 'user',
-      content: `CRM client "${clientName || 'Unknown'}" moved from "${previousStage}" to "${newStage}".
+      content: `CRM client "${clientName || 'Unknown'}" just moved from "${previousStage}" to "${newStage}".
 Project: ${project?.name || 'No active project'}
 ${project?.description ? `Description: ${project.description}` : ''}
 
-Does this stage transition warrant an autonomous code session?
+Decide whether this stage transition warrants running a Factory code session. Consider: does the stage change imply work that needs to happen in the codebase? If yes, write a precise prompt for the session. If no, skip it.
 
 Respond as JSON:
 {
-  "shouldTrigger": true/false,
-  "prompt": "task description for the CC session if triggering, null otherwise",
-  "reasoning": "why"
+  "shouldTrigger": true,
+  "prompt": "specific Factory session prompt — be concrete about what code work is needed",
+  "reasoning": "brief rationale"
+}
+or
+{
+  "shouldTrigger": false,
+  "reasoning": "why no code work is needed"
 }`
     }], { module: 'factory_dispatch', skipRetrieval: true })
 

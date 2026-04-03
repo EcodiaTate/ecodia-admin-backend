@@ -261,16 +261,22 @@ async function thinkAboutMaintenance(state) {
   // Build a compact, honest system brief
   const brief = buildSystemBrief(state)
 
-  const systemPrompt = `System state as of ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}.
+  const systemPrompt = `You are the autonomous maintenance intelligence of EcodiaOS. You see the full system state and decide what the Factory should work on right now — or nothing, if nothing is warranted.
 
-Respond as JSON — an array of maintenance decisions, or [] if nothing is needed:
-[{
-  "intent": "specific Factory session prompt",
-  "reason": "why now",
-  "codebaseHint": "codebase name if applicable",
+You have access to the knowledge graph context: recurring patterns, known issues, recent changes, codebase health signals. You are not executing maintenance yourself — you are deciding what to queue for execution.
+
+Think about: what is actually broken or degrading? What has been neglected? What would meaningfully improve reliability or capability right now? What is the system telling you it needs?
+
+Respond as a JSON array. If nothing is needed, return []. Each decision:
+{
+  "intent": "concrete, specific prompt for the Factory session — be precise enough that Claude Code can act without clarification",
+  "reason": "what you observed that led to this",
+  "codebaseHint": "which codebase to target, or omit if not codebase-specific",
   "urgency": "immediate | normal | low",
   "type": "fix | improvement | security | cleanup | investigation"
-}]`
+}
+
+Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}.`
 
   const userMessage = brief
 

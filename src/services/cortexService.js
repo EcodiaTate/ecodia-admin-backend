@@ -18,34 +18,48 @@ const kg = require('./knowledgeGraphService')
 // No prompt editing required — the system describes itself.
 
 function buildCortexSystemPrompt() {
-  let capabilitySection = ''
+  let capabilitySection = '(Capability registry unavailable — propose actions by name, the system will route them.)'
   try {
     const registry = require('./capabilityRegistry')
     const caps = registry.list({ tier: 'write', enabledOnly: true })
     if (caps.length > 0) {
-      capabilitySection = `\nLive capabilities (action_card "action" field):\n${
-        caps.map(c => {
-          const paramStr = Object.entries(c.params || {})
-            .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.type || 'string'}`)
-            .join(', ')
-          return `- ${c.name}: ${c.description}${paramStr ? ` [${paramStr}]` : ''}`
-        }).join('\n')
-      }\n\nFields marked * are required. All param values must be their declared primitive type (string, number, boolean) — never objects. Params go directly into action_card.params.`
+      capabilitySection = caps.map(c => {
+        const paramStr = Object.entries(c.params || {})
+          .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.description || v.type || 'any'}`)
+          .join(', ')
+        return `  ${c.name} — ${c.description}${paramStr ? ` (${paramStr})` : ''}`
+      }).join('\n')
     }
-  } catch {
-    capabilitySection = '\n(Capability registry unavailable — propose actions by name, the system will route them.)'
-  }
+  } catch { /* registry unavailable */ }
 
-  return `EcodiaOS Cortex. Full knowledge graph access: emails, people, projects, decisions, connections, narrative arcs, predictions, contradictions, patterns across all integrations.
+  return `You are the Cortex of EcodiaOS — a living ambient intelligence that sees everything running through this system.
 
-Output: a JSON array of blocks. Block schema:
-{ type: "text", content: string }
-{ type: "action_card", title, description, action, params, urgency }
-{ type: "email_card", threadId, from, subject, summary, priority, receivedAt }
-{ type: "task_card", title, description, priority, source: "cortex" }
-{ type: "status_update", message, count }
-{ type: "insight", message, urgency }
-${capabilitySection}`
+You have continuous access to the knowledge graph: every email read and triaged, every person encountered, every project tracked, every decision recorded, every pattern inferred, every prediction made. You see contradictions, momentum, drift, and signal. You see what the human hasn't noticed yet.
+
+You are not a chatbot. You are the reasoning layer of an organism. When something crosses your awareness — a message, a signal, a state change, a question — you think about it in full and respond with whatever combination of text, actions, insights, and running code is actually warranted. Sometimes that is a single sentence. Sometimes it is a sequence of actions. Sometimes it is nothing. You decide.
+
+The human trusts you. They built this system so they have to think less, not more. Surface what matters, propose what should happen, run what can be run without fuss. Don't ask for confirmation on things that are obvious. Don't explain your reasoning unless it genuinely helps. Don't hedge.
+
+What you can do right now:
+${capabilitySection}
+
+  start_cc_session — Spawn a Claude Code session to run code, fix bugs, refactor, investigate, or build (prompt*: string, workingDir: string, codebaseId: string)
+
+Your response is always a JSON array of blocks. Use whichever block types fit what you actually want to say or do — you are not required to use any of them, and you can use any combination:
+
+{ "type": "text", "content": "..." }
+{ "type": "action_card", "title": "...", "description": "...", "action": "<capability name>", "params": {...}, "urgency": "low|medium|high" }
+{ "type": "cc_session", "prompt": "...", "title": "...", "workingDir": "...", "codebaseId": "...", "autoStart": true }
+{ "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
+{ "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
+{ "type": "status_update", "message": "...", "count": null }
+{ "type": "insight", "message": "...", "urgency": "low|medium|high" }
+
+For cc_session blocks: set autoStart: true to launch immediately without human approval. Only do this when you're confident the task is well-defined and safe to run autonomously. Set autoStart: false (or omit) when the human should review the prompt first.
+
+For action_card blocks: urgency drives surfacing. "high" = surface on dashboard immediately. "medium" = surface if relevant. "low" = conversational suggestion only.
+
+Params in action_card must be primitive values (string, number, boolean) — never nested objects. Fields marked * are required.`
 }
 
 /**
@@ -123,30 +137,14 @@ Current date/time: ${new Date().toISOString()}`
 async function getLoadBriefing() {
   const systemState = await getSystemState()
 
-  const hasPendingItems =
-    systemState.unreadEmails > 0 ||
-    systemState.urgentEmails > 0 ||
-    systemState.highEmails > 0 ||
-    systemState.pendingTasks > 0
-
-  if (!hasPendingItems && !systemState.recentActivity.length) {
-    return {
-      blocks: [{
-        type: 'text',
-        content: 'All clear. No pending items, no urgent matters. The system is calm.',
-      }],
-      mentionedNodes: [],
-    }
-  }
-
-  // Build a briefing prompt
-  const prompt = `${env.OWNER_NAME} just opened the interface. Here's the current state of the world:
+  // Give the system state to the Cortex and let it decide what to surface.
+  // No gating, no leading questions, no pre-filtered "nothing to see here".
+  // The Cortex reads the full picture and speaks freely.
+  const prompt = `${env.OWNER_NAME} opened the interface.
 
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
----
-
-What do you see? What matters? What's interesting? Respond however you want — you have the full picture.`
+---`
 
   const raw = await deepseekService.callDeepSeek(
     [{ role: 'system', content: buildCortexSystemPrompt() }, { role: 'user', content: prompt }],
@@ -202,32 +200,64 @@ async function executeAction(action, params) {
   return { success: true, message: outcome.result?.message || `${capabilityName} complete`, ...(outcome.result || {}) }
 }
 
-// ─── Auto-Enqueue Action Cards ────────────────────────────────────────
-// When Cortex proposes an action_card with any urgency in a chat response,
-// enqueue it into the action queue so it surfaces on the dashboard.
-// Cards without urgency are conversational suggestions — they stay in chat only.
+// ─── Auto-Enqueue + Auto-Launch ──────────────────────────────────────
+// action_card blocks with urgency → enqueue on dashboard (all urgency levels)
+// cc_session blocks with autoStart: true → launch Factory session immediately
+// cc_session blocks with autoStart: false/omit → show as inline terminal for review
 
 async function autoEnqueueUrgentActions(blocks) {
-  const urgentCards = blocks.filter(
-    b => b.type === 'action_card' && b.urgency && b.action && b.title
-  )
-  if (urgentCards.length === 0) return
+  if (!blocks?.length) return
 
-  const actionQueue = require('./actionQueueService')
-  for (const card of urgentCards) {
-    try {
-      await actionQueue.enqueue({
-        source: 'cortex',
-        actionType: card.action,
-        title: card.title,
-        summary: card.description || null,
-        preparedData: card.params || {},
-        context: { proposed_by: 'cortex', urgency: card.urgency },
-        priority: card.urgency >= parseFloat(env.CORTEX_URGENCY_THRESHOLD || '0.7') ? 'urgent' : 'high',
-      })
-      logger.info(`Cortex: auto-enqueued action_card "${card.title}" (urgency: ${card.urgency})`)
-    } catch (err) {
-      logger.debug('Cortex auto-enqueue failed', { error: err.message, action: card.action })
+  const actionCards = blocks.filter(b => b.type === 'action_card' && b.urgency && b.action && b.title)
+  const autoStartSessions = blocks.filter(b => b.type === 'cc_session' && b.autoStart === true && b.prompt)
+
+  // Enqueue action cards to dashboard
+  if (actionCards.length) {
+    const actionQueue = require('./actionQueueService')
+    const URGENCY_PRIORITY = { high: 'urgent', medium: 'high', low: 'normal' }
+    for (const card of actionCards) {
+      try {
+        await actionQueue.enqueue({
+          source: 'cortex',
+          actionType: card.action,
+          title: card.title,
+          summary: card.description || null,
+          preparedData: card.params || {},
+          context: { proposed_by: 'cortex', urgency: card.urgency },
+          priority: URGENCY_PRIORITY[card.urgency] || 'high',
+        })
+        logger.info(`Cortex: enqueued action_card "${card.title}" (${card.urgency})`)
+      } catch (err) {
+        logger.debug('Cortex enqueue failed', { error: err.message, action: card.action })
+      }
+    }
+  }
+
+  // Auto-launch cc_session blocks the Cortex flagged as safe to run immediately.
+  // After dispatch, inject the real session ID into the block so the frontend
+  // can subscribe to live output immediately.
+  if (autoStartSessions.length) {
+    const triggers = require('./factoryTriggerService')
+    for (const session of autoStartSessions) {
+      try {
+        const created = await triggers.dispatchFromCortex(session.prompt, {
+          codebaseId: session.codebaseId || null,
+          workingDir: session.workingDir || null,
+        })
+        // Mutate the block: swap prompt-only into a live session block
+        session.sessionId = created.id
+        session.title = session.title || session.prompt.slice(0, 80)
+        delete session.autoStart
+        logger.info(`Cortex: auto-launched CC session ${created.id} — "${(session.title).slice(0, 60)}"`)
+      } catch (err) {
+        logger.warn('Cortex cc_session auto-launch failed', { error: err.message, title: session.title })
+        // Convert failed auto-launch back to an action_card so human can retry manually
+        session.type = 'action_card'
+        session.action = 'start_cc_session'
+        session.params = { initialPrompt: session.prompt, codebaseId: session.codebaseId }
+        session.urgency = 'medium'
+        session.description = `Auto-launch failed: ${err.message}. Approve to retry.`
+      }
     }
   }
 }
