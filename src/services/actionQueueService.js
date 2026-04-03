@@ -50,6 +50,21 @@ function emitEvent(type, payload) {
   } catch {}
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────
+
+// Guard against JSONB string literals: if a value was double-stringified on insert,
+// postgres returns a JS string instead of an object. Spreading a string produces
+// character-indexed keys ({"0":"{",...}). This normalises any value to a plain object.
+function ensureObject(val) {
+  if (!val) return {}
+  if (typeof val === 'object' && !Array.isArray(val)) return val
+  if (typeof val === 'string') {
+    try { const parsed = JSON.parse(val); return (typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {} }
+    catch { return {} }
+  }
+  return {}
+}
+
 // ─── Constants ────────────────────────────────────────────────────────
 
 const PRIORITY_RANK = { urgent: 0, high: 1, medium: 2, low: 3 }
@@ -333,11 +348,16 @@ async function enqueue({ source, sourceRefId, actionType, title, summary, prepar
   // ── Derive resource key if not provided ──
   const derivedResourceKey = resourceKey || deriveResourceKey(source, actionType, sourceRefId, preparedData)
 
+  // Ensure preparedData/context are objects — LLM may return params as a JSON string,
+  // and double-stringify would store a JSONB string literal that corrupts on consolidation
+  const safeData = ensureObject(preparedData)
+  const safeContext = { ...ensureObject(context), suppression_evaluation: suppression.reason || null }
+
   const [item] = await db`
     INSERT INTO action_queue (source, source_ref_id, action_type, title, summary, prepared_data, context, priority, expires_at, resource_key)
     VALUES (${source}, ${sourceRefId || null}, ${actionType}, ${title}, ${summary || null},
-            ${JSON.stringify(preparedData || {})},
-            ${JSON.stringify({ ...(context || {}), suppression_evaluation: suppression.reason || null })},
+            ${JSON.stringify(safeData)},
+            ${JSON.stringify(safeContext)},
             ${effectivePriority}, ${expiresAt}, ${derivedResourceKey})
     RETURNING *
   `
@@ -445,11 +465,12 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
     : match.priority
 
   // Keep the most recent draft/summary, accumulate source refs and merge signals
-  const existingCtx = match.context || {}
+  // ensureObject guards against JSONB string literals from double-stringify bugs
+  const existingCtx = ensureObject(match.context)
   const mergedSourceRefs = [...(existingCtx.source_ref_ids || [match.source_ref_id]), sourceRefId].filter(Boolean)
   const mergedContext = {
     ...existingCtx,
-    ...(context || {}),
+    ...ensureObject(context),
     consolidated_count: newCount,
     source_ref_ids: mergedSourceRefs,
     latest_signal_at: new Date().toISOString(),
@@ -458,7 +479,7 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
   }
 
   // Use latest prepared data (most recent draft is most relevant)
-  const mergedPreparedData = { ...(match.prepared_data || {}), ...preparedData }
+  const mergedPreparedData = { ...ensureObject(match.prepared_data), ...ensureObject(preparedData) }
 
   // Refresh expiry on consolidation — merged items get a fresh 48h window
   const refreshedExpiry = new Date(Date.now() + DEFAULT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString()
