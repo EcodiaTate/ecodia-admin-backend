@@ -25,15 +25,15 @@ async function migrate() {
   const applied = await db`SELECT filename FROM _migrations`
   const appliedSet = new Set(applied.map(r => r.filename))
 
-  let skipped = 0
-  let newlyApplied = 0
+  const pending = files.filter(f => !appliedSet.has(f))
 
-  for (const file of files) {
-    if (appliedSet.has(file)) {
-      skipped++
-      continue
-    }
+  if (pending.length === 0) {
+    logger.debug(`Migrations: all ${files.length} already applied, nothing to do`)
+    await db.end()
+    return
+  }
 
+  for (const file of pending) {
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8')
     logger.info(`Applying migration: ${file}`)
 
@@ -42,11 +42,10 @@ async function migrate() {
       await tx`INSERT INTO _migrations (filename) VALUES (${file})`
     })
 
-    newlyApplied++
     logger.info(`Applied: ${file}`)
   }
 
-  logger.info(`Migrations complete — ${newlyApplied} applied, ${skipped} already up to date`)
+  logger.info(`Migrations complete — ${pending.length} applied, ${files.length - pending.length} already up to date`)
   await db.end()
 }
 

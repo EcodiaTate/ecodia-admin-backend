@@ -23,6 +23,9 @@ const secretSafety = require('./secretSafetyService')
 
 const activeSessions = new Map()
 
+// Rate limit tracking — prevents spawning sessions when CLI is rate-limited
+let _lastRateLimitReset = null
+
 const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
 const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = unlimited (flag omitted)
 const _timeoutMinutes = parseInt(env.CC_TIMEOUT_MINUTES || '0', 10)
@@ -376,7 +379,7 @@ async function startSession(session) {
   const proc = spawn(CC_CLI, args, {
     cwd,
     env: ccEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],  // stdin ignored — prompt passed via -p flag
   })
 
   const sessionData = {
@@ -415,6 +418,10 @@ async function startSession(session) {
 
   // Stream stdout line by line
   const rl = createInterface({ input: proc.stdout })
+  // Track the stream-json result and rate limit events from stdout
+  let streamResult = null
+  let rateLimitEvent = null
+
   rl.on('line', async (line) => {
     try {
       // Scrub any secrets from output
@@ -428,6 +435,10 @@ async function startSession(session) {
       } catch {
         parsed = { type: 'raw', content: safeLine }
       }
+
+      // Capture result and rate limit events for error extraction
+      if (parsed.type === 'result') streamResult = parsed
+      if (parsed.type === 'rate_limit_event') rateLimitEvent = parsed
 
       broadcastToSession(session.id, 'cc:output', parsed)
     } catch (err) {
@@ -451,9 +462,33 @@ async function startSession(session) {
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
 
-    const success = code === 0
+    const success = code === 0 && !(streamResult?.is_error)
     const status = success ? 'complete' : 'error'
-    const errorMessage = !success ? stderrLines.slice(-5).join('\n') || `Exit code ${code}` : null
+
+    // Extract error from stream-json result first (has the real error),
+    // fall back to stderr, then exit code
+    let errorMessage = null
+    if (!success) {
+      if (streamResult?.is_error && streamResult?.result) {
+        errorMessage = streamResult.result
+      } else {
+        errorMessage = stderrLines.slice(-5).join('\n') || `Exit code ${code}`
+      }
+    }
+
+    // Detect rate limiting and record for backoff
+    if (rateLimitEvent?.rate_limit_info?.status === 'rejected') {
+      const resetsAt = rateLimitEvent.rate_limit_info.resetsAt
+        ? new Date(rateLimitEvent.rate_limit_info.resetsAt * 1000)
+        : null
+      logger.warn(`CC session ${session.id} rate-limited`, {
+        rateLimitType: rateLimitEvent.rate_limit_info.rateLimitType,
+        resetsAt: resetsAt?.toISOString(),
+      })
+      errorMessage = `Rate limited (${rateLimitEvent.rate_limit_info.rateLimitType})${resetsAt ? ` — resets ${resetsAt.toISOString()}` : ''}`
+      // Store rate limit reset time so callers can back off
+      _lastRateLimitReset = resetsAt
+    }
 
     await updateSessionStatus(session.id, status, {
       error_message: errorMessage,
