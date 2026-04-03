@@ -1913,7 +1913,7 @@ Given the graph state and metabolic pressure, decide which phases to run, in wha
     })()
 
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed.slice(0, 5).filter(p => p.phase && typeof p.phase === 'string')
+      return parsed.filter(p => p.phase && typeof p.phase === 'string')
     }
   } catch (err) {
     logger.warn('KG Director: DeepSeek call failed — using heuristic plan', { error: err.message })
