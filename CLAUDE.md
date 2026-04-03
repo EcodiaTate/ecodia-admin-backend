@@ -12,7 +12,7 @@ Every architectural decision must maximise the system's autonomy, capability, an
 
 **Never hardcode what the AI can decide.** If you're writing `if (priority === 'urgent')` or `if (name === 'wattleos')`, you're restricting the system. Give the AI the full context and let it choose. The AI is smarter than your heuristics.
 
-**Never restrict tools or permissions.** CC sessions run with `--dangerously-skip-permissions` and `--max-turns 200`. The oversight pipeline (validate → review → deploy → monitor → revert) is the safety net, not permission restrictions.
+**Never restrict tools or permissions.** CC sessions run with `--dangerously-skip-permissions` and unlimited turns (`CC_MAX_TURNS=0`). The oversight pipeline (validate → review → deploy → monitor → revert) is the safety net, not permission restrictions.
 
 **Never fail silently when you could resolve intelligently.** If a codebase isn't specified, don't default to `process.cwd()` — use `resolveCodebase()` which asks the AI. If a service is unavailable, degrade gracefully and retry. If an API changes, adapt.
 
@@ -86,6 +86,21 @@ CC sessions flow through: execute → DeepSeek review → validate (test/lint/ty
 | Hardcoding Xero/Gmail confidence gates | Use `XERO_CATEGORIZATION_CONFIDENCE_MIN`, `GMAIL_TRIAGE_DEFAULT_CONFIDENCE` env vars |
 | Hardcoding DeepSeek cost rates or budget warning fraction | Use `DEEPSEEK_COST_PROMPT_PER_1M`, `DEEPSEEK_COST_COMPLETION_PER_1M`, `DEEPSEEK_BUDGET_WARNING_FRACTION` |
 | Mood instructions in CC session prompts ("Be careful with...", "Run tests after...") | State facts and context only — the AI knows what careful means |
+| Hardcoding maintenance worker intervals (5min/10min/15min) | Use `MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS`, `MAINTENANCE_INTERVAL_MED_PRESSURE_MS`, `MAINTENANCE_INTERVAL_REST_MS` env vars |
+| Hardcoding maintenance decision caps (`.slice(0, 3)`) | Use `MAINTENANCE_MAX_DECISIONS` (0 = unlimited — AI returns all it deems necessary) |
+| Hardcoding maintenance cooldown, backoff, or escalation SLA | Use `MAINTENANCE_COOLDOWN_MS`, `MAINTENANCE_BACKOFF_MAX_MULTIPLIER`, `MAINTENANCE_ESCALATION_SLA_MS`, `MAINTENANCE_ESCALATION_REMINDER_MS` |
+| Hardcoding self-modification daily cap to a non-zero value | `SELF_MOD_DAILY_CAP=0` (unlimited). The oversight pipeline is the safety net, not a counter |
+| Hardcoding prediction session daily cap | `PREDICTION_SESSION_DAILY_CAP=0` (unlimited). Let the KG predict freely |
+| Hardcoding Factory self-codebase name (`'ecodiaos-backend'`) | Use `FACTORY_SELF_CODEBASE_NAME` env var |
+| Hardcoding Cortex KG retrieval params (maxSeeds, maxDepth, minSimilarity) | Use `CORTEX_KG_MAX_SEEDS`, `CORTEX_KG_MAX_DEPTH`, `CORTEX_KG_MIN_SIMILARITY` env vars |
+| Hardcoding Cortex session memory lookback (`LIMIT 3`) | Use `CORTEX_SESSION_MEMORY_LOOKBACK`, `CORTEX_MEMORY_EXCHANGES_PER_SESSION` env vars |
+| Hardcoding CC context bundle learning limits/thresholds | Use `CC_LEARNING_CONFIDENCE_HARD/SOFT/GLOBAL`, `CC_LEARNING_HARD_LIMIT`, `CC_LEARNING_SOFT_LIMIT/RETURN`, `CC_LEARNING_GLOBAL_LIMIT`, `CC_LEARNING_SIMILARITY_THRESHOLD`, `CC_LEARNING_FALLBACK_LIMIT` |
+| Hardcoding DeepSeek KG retrieval params in callDeepSeek | Use `DEEPSEEK_KG_MAX_SEEDS`, `DEEPSEEK_KG_MAX_DEPTH`, `DEEPSEEK_KG_MIN_SIMILARITY` env vars |
+| Hardcoding KG ingestion throttle rate to non-zero | `KG_MAX_INGESTIONS_PER_MIN=0` (unlimited). Use `KG_INGESTION_DEDUP_WINDOW_MS`, `KG_INGESTION_DEDUP_MAP_SIZE` for dedup tuning |
+| Hardcoding action queue auto-suppression threshold | `ACTION_QUEUE_SUPPRESSION_THRESHOLD=0` (disabled). Use `ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE` for priority downgrade tuning |
+| Hardcoding parallel CC session caps (`.slice(0, 5)`) | Use `CC_MAX_PARALLEL_SESSIONS` (0 = unlimited) |
+| Hardcoding database query result limits in capabilities | Use `CAPABILITY_QUERY_DATABASE_RESULT_LIMIT` (0 = unlimited) |
+| Capping KG consolidation plan phases (`.slice(0, 8)`) | Let the ConsolidationDirector return all phases it deems necessary |
 
 ---
 
@@ -144,7 +159,19 @@ Symbridge → Organism (shared survival, shared memory, shared metabolism)
 **`src/services/capabilityRegistry.js`** is the single execution path for every action in the system. No switch statements anywhere in action dispatch. Services register their capabilities here at boot time. The registry routes execution dynamically.
 
 **`src/capabilities/`** — one file per domain. Each self-registers at require time:
-- `gmail.js`, `calendar.js`, `drive.js`, `crm.js`, `social.js`, `factory.js`, `finance.js`
+- `gmail.js`, `calendar.js`, `drive.js`, `crm.js`, `social.js`, `factory.js`, `finance.js`, `system.js`
+
+**`system.js` capabilities** — self-introspection and quick ops without Factory overhead:
+- `read_file`, `list_directory` — filesystem access for any codebase/log/config
+- `run_shell_command` — ad-hoc VPS shell commands (diagnostics, service status, git ops)
+- `query_database` — read-only SQL against the EcodiaOS database (diagnostics, pattern analysis)
+- `get_system_health` — comprehensive health: PM2, disk, DB, Redis, organism reachability, active CC sessions
+- `get_recent_errors` — error log fetch for diagnosing issues
+- `get_factory_learnings` — view accumulated cross-session patterns
+- `send_cc_message` — send follow-up context to a running CC session mid-execution
+- `get_cc_session_details` — session logs, status, pipeline stage, files changed
+- `list_codebases` — all registered codebases with paths and deploy configs
+- `start_parallel_cc_sessions` — dispatch up to 5 CC sessions simultaneously for related tasks
 
 `actionQueueService`, `cortexService`, and `directActionService` all call `capabilityRegistry.execute()`. The Cortex system prompt is built dynamically from `registry.describeForAI()` — new capabilities auto-appear in Cortex's awareness.
 
@@ -152,7 +179,7 @@ Symbridge → Organism (shared survival, shared memory, shared metabolism)
 - `capabilityRegistry.js` — **All action execution flows through here. The single source of truth for what the system can do.**
 - `factoryTriggerService.js` — Central dispatch + `resolveCodebase()`
 - `actionQueueService.js` — Unified action queue (enqueue, execute via registry, dismiss, expire)
-- `ccService.js` — Claude Code subprocess manager
+- `ccService.js` — Claude Code subprocess manager. Context bundle includes: codebase structure, semantic code chunks, KG context, recent session history, factory learnings, AND architecture philosophy docs (CLAUDE.md + .claude/ specs). Every CC session starts with full architectural awareness.
 - `factoryOversightService.js` — Post-session pipeline (review → validate → deploy → monitor)
 - `cortexService.js` — Conversational AI; `executeAction()` delegates to registry; system prompt built live
 - `kgIngestionHooks.js` — Async KG feeding from all sources

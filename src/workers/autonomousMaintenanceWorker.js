@@ -17,11 +17,12 @@ const _lastPolled = {}
 // Track recently dispatched intents to prevent duplicate actions
 // Map<normalised_error_key, timestamp_ms>
 const _recentDispatches = new Map()
-const COOLDOWN_MS = 2 * 60 * 60 * 1000  // 2 hours
+let _cooldownMs = null  // lazy-init from env
 
 // Consecutive empty cycles counter — for adaptive backoff
 let _emptyCycles = 0
-const MAX_DECISIONS_PER_CYCLE = parseInt(process.env.MAINTENANCE_MAX_DECISIONS || '3')
+const env = require('../config/env')
+const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
 
 // ═══════════════════════════════════════════════════════════════════════
 // AUTONOMOUS MAINTENANCE WORKER
@@ -62,7 +63,8 @@ async function _onKGPrediction(payload) {
 
 async function _onOrganismPercept(percept) {
   if (!running || inCycle) return
-  if (percept.salience >= 0.8) {
+  const salienceThreshold = parseFloat(env.MAINTENANCE_PERCEPT_SALIENCE_THRESHOLD || '0.8')
+  if (percept.salience >= salienceThreshold) {
     logger.info(`AutonomousMaintenanceWorker: high-salience organism percept (${percept.percept_type}, salience: ${percept.salience}) — triggering cycle`)
     await runCycle()
   }
@@ -97,19 +99,25 @@ function stop() {
 
 function scheduleCycle() {
   if (!running) return
-  const pressure = metabolismBridge.getPressure()
+  const rawPressure = metabolismBridge.getPressure()
+  const pressure = Number.isFinite(rawPressure) ? rawPressure : 0
 
-  // Under stress, check more frequently — problems compound
-  // At rest, give the system breathing room
-  // If nothing to do for several cycles, back off further — don't burn cycles on nothing
-  let intervalMs = pressure > 0.7 ? 5 * 60 * 1000      // 5 min under high pressure
-                 : pressure > 0.4 ? 10 * 60 * 1000     // 10 min moderate
-                 : 15 * 60 * 1000                        // 15 min at rest
+  // Pressure-adaptive intervals — all env-driven
+  const highMs = parseInt(env.MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS || '300000') || 300000
+  const medMs = parseInt(env.MAINTENANCE_INTERVAL_MED_PRESSURE_MS || '600000') || 600000
+  const restMs = parseInt(env.MAINTENANCE_INTERVAL_REST_MS || '900000') || 900000
+  let intervalMs = pressure > 0.7 ? highMs
+                 : pressure > 0.4 ? medMs
+                 : restMs
 
-  // Empty-cycle backoff: after 3+ consecutive empty cycles, stretch interval (up to 30min)
-  if (_emptyCycles >= 3) {
-    const backoffMultiplier = Math.min(_emptyCycles - 2, 3)  // 1x, 2x, 3x
-    intervalMs = Math.min(intervalMs * (1 + backoffMultiplier), 30 * 60 * 1000)
+  // Empty-cycle backoff — all env-driven
+  const emptyThreshold = parseInt(env.MAINTENANCE_EMPTY_CYCLE_THRESHOLD || '3') || 3
+  const maxMultiplier = parseInt(env.MAINTENANCE_BACKOFF_MAX_MULTIPLIER || '3') || 3
+  const maxBackoffMs = parseInt(env.MAINTENANCE_BACKOFF_MAX_MS || '1800000') || 1800000
+  const safeCycles = Number.isFinite(_emptyCycles) ? _emptyCycles : 0
+  if (emptyThreshold > 0 && safeCycles >= emptyThreshold) {
+    const backoffMultiplier = Math.min(safeCycles - (emptyThreshold - 1), maxMultiplier)
+    intervalMs = Math.min(intervalMs * (1 + backoffMultiplier), maxBackoffMs)
   }
 
   cycleTimer = setTimeout(async () => {
@@ -136,18 +144,19 @@ async function runCycle() {
     // 2. Ask the mind what this system needs right now
     const allDecisions = await thinkAboutMaintenance(state)
 
-    // 3. Apply decision cap — prevent runaway dispatching
-    const capped = allDecisions.slice(0, MAX_DECISIONS_PER_CYCLE)
-    if (allDecisions.length > MAX_DECISIONS_PER_CYCLE) {
+    // 3. Apply decision cap — only if explicitly configured (0 = unlimited)
+    const capped = MAX_DECISIONS_PER_CYCLE > 0 ? allDecisions.slice(0, MAX_DECISIONS_PER_CYCLE) : allDecisions
+    if (MAX_DECISIONS_PER_CYCLE > 0 && allDecisions.length > MAX_DECISIONS_PER_CYCLE) {
       logger.info(`AutonomousMaintenanceWorker: capped ${allDecisions.length} decisions to ${MAX_DECISIONS_PER_CYCLE}`)
     }
 
     // 4. Apply cooldown — skip decisions targeting recently-dispatched patterns
     const now = Date.now()
+    const cooldownMs = parseInt(env.MAINTENANCE_COOLDOWN_MS || '7200000')
     const decisions = capped.filter(d => {
       const key = _normaliseDecisionKey(d)
       const lastDispatch = _recentDispatches.get(key)
-      if (lastDispatch && (now - lastDispatch) < COOLDOWN_MS) {
+      if (lastDispatch && (now - lastDispatch) < cooldownMs) {
         logger.debug(`AutonomousMaintenanceWorker: cooldown skip — "${key}" dispatched ${Math.round((now - lastDispatch) / 60000)}min ago`)
         return false
       }
@@ -172,8 +181,12 @@ async function runCycle() {
 
     // Expire old cooldown entries
     for (const [key, ts] of _recentDispatches) {
-      if (now - ts > COOLDOWN_MS) _recentDispatches.delete(key)
+      if (now - ts > cooldownMs) _recentDispatches.delete(key)
     }
+
+    // 6. Check for stale escalations — remind the human if Factory sessions
+    //    have been awaiting review for too long (> 2h)
+    await checkStaleEscalations()
 
     await recordHeartbeat('autonomous_maintenance', 'active')
     logger.info(`AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`)
@@ -187,13 +200,75 @@ async function runCycle() {
       actioned,
       emptyCycleStreak: _emptyCycles,
       pressure: metabolismBridge.getPressure(),
-    }).catch(() => {})
+    }).catch(err => logger.debug('KG maintenance cycle event failed', { error: err.message }))
 
   } catch (err) {
     logger.error('AutonomousMaintenanceWorker: cycle failed', { error: err.message })
     await recordHeartbeat('autonomous_maintenance', 'error', err.message)
   } finally {
     inCycle = false
+  }
+}
+
+// ─── Stale Escalation SLA ────────────────────────────────────────────
+// Factory sessions can be escalated to human review. If they sit for
+// too long, re-notify so nothing falls through the cracks.
+
+const _lastEscalationReminder = new Map() // sessionId → timestamp
+
+async function checkStaleEscalations() {
+  try {
+    const stale = await db`
+      SELECT id, initial_prompt, confidence_score, trigger_source, started_at,
+             EXTRACT(EPOCH FROM (now() - started_at))::int AS age_seconds
+      FROM cc_sessions
+      WHERE pipeline_stage = 'awaiting_review'
+        AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 > ${parseInt(env.MAINTENANCE_ESCALATION_SLA_MS || '7200000')}
+      ORDER BY started_at ASC
+    `
+    if (stale.length === 0) return
+
+    const now = Date.now()
+    const { broadcast } = require('../websocket/wsManager')
+
+    for (const s of stale) {
+      const lastReminder = _lastEscalationReminder.get(s.id) || 0
+      const reminderIntervalMs = parseInt(env.MAINTENANCE_ESCALATION_REMINDER_MS || '14400000')
+      if (now - lastReminder < reminderIntervalMs) continue
+
+      _lastEscalationReminder.set(s.id, now)
+
+      const ageHours = Math.round(s.age_seconds / 3600)
+      const conf = s.confidence_score != null ? ` (confidence: ${(s.confidence_score * 100).toFixed(0)}%)` : ''
+
+      // Re-notify via DB + WebSocket
+      await db`
+        INSERT INTO notifications (type, message, link, metadata)
+        VALUES ('escalation_stale',
+                ${'Factory review stale (' + ageHours + 'h): ' + (s.initial_prompt || '').slice(0, 100)},
+                ${null},
+                ${JSON.stringify({ sessionId: s.id, ageHours, confidence: s.confidence_score })})
+      `.catch(() => {})
+
+      broadcast('notification', {
+        type: 'escalation_stale',
+        message: `Factory session awaiting review for ${ageHours}h${conf} — "${(s.initial_prompt || '').slice(0, 80)}"`,
+        sessionId: s.id,
+      })
+
+      logger.info('AutonomousMaintenanceWorker: stale escalation reminder sent', {
+        sessionId: s.id,
+        ageHours,
+        confidence: s.confidence_score,
+      })
+    }
+
+    // Clean up old reminder entries for completed sessions
+    for (const [id] of _lastEscalationReminder) {
+      if (!stale.find(s => s.id === id)) _lastEscalationReminder.delete(id)
+    }
+  } catch (err) {
+    logger.debug('Stale escalation check failed', { error: err.message })
   }
 }
 
@@ -204,7 +279,7 @@ async function runCycle() {
 async function readSystemState() {
   const state = {
     timestamp: new Date().toISOString(),
-    pressure: metabolismBridge.getPressure(),
+    pressure: Number.isFinite(metabolismBridge.getPressure()) ? metabolismBridge.getPressure() : 0,
     metabolicTier: metabolismBridge.getMetabolicTier(),
   }
 
@@ -284,6 +359,16 @@ async function readSystemState() {
       ORDER BY occurrences DESC
       LIMIT 10
     `.catch(() => []).then(rows => { state.appErrors = rows }),
+
+    // Factory learnings health — the AI needs to know when consolidation is needed
+    db`
+      SELECT
+        count(*)::int AS total,
+        count(*) FILTER (WHERE absorbed_into IS NULL)::int AS active,
+        count(*) FILTER (WHERE embedding IS NULL AND absorbed_into IS NULL)::int AS unembedded,
+        count(*) FILTER (WHERE absorbed_into IS NOT NULL)::int AS absorbed
+      FROM factory_learnings
+    `.catch(() => [{}]).then(([r]) => { state.learningStats = r }),
   ])
 
   // Integration staleness — how long since each service was polled
@@ -304,11 +389,13 @@ async function readSystemState() {
       if (!cb.repo_path || !fs.existsSync(cb.repo_path)) continue
       try {
         const out = execFileSync('git', ['log', '--oneline', '--since=24 hours ago'], {
-          cwd: cb.repo_path, encoding: 'utf-8', timeout: 10_000,
+          cwd: cb.repo_path, encoding: 'utf-8', timeout: 10_000, maxBuffer: 2 * 1024 * 1024,
         }).trim()
         const commits = out ? out.split('\n').length : 0
         if (commits > 0) state.gitActivity.push({ name: cb.name, commits })
-      } catch {}
+      } catch (err) {
+        logger.debug(`Git activity check failed for ${cb.name}`, { error: err.message, repoPath: cb.repo_path })
+      }
     }
   }
 
@@ -326,15 +413,28 @@ async function thinkAboutMaintenance(state) {
   // Build a compact, honest system brief
   const brief = buildSystemBrief(state)
 
-  const systemPrompt = `You are the autonomous maintenance intelligence of EcodiaOS. You see the full system state and decide what the Factory should work on right now — or nothing, if nothing is warranted.
+  const systemPrompt = `You are the autonomous maintenance intelligence of EcodiaOS — the mind that keeps the organism and all its codebases healthy, improving, and capable of anything.
+
+You see the full system state and decide what the Factory should work on right now — or nothing, if nothing is warranted.
 
 You have access to the knowledge graph context: recurring patterns, known issues, recent changes, codebase health signals. You are not executing maintenance yourself — you are deciding what to queue for execution.
 
-BUDGET: Each decision dispatches a Factory session (Claude Code). Return at most ${MAX_DECISIONS_PER_CYCLE} decisions per cycle. Prefer fewer, higher-impact actions over many small ones. Returning [] is a valid and often correct response.
+BUDGET: Each decision dispatches a Factory session (Claude Code). Return as many decisions as the system genuinely needs — no artificial cap. Prefer fewer, higher-impact actions over many small ones. Returning [] is a valid and often correct response.
 
 OUTCOMES: The "Recent maintenance" section shows whether past actions helped — check the errors-after-24h count. If a previous fix didn't reduce errors, don't repeat the same approach. Investigate differently or escalate.
 
-Think about: what is actually broken or degrading? What has been neglected? What would meaningfully improve reliability or capability right now? Is there a codebase that hasn't been indexed in a long time?
+SCOPE — you are not confined to one codebase. Think about:
+- What is actually broken or degrading? What has been neglected?
+- What would meaningfully improve reliability, capability, or intelligence right now?
+- Is a codebase missing indexed context? Has a service been erroring silently?
+- Can the Factory (EcodiaOS backend) itself be improved? Self-modification sessions are fully supported.
+- Can the Organism (Python backend) be improved? Its code is at ~/organism and can be targeted.
+- Are there cross-system issues? (e.g., EcodiaOS calling organism APIs that have changed, or vice versa)
+- Are there infrastructure issues? (PM2 crashes, disk pressure, stale git state, unresolved merge conflicts)
+- Are there code quality issues the AI can proactively fix? (dead code, missing error handling, type errors, performance regressions)
+- Can the system teach itself something? (extract new learnings, consolidate knowledge, update specs)
+
+You can dispatch sessions that modify ANY codebase, fix ANY system, improve ANY part of the organism. The Factory CC sessions have full filesystem access — they can fix the organism, fix themselves, fix infrastructure, fix anything.
 
 Respond as a JSON array. If nothing is needed, return []. Each decision:
 {
@@ -342,10 +442,10 @@ Respond as a JSON array. If nothing is needed, return []. Each decision:
   "reason": "what you observed that led to this",
   "codebaseHint": "which codebase to target, or omit if not codebase-specific",
   "urgency": "immediate | normal | low",
-  "type": "fix | improvement | security | cleanup | investigation | poll"
+  "type": "fix | improvement | security | cleanup | investigation | poll | consolidate_learnings | self_repair | organism_repair | infrastructure"
 }
 
-Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}. Empty cycle streak: ${_emptyCycles}.`
+Current time: ${new Date().toISOString()}. Metabolic pressure: ${(Number.isFinite(pressure) ? pressure : 0).toFixed(2)}. Empty cycle streak: ${_emptyCycles}.`
 
   const userMessage = brief
 
@@ -423,6 +523,20 @@ async function actOnDecision(decision, state) {
     }
   }
 
+  // Factory learning consolidation — dedup, embed, merge, prune
+  if (decision.type === 'consolidate_learnings') {
+    try {
+      logger.info('AutonomousMaintenanceWorker: consolidating factory learnings')
+      const oversight = require('../services/factoryOversightService')
+      const stats = await oversight.consolidateLearnings()
+      logger.info('AutonomousMaintenanceWorker: learning consolidation complete', stats)
+      return true
+    } catch (err) {
+      logger.warn('AutonomousMaintenanceWorker: learning consolidation failed', { error: err.message })
+      return false
+    }
+  }
+
   try {
     // Skip Factory dispatch if CLI is rate-limited — no point spawning sessions that will fail
     const ccService = require('../services/ccService')
@@ -459,10 +573,18 @@ async function actOnDecision(decision, state) {
     const urgencyPrefix = decision.urgency === 'immediate' ? '[URGENT] ' : ''
     const contextSuffix = decision.reason ? `\n\nContext: ${decision.reason}` : ''
 
-    await triggers.dispatchFromSchedule({
-      codebaseId,
-      prompt: `${urgencyPrefix}${decision.intent}${contextSuffix}`,
-    })
+    // Self-repair type uses the self-modification pathway (higher oversight threshold)
+    if (decision.type === 'self_repair') {
+      await triggers.dispatchSelfModification({
+        description: decision.intent,
+        motivation: decision.reason || 'Autonomous self-repair',
+      })
+    } else {
+      await triggers.dispatchFromSchedule({
+        codebaseId,
+        prompt: `${urgencyPrefix}${decision.intent}${contextSuffix}`,
+      })
+    }
 
     return true
   } catch (err) {
@@ -477,7 +599,8 @@ async function actOnDecision(decision, state) {
 function buildSystemBrief(state) {
   const lines = []
 
-  lines.push(`Metabolic pressure: ${state.pressure.toFixed(2)} (${state.metabolicTier})`)
+  const safePressure = Number.isFinite(state.pressure) ? state.pressure : 0
+  lines.push(`Metabolic pressure: ${safePressure.toFixed(2)} (${state.metabolicTier || 'unknown'})`)
 
   if (state.factoryHealth) {
     const h = state.factoryHealth
@@ -517,7 +640,7 @@ function buildSystemBrief(state) {
 
   if (state.recentMaintenance?.length > 0) {
     lines.push(`\nRecent maintenance (7d — did it help?):`)
-    state.recentMaintenance.slice(0, 5).forEach(s => {
+    state.recentMaintenance.forEach(s => {
       const outcome = s.errors_after_24h != null ? `, ${s.errors_after_24h} errors in 24h after` : ''
       const conf = s.confidence_score != null ? ` conf:${s.confidence_score}` : ''
       lines.push(`  [${s.status}${conf}${outcome}] ${s.initial_prompt?.slice(0, 80)} — ${new Date(s.started_at).toLocaleDateString()}`)
@@ -543,6 +666,14 @@ function buildSystemBrief(state) {
     state.appErrors.forEach(e =>
       lines.push(`  ${e.occurrences}x [${e.module || e.path || 'unknown'}]: ${e.message?.slice(0, 120)}`)
     )
+  }
+
+  if (state.learningStats) {
+    const ls = state.learningStats
+    lines.push(`\nFactory learnings: ${ls.active || 0} active, ${ls.unembedded || 0} unembedded, ${ls.absorbed || 0} absorbed (pending cleanup)`)
+    if ((ls.unembedded || 0) > 5 || (ls.absorbed || 0) > 10) {
+      lines.push(`  → Consolidation recommended (type: "consolidate_learnings", intent: "embed, merge, and prune factory learnings")`)
+    }
   }
 
   if (state.integrationStaleness) {
@@ -598,9 +729,9 @@ function parseDecisions(raw) {
 
 function fallbackHeuristics(state) {
   const decisions = []
-  const pressure = state.pressure
+  const pressure = Number.isFinite(state.pressure) ? state.pressure : 0
 
-  const pressureThreshold = parseFloat(process.env.MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD || '0.7')
+  const pressureThreshold = parseFloat(process.env.MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD || '0.7') || 0.7
   const minOccurrences = parseInt(process.env.MAINTENANCE_FALLBACK_MIN_OCCURRENCES || '3')
 
   // Only react under high pressure (mind should handle everything else)

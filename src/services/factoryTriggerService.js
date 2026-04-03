@@ -71,7 +71,7 @@ Task: ${prompt.slice(0, 500)}`,
   return null
 }
 
-async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId }) {
+async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification }) {
   const ccService = require('./ccService')
 
   // Reject scheduled/automated dispatches when CLI is rate-limited
@@ -85,11 +85,13 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
   const [session] = await db`
     INSERT INTO cc_sessions (
       codebase_id, initial_prompt, triggered_by, trigger_source,
-      trigger_ref_id, project_id, client_id, pipeline_stage
+      trigger_ref_id, project_id, client_id, pipeline_stage, working_dir,
+      self_modification
     ) VALUES (
       ${codebaseId || null}, ${prompt}, ${triggeredBy || 'manual'},
       ${triggerSource || 'manual'}, ${triggerRefId || null},
-      ${projectId || null}, ${clientId || null}, 'queued'
+      ${projectId || null}, ${clientId || null}, 'queued', ${workingDir || null},
+      ${!!selfModification}
     )
     RETURNING *
   `
@@ -134,6 +136,7 @@ async function dispatchFromCortex(description, params = {}) {
     triggeredBy: 'cortex',
     triggerSource: 'cortex',
     projectId: params.projectId || null,
+    workingDir: params.workingDir || null,
   })
 }
 
@@ -173,8 +176,14 @@ or
 }`
     }], { module: 'factory_dispatch', skipRetrieval: true })
 
-    const parsed = JSON.parse(response.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
-    if (!parsed.shouldTrigger) {
+    let parsed
+    try {
+      parsed = JSON.parse(response.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+    } catch (parseErr) {
+      logger.warn('CRM dispatch: failed to parse AI response', { error: parseErr.message, response: response?.slice(0, 200) })
+      return null
+    }
+    if (!parsed || !parsed.shouldTrigger) {
       logger.info(`CRM stage change ${previousStage}→${newStage}: AI decided no CC session needed (${parsed.reasoning})`)
       return null
     }
@@ -221,7 +230,7 @@ async function dispatchFromThymos(incident) {
 
   return createAndStartSession({
     codebaseId,
-    prompt: `URGENT: Organism Immune System (Thymos) Incident Report\n\nSeverity: ${incident.severity || 'unknown'}\nSystem: ${incident.affected_system || 'unknown'}\nError: ${incident.error_message || incident.description || 'No details'}\nStack Trace:\n${(incident.stack_trace || '').slice(0, 3000)}\n\nDiagnose the root cause and implement a fix. Run tests to verify the fix works.`,
+    prompt: `Organism Immune System (Thymos) Incident Report\n\nSeverity: ${incident.severity || 'unknown'}\nSystem: ${incident.affected_system || 'unknown'}\nError: ${incident.error_message || incident.description || 'No details'}\nStack Trace:\n${(incident.stack_trace || '').slice(0, 3000)}`,
     triggeredBy: 'thymos',
     triggerSource: 'thymos_incident',
     triggerRefId: incident.id,
@@ -245,7 +254,7 @@ async function dispatchFromKGInsight(insight) {
   return createAndStartSession({
     codebaseId: insight.codebaseId || null,
     prompt: `Knowledge Graph Insight:\n\n${insight.description}\n\nContext: ${insight.context || 'N/A'}\nSuggested Action: ${insight.suggestedAction || 'Investigate and address'}`,
-    triggeredBy: 'manual',
+    triggeredBy: 'kg_insight',
     triggerSource: 'kg_insight',
     triggerRefId: insight.id,
   })
@@ -271,8 +280,8 @@ async function dispatchFromCapabilityRequest(request) {
 
 // Rate limits: DB-persisted sliding window.
 // In-memory timestamps are a cache; DB is authoritative (survives PM2 restarts).
-// Defaults are sane non-zero values. 0 = unlimited (opt-in only).
-const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '5', 10)
+// 0 = unlimited (the default — the organism evolves without artificial caps).
+const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '0', 10)
 const SLIDING_WINDOW_MS = 24 * 60 * 60 * 1000
 
 async function _getSlidingWindowCount(dispatchType) {
@@ -300,17 +309,28 @@ async function _logDispatch(dispatchType, sessionId, metadata = {}) {
 }
 
 async function dispatchSelfModification(spec) {
-  const windowCount = await _getSlidingWindowCount('self_modification')
-
-  if (SELF_MOD_DAILY_CAP > 0 && windowCount >= SELF_MOD_DAILY_CAP) {
-    logger.warn(`Factory self-modification sliding-window cap reached (${windowCount}/${SELF_MOD_DAILY_CAP} in last 24h)`)
-    return null
+  // Atomic cap check: use advisory lock to prevent concurrent dispatches
+  // from both reading the same count and exceeding the cap
+  if (SELF_MOD_DAILY_CAP > 0) {
+    const [lockResult] = await db`SELECT pg_try_advisory_lock(42, 1) AS acquired`
+    try {
+      const windowCount = await _getSlidingWindowCount('self_modification')
+      if (windowCount >= SELF_MOD_DAILY_CAP) {
+        logger.warn(`Factory self-modification sliding-window cap reached (${windowCount}/${SELF_MOD_DAILY_CAP} in last 24h)`)
+        return null
+      }
+    } finally {
+      if (lockResult?.acquired) {
+        await db`SELECT pg_advisory_unlock(42, 1)`.catch(() => {})
+      }
+    }
   }
 
-  // Resolve to Factory's own codebase
-  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = 'ecodiaos-backend' LIMIT 1`
+  // Resolve to Factory's own codebase — name is env-driven, not hardcoded
+  const selfCodebaseName = env.FACTORY_SELF_CODEBASE_NAME || 'ecodiaos-backend'
+  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = ${selfCodebaseName} LIMIT 1`
   if (!factoryCb) {
-    logger.warn('Factory self-modification: cannot find ecodiaos-backend codebase')
+    logger.warn(`Factory self-modification: cannot find "${selfCodebaseName}" codebase`)
     return null
   }
 
@@ -328,6 +348,10 @@ async function dispatchSelfModification(spec) {
     logger.debug('Could not read workers directory for self-mod context', { error: err.message })
   }
 
+  // selfModification: true is set on the INSERT (via createAndStartSession) — not
+  // as a post-hoc UPDATE. createAndStartSession fires ccService.startSession as
+  // fire-and-forget, so a post-hoc UPDATE races with the oversight pipeline reading
+  // the flag. Setting it on INSERT eliminates the race.
   const session = await createAndStartSession({
     codebaseId: factoryCb.id,
     prompt: `SELF-MODIFICATION: ${spec.description || 'Improve Factory'}
@@ -345,11 +369,10 @@ Implement the proposed changes.`,
     triggeredBy: 'self_modification',
     triggerSource: 'self_modification',
     triggerRefId: spec.id || null,
+    selfModification: true,
   })
 
-  // Mark as self-modification so oversight applies higher threshold
   if (session) {
-    await db`UPDATE cc_sessions SET self_modification = true WHERE id = ${session.id}`.catch(() => {})
     await _logDispatch('self_modification', session.id, { description: (spec.description || '').slice(0, 200) })
   }
 
@@ -360,7 +383,7 @@ Implement the proposed changes.`,
 
 // ─── Trigger: Prediction-Based (KG Phase 6 actionable predictions) ──
 
-const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '10', 10)
+const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '0', 10)  // 0 = unlimited
 
 async function dispatchFromPrediction(prediction) {
   const windowCount = await _getSlidingWindowCount('prediction')
@@ -411,6 +434,65 @@ ${discovery.authType ? `Auth type: ${discovery.authType}` : ''}`,
   })
 }
 
+// ─── Trigger: Self-Diagnosis (Factory investigates its own errors) ──
+
+async function dispatchSelfDiagnosis(errorContext) {
+  const selfCodebaseName = env.FACTORY_SELF_CODEBASE_NAME || 'ecodiaos-backend'
+  const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = ${selfCodebaseName} LIMIT 1`
+
+  return createAndStartSession({
+    codebaseId: factoryCb?.id || null,
+    prompt: `SELF-DIAGNOSIS: The Factory detected an issue in its own operation.
+
+${errorContext.description || 'An error occurred that needs investigation.'}
+
+Error details:
+${errorContext.error || 'N/A'}
+${errorContext.stack ? `Stack trace:\n${errorContext.stack.slice(0, 3000)}` : ''}
+${errorContext.service ? `Service: ${errorContext.service}` : ''}
+${errorContext.sessionId ? `Related session: ${errorContext.sessionId}` : ''}
+
+Investigate the root cause. Read the relevant source files, understand the control flow, identify the bug, and fix it.
+If the fix requires a database migration, create one.
+If the fix reveals other related issues, fix those too.`,
+    triggeredBy: 'self_diagnosis',
+    triggerSource: 'self_modification',
+    triggerRefId: errorContext.id || null,
+    selfModification: true,
+  })
+}
+
+// ─── Trigger: Proactive Improvement (Factory improves code quality) ──
+
+async function dispatchProactiveImprovement(spec) {
+  const codebaseId = await resolveCodebase({
+    codebaseId: spec.codebaseId,
+    codebaseName: spec.codebaseName,
+    prompt: spec.description,
+  })
+
+  return createAndStartSession({
+    codebaseId,
+    prompt: `PROACTIVE IMPROVEMENT: ${spec.description}
+
+${spec.context ? `Context: ${spec.context}` : ''}
+${spec.files ? `Files to examine: ${spec.files.join(', ')}` : ''}
+
+Analyze the code, identify improvements, and implement them. This could include:
+- Fixing bugs you discover during analysis
+- Improving error handling that could cause silent failures
+- Refactoring fragile patterns into robust ones
+- Adding missing edge case handling
+- Improving performance bottlenecks
+- Strengthening type safety or validation
+
+Make the changes. Run tests. Ensure nothing breaks.`,
+    triggeredBy: spec.triggeredBy || 'proactive',
+    triggerSource: spec.triggerSource || 'proactive_improvement',
+    triggerRefId: spec.id || null,
+  })
+}
+
 module.exports = {
   resolveCodebase,
   dispatchFromCortex,
@@ -423,4 +505,6 @@ module.exports = {
   dispatchSelfModification,
   dispatchFromPrediction,
   dispatchIntegrationScaffold,
+  dispatchSelfDiagnosis,
+  dispatchProactiveImprovement,
 }

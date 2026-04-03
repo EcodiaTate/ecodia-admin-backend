@@ -32,6 +32,7 @@ const envSchema = z.object({
   FACTORY_REVIEW_PRESSURE_GATE: z.string().default('0.0'),         // 0 = review always blocks; >0 = async at this pressure
   CC_MAX_TURNS: z.string().default('0'),           // 0 = unlimited
   CC_TIMEOUT_MINUTES: z.string().default('0'),     // 0 = unlimited
+  CC_MAX_PARALLEL_SESSIONS: z.string().default('0'), // 0 = unlimited (AI decides concurrency)
   VERCEL_API_TOKEN: z.string().default(''),
   VERCEL_TEAM_ID: z.string().default(''),
   META_APP_ID: z.string().default(''),
@@ -40,9 +41,10 @@ const envSchema = z.object({
   // Freedom / autonomy config
   // All caps: 0 = unlimited. These exist only so the system can report them — never use them to throttle.
   FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.7'),  // minimum confidence for self-modification auto-deploy
-  PREDICTION_SESSION_DAILY_CAP: z.string().default('10'),
+  PREDICTION_SESSION_DAILY_CAP: z.string().default('0'),    // 0 = unlimited prediction sessions
   MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.0'), // 0 = always sync
   GOOGLE_PRIMARY_ACCOUNT: z.string().default(''),
+  GMAIL_ENABLED: z.string().default('false'),          // 'true' to enable Gmail polling; 'false' = skip all inbox access
   GMAIL_INBOXES: z.string().default(''),              // comma-separated; falls back to GOOGLE_PRIMARY_ACCOUNT
   GMAIL_MAX_TRIAGE_ATTEMPTS: z.string().default('0'), // 0 = unlimited
   // LinkedIn browser — all 0 = unlimited
@@ -61,7 +63,7 @@ const envSchema = z.object({
   USD_TO_AUD: z.string().default('1.55'),
   DIRECT_ACTION_READ_ENABLED: z.string().default('true'),
   DIRECT_ACTION_WRITE_ENABLED: z.string().default('true'),  // organism writes enabled
-  SELF_MOD_DAILY_CAP: z.string().default('5'),              // max self-modifications per 24h sliding window
+  SELF_MOD_DAILY_CAP: z.string().default('0'),              // 0 = unlimited self-modifications per 24h
   EVENT_BUS_PERSIST_DEFAULT: z.string().default('false'),
   COGNITIVE_BROADCAST_ENABLED: z.string().default('true'),
   // Direct action rate limits (per hour, 0 = unlimited per type)
@@ -96,7 +98,7 @@ const envSchema = z.object({
   VALIDATION_HISTORY_MAX_SAMPLES: z.string().default('50'),
   VALIDATION_HISTORY_MIN_WEIGHT: z.string().default('0.3'),
   // Knowledge graph tuning
-  KG_DEDUP_SIMILARITY_THRESHOLD: z.string().default('0.95'),
+  KG_DEDUP_SIMILARITY_THRESHOLD: z.string().default('0.90'),
   KG_CONSOLIDATION_SIMILARITY_MIN: z.string().default('0.5'),
   KG_CONSOLIDATION_SIMILARITY_MAX: z.string().default('0.95'),
   KG_IMPORTANCE_CONNECTIVITY_WEIGHT: z.string().default('0.4'),
@@ -118,7 +120,10 @@ const envSchema = z.object({
   KG_CONTEXT_MAX_SEEDS: z.string().default('15'),
   KG_CONTEXT_MAX_DEPTH: z.string().default('5'),
   KG_CONTEXT_MIN_SIMILARITY: z.string().default('0.4'),
-  KG_MAX_INGESTIONS_PER_MIN: z.string().default('20'),
+  KG_MAX_INGESTIONS_PER_MIN: z.string().default('0'),       // 0 = unlimited ingestion rate
+  KG_DECAY_STALE_AFTER_DAYS: z.string().default('14'),       // days before isolated node is flagged stale
+  KG_DECAY_PRUNE_AFTER_DAYS: z.string().default('30'),       // days stale before node is pruned
+  KG_DECAY_MAX_RELATIONSHIPS: z.string().default('2'),       // nodes with <= this many rels are decay candidates
   // Memory bridge query thresholds
   MEMORY_BRIDGE_BULK_IMPORTANCE_MIN: z.string().default('0.5'),
   MEMORY_BRIDGE_PULL_IMPORTANCE_MIN: z.string().default('0.7'),
@@ -139,8 +144,54 @@ const envSchema = z.object({
   // Autonomous maintenance worker fallback thresholds
   MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD: z.string().default('0.7'),
   MAINTENANCE_FALLBACK_MIN_OCCURRENCES: z.string().default('3'),
+  // Autonomous maintenance worker — decision/interval tuning (0 = unlimited where applicable)
+  MAINTENANCE_MAX_DECISIONS: z.string().default('0'),             // 0 = AI returns all decisions it deems necessary
+  MAINTENANCE_PERCEPT_SALIENCE_THRESHOLD: z.string().default('0.8'),
+  MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS: z.string().default('300000'),    // 5 min
+  MAINTENANCE_INTERVAL_MED_PRESSURE_MS: z.string().default('600000'),     // 10 min
+  MAINTENANCE_INTERVAL_REST_MS: z.string().default('900000'),             // 15 min
+  MAINTENANCE_EMPTY_CYCLE_THRESHOLD: z.string().default('3'),
+  MAINTENANCE_BACKOFF_MAX_MULTIPLIER: z.string().default('3'),
+  MAINTENANCE_BACKOFF_MAX_MS: z.string().default('1800000'),              // 30 min ceiling
+  MAINTENANCE_COOLDOWN_MS: z.string().default('7200000'),                 // 2 hour cooldown per intent
+  MAINTENANCE_ESCALATION_SLA_MS: z.string().default('7200000'),           // 2 hour stale threshold
+  MAINTENANCE_ESCALATION_REMINDER_MS: z.string().default('14400000'),     // 4 hour re-remind
   // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
   CORTEX_TEMPERATURE: z.string().default(''),
+  // Cortex context tuning (0 = unlimited where applicable)
+  CORTEX_KG_MAX_SEEDS: z.string().default('20'),
+  CORTEX_KG_MAX_DEPTH: z.string().default('5'),
+  CORTEX_KG_MIN_SIMILARITY: z.string().default('0.4'),
+  CORTEX_SESSION_MEMORY_LOOKBACK: z.string().default('3'),
+  CORTEX_MEMORY_EXCHANGES_PER_SESSION: z.string().default('3'),
+  // CC context bundle tuning
+  CC_CONTEXT_CODE_CHUNKS_LIMIT: z.string().default('15'),
+  CC_SESSION_HISTORY_LIMIT: z.string().default('10'),
+  CC_LEARNING_CONFIDENCE_HARD: z.string().default('0.2'),
+  CC_LEARNING_CONFIDENCE_SOFT: z.string().default('0.3'),
+  CC_LEARNING_CONFIDENCE_GLOBAL: z.string().default('0.3'),
+  CC_LEARNING_HARD_LIMIT: z.string().default('8'),
+  CC_LEARNING_SOFT_LIMIT: z.string().default('30'),
+  CC_LEARNING_SOFT_RETURN: z.string().default('5'),
+  CC_LEARNING_GLOBAL_LIMIT: z.string().default('3'),
+  CC_LEARNING_SIMILARITY_THRESHOLD: z.string().default('0.35'),
+  CC_LEARNING_FALLBACK_LIMIT: z.string().default('3'),
+  // Factory trigger tuning
+  FACTORY_SELF_CODEBASE_NAME: z.string().default('ecodiaos-backend'),
+  // Capability system tuning
+  CAPABILITY_PARALLEL_CC_SESSIONS_MAX: z.string().default('0'),   // 0 = unlimited
+  CAPABILITY_QUERY_DATABASE_RESULT_LIMIT: z.string().default('0'), // 0 = unlimited
+  // KG ingestion tuning
+  KG_INGESTION_DEDUP_WINDOW_MS: z.string().default('600000'),    // 10 min
+  KG_INGESTION_DEDUP_MAP_SIZE: z.string().default('500'),
+  // DeepSeek KG retrieval defaults
+  DEEPSEEK_KG_MAX_SEEDS: z.string().default('15'),
+  DEEPSEEK_KG_MAX_DEPTH: z.string().default('5'),
+  DEEPSEEK_KG_MIN_SIMILARITY: z.string().default('0.4'),
+  // Action queue tuning
+  ACTION_QUEUE_SUPPRESSION_THRESHOLD: z.string().default('0'),    // 0 = disabled (never auto-suppress)
+  ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE: z.string().default('0.7'),
+  ACTION_QUEUE_TITLE_SIMILARITY_THRESHOLD: z.string().default('0.5'),
 })
 
 const parsed = envSchema.safeParse(process.env)

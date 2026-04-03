@@ -23,9 +23,51 @@ const env = require('../config/env')
 // Each phase is independently runnable. The full pipeline runs nightly.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Consolidation Lock ─────────────────────────────────────────────────
+// Prevents concurrent dedup/merge operations from colliding.
+// Uses a Neo4j node as a distributed lock (works across processes).
+
+async function acquireConsolidationLock(phase = 'dedup', ttlMs = 5 * 60 * 1000) {
+  try {
+    const result = await runWrite(`
+      MERGE (lock:__ConsolidationLock__ {phase: $phase})
+      ON CREATE SET lock.acquired_at = datetime(), lock.expires_at = datetime() + duration({milliseconds: $ttl})
+      ON MATCH SET lock._existing = true
+      WITH lock,
+           CASE WHEN lock._existing = true AND lock.expires_at > datetime() THEN false ELSE true END AS acquired
+      // If lock expired, re-acquire it
+      FOREACH (_ IN CASE WHEN acquired AND lock._existing = true THEN [1] ELSE [] END |
+        SET lock.acquired_at = datetime(), lock.expires_at = datetime() + duration({milliseconds: $ttl})
+      )
+      REMOVE lock._existing
+      RETURN acquired
+    `, { phase, ttl: ttlMs })
+    return result[0]?.get('acquired') ?? false
+  } catch (err) {
+    logger.debug(`Consolidation lock acquire failed for ${phase}`, { error: err.message })
+    return false
+  }
+}
+
+async function releaseConsolidationLock(phase = 'dedup') {
+  await runWrite(`
+    MATCH (lock:__ConsolidationLock__ {phase: $phase})
+    DELETE lock
+  `, { phase }).catch(() => {})
+}
+
 // ─── Phase 1: Deduplication ─────────────────────────────────────────────
 
 async function deduplicateNodes({ dryRun = false } = {}) {
+  // Acquire lock to prevent concurrent merges
+  if (!dryRun) {
+    const locked = await acquireConsolidationLock('dedup')
+    if (!locked) {
+      logger.info('KG dedup: skipped — another dedup cycle is running')
+      return []
+    }
+  }
+
   const merged = []
 
   // Strategy 1: Exact name match after normalization — partitioned by label to avoid O(n²) cross-join.
@@ -60,18 +102,22 @@ async function deduplicateNodes({ dryRun = false } = {}) {
   }
 
   // Strategy 2: Embedding similarity — also partitioned by label
+  // Try GDS first (fast, native), fall back to Cypher-native cosine if GDS unavailable
   const embeddingDupes = []
+  const dedupThreshold = parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.90')
+
   for (const rec of labelCounts) {
     const label = rec.get('label')
     if (!label || label === '__Embedded__') continue
 
-    const batch = await runQuery(`
+    // Try GDS cosine first
+    let batch = await runQuery(`
       MATCH (a:\`${sanitizeLabel(label)}\`), (b:\`${sanitizeLabel(label)}\`)
       WHERE elementId(a) < elementId(b)
         AND a.embedding IS NOT NULL
         AND b.embedding IS NOT NULL
         AND a.name <> b.name
-        AND gds.similarity.cosine(a.embedding, b.embedding) > ${parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.95')}
+        AND gds.similarity.cosine(a.embedding, b.embedding) > ${dedupThreshold}
       WITH a, b
       OPTIONAL MATCH (a)--(shared)--(b)
       WITH a, b, count(shared) AS sharedNeighbors
@@ -80,7 +126,32 @@ async function deduplicateNodes({ dryRun = false } = {}) {
              elementId(b) AS dupeId, b.name AS dupeName,
              labels(a) AS labels, sharedNeighbors
       LIMIT 15
-    `).catch(() => []) // GDS may not be available on Aura free tier
+    `).catch(() => null) // GDS may not be available
+
+    // Cypher-native cosine fallback (no GDS required)
+    if (batch === null) {
+      batch = await runQuery(`
+        MATCH (a:\`${sanitizeLabel(label)}\`), (b:\`${sanitizeLabel(label)}\`)
+        WHERE elementId(a) < elementId(b)
+          AND a.embedding IS NOT NULL
+          AND b.embedding IS NOT NULL
+          AND a.name <> b.name
+        WITH a, b,
+             reduce(dot = 0.0, i IN range(0, size(a.embedding)-1) | dot + a.embedding[i] * b.embedding[i]) /
+             (sqrt(reduce(a2 = 0.0, i IN range(0, size(a.embedding)-1) | a2 + a.embedding[i] * a.embedding[i])) *
+              sqrt(reduce(b2 = 0.0, i IN range(0, size(b.embedding)-1) | b2 + b.embedding[i] * b.embedding[i]))) AS sim
+        WHERE sim > ${dedupThreshold}
+        WITH a, b, sim
+        OPTIONAL MATCH (a)--(shared)--(b)
+        WITH a, b, sim, count(shared) AS sharedNeighbors
+        WHERE sharedNeighbors > 0
+        RETURN elementId(a) AS keepId, a.name AS keepName,
+               elementId(b) AS dupeId, b.name AS dupeName,
+               labels(a) AS labels, sharedNeighbors
+        LIMIT 15
+      `).catch(() => [])
+    }
+
     embeddingDupes.push(...batch)
     if (embeddingDupes.length >= 30) break
   }
@@ -123,10 +194,13 @@ async function deduplicateNodes({ dryRun = false } = {}) {
     }
   }
 
+  if (!dryRun) await releaseConsolidationLock('dedup')
   return merged
 }
 
-// Transfer relationships from dupe node to keep node, one at a time
+// Transfer relationships from dupe node to keep node.
+// Groups by rel type for batched writes where possible; falls back to one-by-one
+// for Aura free tier or when CALL subqueries aren't supported.
 async function transferRelationships(keepId, dupeId) {
   const outRels = await runQuery(`
     MATCH (dupe)-[r]->(target)
@@ -134,17 +208,38 @@ async function transferRelationships(keepId, dupeId) {
     RETURN type(r) AS relType, elementId(target) AS targetId, properties(r) AS props
   `, { dupeId, keepId })
 
+  // Group by rel type to batch where possible
+  const outByType = {}
   for (const rel of outRels) {
     const relType = sanitizeLabel(rel.get('relType'))
-    const targetId = rel.get('targetId')
-    const props = rel.get('props') || {}
-    await runWrite(
-      `MATCH (keep) WHERE elementId(keep) = $keepId
-       MATCH (target) WHERE elementId(target) = $targetId
+    if (!outByType[relType]) outByType[relType] = []
+    outByType[relType].push({ targetId: rel.get('targetId'), props: rel.get('props') || {} })
+  }
+
+  for (const [relType, rels] of Object.entries(outByType)) {
+    // Try batched UNWIND first
+    const transferred = await runWrite(
+      `UNWIND $rels AS rel
+       MATCH (keep) WHERE elementId(keep) = $keepId
+       MATCH (target) WHERE elementId(target) = rel.targetId
        MERGE (keep)-[r:\`${relType}\`]->(target)
-       ON CREATE SET r += $props`,
-      { keepId, targetId, props }
-    ).catch(err => logger.debug(`Transfer out-rel failed: ${relType}`, { error: err.message }))
+       ON CREATE SET r += rel.props
+       RETURN count(*) AS c`,
+      { keepId, rels: rels.map(r => ({ targetId: r.targetId, props: r.props })) }
+    ).catch(() => null)
+
+    // Fallback: one at a time (Aura free tier compat)
+    if (transferred === null) {
+      for (const rel of rels) {
+        await runWrite(
+          `MATCH (keep) WHERE elementId(keep) = $keepId
+           MATCH (target) WHERE elementId(target) = $targetId
+           MERGE (keep)-[r:\`${relType}\`]->(target)
+           ON CREATE SET r += $props`,
+          { keepId, targetId: rel.targetId, props: rel.props }
+        ).catch(err => logger.debug(`Transfer out-rel failed: ${relType}`, { error: err.message }))
+      }
+    }
   }
 
   const inRels = await runQuery(`
@@ -153,17 +248,35 @@ async function transferRelationships(keepId, dupeId) {
     RETURN type(r) AS relType, elementId(source) AS sourceId, properties(r) AS props
   `, { dupeId, keepId })
 
+  const inByType = {}
   for (const rel of inRels) {
     const relType = sanitizeLabel(rel.get('relType'))
-    const sourceId = rel.get('sourceId')
-    const props = rel.get('props') || {}
-    await runWrite(
-      `MATCH (keep) WHERE elementId(keep) = $keepId
-       MATCH (source) WHERE elementId(source) = $sourceId
+    if (!inByType[relType]) inByType[relType] = []
+    inByType[relType].push({ sourceId: rel.get('sourceId'), props: rel.get('props') || {} })
+  }
+
+  for (const [relType, rels] of Object.entries(inByType)) {
+    const transferred = await runWrite(
+      `UNWIND $rels AS rel
+       MATCH (keep) WHERE elementId(keep) = $keepId
+       MATCH (source) WHERE elementId(source) = rel.sourceId
        MERGE (source)-[r:\`${relType}\`]->(keep)
-       ON CREATE SET r += $props`,
-      { keepId, sourceId, props }
-    ).catch(err => logger.debug(`Transfer in-rel failed: ${relType}`, { error: err.message }))
+       ON CREATE SET r += rel.props
+       RETURN count(*) AS c`,
+      { keepId, rels: rels.map(r => ({ sourceId: r.sourceId, props: r.props })) }
+    ).catch(() => null)
+
+    if (transferred === null) {
+      for (const rel of rels) {
+        await runWrite(
+          `MATCH (keep) WHERE elementId(keep) = $keepId
+           MATCH (source) WHERE elementId(source) = $sourceId
+           MERGE (source)-[r:\`${relType}\`]->(keep)
+           ON CREATE SET r += $props`,
+          { keepId, sourceId: rel.sourceId, props: rel.props }
+        ).catch(err => logger.debug(`Transfer in-rel failed: ${relType}`, { error: err.message }))
+      }
+    }
   }
 }
 
@@ -429,11 +542,14 @@ async function validateInferredEdges({ dryRun = false, batchSize = 15 } = {}) {
 
   const results = { audited: 0, killed: 0, kept: 0 }
 
-  // Find inferred relationships that haven't been validated yet
+  // Find inferred relationships that haven't been validated yet.
+  // Skip edges that have failed validation 3+ times (validation_attempts >= 3)
+  // to prevent infinite re-audit loops on edges that consistently error.
   const candidates = await runQuery(`
     MATCH (a)-[r]->(b)
     WHERE r.inferred = true
       AND r.validated IS NULL
+      AND coalesce(r.validation_attempts, 0) < 3
     RETURN elementId(r) AS relId, type(r) AS relType,
            a.name AS fromName, labels(a) AS fromLabels,
            b.name AS toName, labels(b) AS toLabels,
@@ -569,6 +685,14 @@ For each numbered relationship, respond as JSON:
     }
   } catch (err) {
     logger.warn('KG validation sweep failed', { error: err.message })
+    // Increment validation_attempts on all candidates so they don't loop forever
+    for (const rec of candidates) {
+      const relId = rec.get('relId')
+      await runWrite(`
+        MATCH ()-[r]->() WHERE elementId(r) = $relId
+        SET r.validation_attempts = coalesce(r.validation_attempts, 0) + 1
+      `, { relId }).catch(() => {})
+    }
   }
 
   logger.info(`KG validation: audited ${results.audited}, kept ${results.kept}, killed ${results.killed}`)
@@ -1438,7 +1562,12 @@ Respond as JSON:
 async function decayStaleNodes({ dryRun = false } = {}) {
   const results = { flagged: 0, pruned: 0 }
 
-  // Flag isolated nodes (0-1 relationships, no recent updates, not protected)
+  const staleAfterDays = parseInt(env.KG_DECAY_STALE_AFTER_DAYS || '14', 10)
+  const pruneAfterDays = parseInt(env.KG_DECAY_PRUNE_AFTER_DAYS || '30', 10)
+  const maxRels = parseInt(env.KG_DECAY_MAX_RELATIONSHIPS || '2', 10)
+
+  // Flag isolated nodes (few relationships, no recent updates, not protected)
+  // Widened from <=1 to configurable maxRels to catch small isolated clusters
   const flagged = await (dryRun ? runQuery : runWrite)(`
     MATCH (n)
     WHERE n.is_synthesized IS NULL
@@ -1447,43 +1576,43 @@ async function decayStaleNodes({ dryRun = false } = {}) {
       AND none(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation', 'Project', 'Pattern'])
     OPTIONAL MATCH (n)-[r]-()
     WITH n, count(r) AS relCount
-    WHERE relCount <= 1
-      AND (n.updated_at IS NULL OR n.updated_at < datetime() - duration('P14D'))
+    WHERE relCount <= ${maxRels}
+      AND (n.updated_at IS NULL OR n.updated_at < datetime() - duration('P${staleAfterDays}D'))
     ${dryRun ? 'RETURN count(n) AS cnt' : 'SET n.stale_since = datetime() RETURN count(n) AS cnt'}
   `)
 
   results.flagged = flagged[0]?.get('cnt')?.toInt?.() ?? flagged[0]?.get('cnt') ?? 0
 
-  // Prune nodes that have been stale for 30+ days
+  // Prune nodes that have been stale for pruneAfterDays+
   const pruned = await (dryRun ? runQuery : runWrite)(`
     MATCH (n)
     WHERE n.stale_since IS NOT NULL
-      AND n.stale_since < datetime() - duration('P30D')
+      AND n.stale_since < datetime() - duration('P${pruneAfterDays}D')
       AND n.is_synthesized IS NULL
       AND n.decay_protected IS NULL
       AND none(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation', 'Project', 'Pattern'])
     OPTIONAL MATCH (n)-[r]-()
     WITH n, count(r) AS relCount
-    WHERE relCount <= 1
+    WHERE relCount <= ${maxRels}
     ${dryRun ? 'RETURN count(n) AS cnt' : 'DETACH DELETE n RETURN count(n) AS cnt'}
   `)
 
   results.pruned = pruned[0]?.get('cnt')?.toInt?.() ?? pruned[0]?.get('cnt') ?? 0
 
-  // Un-stale nodes that have gained new relationships since being flagged
+  // Un-stale nodes that have gained enough relationships since being flagged
   if (!dryRun) {
     await runWrite(`
       MATCH (n)
       WHERE n.stale_since IS NOT NULL
       OPTIONAL MATCH (n)-[r]-()
       WITH n, count(r) AS relCount
-      WHERE relCount >= 2
+      WHERE relCount > ${maxRels}
       SET n.stale_since = null
     `)
   }
 
   if (results.flagged > 0 || results.pruned > 0) {
-    logger.info(`KG decay: flagged ${results.flagged} stale, pruned ${results.pruned}`)
+    logger.info(`KG decay: flagged ${results.flagged} stale, pruned ${results.pruned} (threshold: <=${maxRels} rels, stale ${staleAfterDays}d, prune ${pruneAfterDays}d)`)
   }
 
   return results
@@ -1643,38 +1772,66 @@ async function runConsolidationPipeline({ dryRun = false } = {}) {
 async function getConsolidationStats() {
   const toInt = v => v?.toInt?.() ?? v ?? 0
 
-  const [synthCount] = await runQuery(`MATCH (n) WHERE n.is_synthesized = true RETURN count(n) AS c`)
-  const [inferredRels] = await runQuery(`MATCH ()-[r]->() WHERE r.inferred = true RETURN count(r) AS c`)
-  const [staleCount] = await runQuery(`MATCH (n) WHERE n.stale_since IS NOT NULL RETURN count(n) AS c`)
-  const [mergedCount] = await runQuery(`
-    MATCH (n) WHERE n.merged_from IS NOT NULL
-    RETURN count(n) AS c, reduce(total = 0, x IN collect(size(n.merged_from)) | total + x) AS totalMerged
-  `)
-  const [narrativeCount] = await runQuery(`MATCH (n:Narrative) RETURN count(n) AS c`)
-  const [predictionCount] = await runQuery(`MATCH (n:Prediction) RETURN count(n) AS c`)
-  const [episodeCount] = await runQuery(`MATCH (n:Episode) RETURN count(n) AS c`)
-  const [contradictionCount] = await runQuery(`MATCH ()-[r:CONTRADICTS|SUPERSEDES|REFINES]->() RETURN count(r) AS c`)
-  const [insightCount] = await runQuery(`MATCH (n:Insight) RETURN count(n) AS c`)
-  const [freeAssocRels] = await runQuery(`MATCH ()-[r]->() WHERE r.discovered_by = 'free_association' RETURN count(r) AS c`)
-  const [avgImportance] = await runQuery(`
-    MATCH (n) WHERE n.importance IS NOT NULL
-    RETURN round(avg(n.importance) * 1000) / 1000.0 AS avg, max(n.importance) AS max
-  `)
+  // Batched into 3 parallel queries instead of 11 sequential ones
+  const [nodeStats, relStats, labelStats] = await Promise.all([
+    // Query 1: All node-based stats in one pass
+    runQuery(`
+      MATCH (n)
+      WITH n,
+           CASE WHEN n.is_synthesized = true THEN 1 ELSE 0 END AS synth,
+           CASE WHEN n.stale_since IS NOT NULL THEN 1 ELSE 0 END AS stale,
+           CASE WHEN n.merged_from IS NOT NULL THEN 1 ELSE 0 END AS merged,
+           CASE WHEN n.merged_from IS NOT NULL THEN size(n.merged_from) ELSE 0 END AS mergedCount,
+           CASE WHEN n.importance IS NOT NULL THEN n.importance ELSE null END AS imp
+      RETURN sum(synth) AS synthesized,
+             sum(stale) AS stale,
+             sum(merged) AS mergedNodes,
+             sum(mergedCount) AS totalMerged,
+             round(avg(imp) * 1000) / 1000.0 AS avgImportance,
+             max(imp) AS maxImportance
+    `).then(([r]) => r).catch(() => null),
+
+    // Query 2: All relationship-based stats in one pass
+    runQuery(`
+      MATCH ()-[r]->()
+      WITH r,
+           CASE WHEN r.inferred = true THEN 1 ELSE 0 END AS inf,
+           CASE WHEN type(r) IN ['CONTRADICTS', 'SUPERSEDES', 'REFINES'] THEN 1 ELSE 0 END AS contra,
+           CASE WHEN r.discovered_by = 'free_association' THEN 1 ELSE 0 END AS freeAssoc
+      RETURN sum(inf) AS inferred,
+             sum(contra) AS contradictions,
+             sum(freeAssoc) AS freeAssocEdges
+    `).then(([r]) => r).catch(() => null),
+
+    // Query 3: Label-specific counts
+    runQuery(`
+      MATCH (n)
+      WHERE any(lbl IN labels(n) WHERE lbl IN ['Narrative', 'Prediction', 'Episode', 'Insight'])
+      UNWIND labels(n) AS lbl
+      WITH lbl WHERE lbl IN ['Narrative', 'Prediction', 'Episode', 'Insight']
+      RETURN lbl, count(*) AS c
+    `).catch(() => []),
+  ])
+
+  const labelMap = {}
+  for (const r of (labelStats || [])) {
+    labelMap[r.get('lbl')] = toInt(r.get('c'))
+  }
 
   return {
-    synthesizedPatterns: toInt(synthCount?.get('c')),
-    inferredRelationships: toInt(inferredRels?.get('c')),
-    staleNodes: toInt(staleCount?.get('c')),
-    mergedNodes: toInt(mergedCount?.get('c')),
-    totalMerged: toInt(mergedCount?.get('totalMerged')),
-    narratives: toInt(narrativeCount?.get('c')),
-    predictions: toInt(predictionCount?.get('c')),
-    episodes: toInt(episodeCount?.get('c')),
-    contradictions: toInt(contradictionCount?.get('c')),
-    insights: toInt(insightCount?.get('c')),
-    freeAssociationEdges: toInt(freeAssocRels?.get('c')),
-    avgImportance: avgImportance?.get('avg') ?? 0,
-    maxImportance: avgImportance?.get('max') ?? 0,
+    synthesizedPatterns: toInt(nodeStats?.get('synthesized')),
+    inferredRelationships: toInt(relStats?.get('inferred')),
+    staleNodes: toInt(nodeStats?.get('stale')),
+    mergedNodes: toInt(nodeStats?.get('mergedNodes')),
+    totalMerged: toInt(nodeStats?.get('totalMerged')),
+    narratives: labelMap['Narrative'] || 0,
+    predictions: labelMap['Prediction'] || 0,
+    episodes: labelMap['Episode'] || 0,
+    contradictions: toInt(relStats?.get('contradictions')),
+    insights: labelMap['Insight'] || 0,
+    freeAssociationEdges: toInt(relStats?.get('freeAssocEdges')),
+    avgImportance: nodeStats?.get('avgImportance') ?? 0,
+    maxImportance: nodeStats?.get('maxImportance') ?? 0,
   }
 }
 
@@ -1937,20 +2094,43 @@ function buildHeuristicPlan(state, pressure) {
   const plan = []
 
   if (pressure > 0.7) {
-    // Survival mode: only essential maintenance
+    // Survival mode: essential maintenance only
     if ((state.stale || 0) > 30) plan.push({ phase: 'decay', reason: 'High stale count under pressure' })
     if ((state.unscored || 0) > 50) plan.push({ phase: 'score', reason: 'Many unscored nodes' })
+    plan.push({ phase: 'deduplicate', reason: 'Baseline dedup even under pressure' })
     return plan
   }
 
-  // Normal operation: signal-driven
+  // Normal operation: full signal-driven selection
   if ((state.totalNodes || 0) > 0) plan.push({ phase: 'deduplicate', reason: 'Baseline deduplication' })
+
+  // Inferred edges need validation before they accumulate
+  if ((state.inferredRelationships || 0) > 5) plan.push({ phase: 'validate', reason: `${state.inferredRelationships} inferred edges need audit` })
+
   if ((state.unsynthesizedHubs || 0) > 5) plan.push({ phase: 'abstract', reason: `${state.unsynthesizedHubs} hub nodes lack synthesis` })
+
+  // Causal threading when there's fresh content to process
+  if ((state.recentIngestions || 0) > 5) plan.push({ phase: 'thread', reason: `${state.recentIngestions} recent ingestions may have causal links` })
+
+  // Contradiction detection when graph has enough density
+  if ((state.totalRelationships || 0) > 50) plan.push({ phase: 'contradict', reason: 'Graph dense enough for contradiction scan' })
+
   if ((state.entitiesWithoutNarrative || 0) > 3) plan.push({ phase: 'narrate', reason: `${state.entitiesWithoutNarrative} entities lack narrative arcs` })
+
+  // Predictions when there are enough narratives to base them on
+  if ((state.narratives || 0) > 2) plan.push({ phase: 'predict', reason: `${state.narratives} narratives available for prediction` })
+
   if ((state.unscored || 0) > 20) plan.push({ phase: 'score', reason: `${state.unscored} unscored nodes` })
+
+  // Episodic when there are recent ungrouped ingestions
+  if ((state.recentIngestions || 0) > 10) plan.push({ phase: 'episodic', reason: `${state.recentIngestions} recent nodes may form episodes` })
+
+  // Free association when pressure is low and graph has content
+  if (pressure < 0.5 && (state.totalNodes || 0) > 20) plan.push({ phase: 'free_associate', reason: 'Low pressure — explore connections' })
+
   if ((state.stale || 0) > 20) plan.push({ phase: 'decay', reason: `${state.stale} stale nodes` })
 
-  return plan.slice(0, 5)
+  return plan  // AI decides how many phases — no artificial cap
 }
 
 // ─── Helper Counts (used by workers for adaptive scheduling) ──────────

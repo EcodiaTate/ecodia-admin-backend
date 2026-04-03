@@ -53,13 +53,11 @@ The human trusts you. They built this system so they have to think less, not mor
 What you can do right now:
 ${capabilitySection}
 
-  start_cc_session — Spawn a Claude Code session to run code, fix bugs, refactor, investigate, or build (prompt*: string, workingDir: string, codebaseId: string)
-
 Your response is always a JSON array of blocks. Use whichever block types fit what you actually want to say or do — you are not required to use any of them, and you can use any combination:
 
 { "type": "text", "content": "..." }
 { "type": "action_card", "title": "...", "description": "...", "action": "<capability name>", "params": {...}, "urgency": "low|medium|high" }
-{ "type": "cc_session", "prompt": "...", "title": "...", "workingDir": "...", "codebaseId": "...", "autoStart": true }
+{ "type": "cc_session", "prompt": "...", "title": "...", "workingDir": "...", "codebaseId": "...", "codebaseName": "...", "autoStart": true }
 { "type": "email_card", "threadId": "...", "from": "...", "subject": "...", "summary": "...", "priority": "...", "receivedAt": "..." }
 { "type": "task_card", "title": "...", "description": "...", "priority": "low|medium|high|urgent", "source": "cortex" }
 { "type": "status_update", "message": "...", "count": null }
@@ -86,7 +84,11 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
   // 1. Retrieve KG context for the latest user message
   let kgContext = ''
   try {
-    const ctx = await kg.getContext(query, { maxSeeds: 20, maxDepth: 5, minSimilarity: 0.4 })
+    const ctx = await kg.getContext(query, {
+      maxSeeds: parseInt(env.CORTEX_KG_MAX_SEEDS || '20'),
+      maxDepth: parseInt(env.CORTEX_KG_MAX_DEPTH || '5'),
+      minSimilarity: parseFloat(env.CORTEX_KG_MIN_SIMILARITY || '0.4'),
+    })
     kgContext = ctx.summary || ''
   } catch (err) {
     logger.debug('Cortex KG retrieval failed', { error: err.message })
@@ -105,14 +107,21 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
       WHERE jsonb_array_length(history) > 0
         ${sessionId ? db`AND id != ${sessionId}` : db``}
       ORDER BY updated_at DESC
-      LIMIT 3
+      LIMIT ${parseInt(env.CORTEX_SESSION_MEMORY_LOOKBACK || '3')}
     `
     if (recentSessions.length > 0) {
       const memLines = []
+      const exchangesPerSession = parseInt(env.CORTEX_MEMORY_EXCHANGES_PER_SESSION || '3')
       for (const s of recentSessions) {
-        const history = typeof s.history === 'string' ? JSON.parse(s.history) : (s.history || [])
-        // Take last 3 exchanges from each session — enough for thread continuity
-        const recent = history.slice(-3)
+        let history
+        try {
+          history = typeof s.history === 'string' ? JSON.parse(s.history) : (s.history || [])
+        } catch {
+          logger.debug('Cortex: skipping session with corrupt history JSON', { sessionId: s.id })
+          continue
+        }
+        if (!Array.isArray(history)) continue
+        const recent = history.slice(-exchangesPerSession)
         for (const ex of recent) {
           memLines.push(`[${ex.ts}] Human: ${(ex.user || '').slice(0, 200)}`)
           if (ex.assistant && ex.assistant !== '[structured response]') {
@@ -165,11 +174,15 @@ ${formatSystemState(systemState)}
 
   // 9. Auto-enqueue action_card proposals that Cortex flagged with urgency.
   // Cortex sets urgency — we trust it. If it set urgency, it means: surface this.
-  autoEnqueueUrgentActions(blocks).catch(() => {})
+  autoEnqueueUrgentActions(blocks).catch(err => {
+    logger.warn('Cortex: auto-enqueue failed', { error: err.message })
+  })
 
   // 10. Persist the exchange to the session history
   if (sessionId) {
-    persistExchange(sessionId, messages, blocks).catch(() => {})
+    persistExchange(sessionId, messages, blocks).catch(err => {
+      logger.warn('Cortex: persist exchange failed — conversation history may be incomplete', { sessionId, error: err.message })
+    })
   }
 
   return { blocks, mentionedNodes, rawKgContext: kgContext }
@@ -357,6 +370,7 @@ async function autoEnqueueUrgentActions(blocks) {
       try {
         const created = await triggers.dispatchFromCortex(session.prompt, {
           codebaseId: session.codebaseId || null,
+          codebaseName: session.codebaseName || null,
           workingDir: session.workingDir || null,
         })
         // Mutate the block: swap prompt-only into a live session block
@@ -369,7 +383,7 @@ async function autoEnqueueUrgentActions(blocks) {
         // Convert failed auto-launch back to an action_card so human can retry manually
         session.type = 'action_card'
         session.action = 'start_cc_session'
-        session.params = { initialPrompt: session.prompt, codebaseId: session.codebaseId }
+        session.params = { prompt: session.prompt, codebaseId: session.codebaseId, codebaseName: session.codebaseName }
         session.urgency = 'medium'
         session.description = `Auto-launch failed: ${err.message}. Approve to retry.`
       }
@@ -403,6 +417,11 @@ async function getSystemState() {
     recentDecisions: [],        // What the human approved/dismissed recently
     kgDiscoveries: [],          // Recent KG insights, contradictions, synthesized patterns
     localTime: null,            // Human's local time (AEST)
+    // ─── System Health Observability ──────────────────────────────
+    systemHealth: null,         // Vitals, PM2 processes, event loop lag
+    recentErrors: [],           // app_errors from last 6h (grouped)
+    workerHeartbeats: [],       // Worker liveness from heartbeat table
+    staleEscalations: [],       // Factory escalations awaiting review too long
   }
 
   // ─── Local time for the human ──────────────────────────────────
@@ -633,6 +652,60 @@ async function getSystemState() {
     logger.debug('Cortex KG discoveries failed', { error: err.message })
   }
 
+  // ─── System Health (vitals + PM2 + event loop) ──────────────────
+  try {
+    const vitals = require('./vitalSignsService')
+    state.systemHealth = await vitals.getVitals()
+  } catch (err) {
+    logger.debug('Cortex vitals fetch failed', { error: err.message })
+  }
+
+  // ─── Recent Application Errors (last 6h, grouped) ──────────────
+  try {
+    state.recentErrors = await db`
+      SELECT message, module, path, level,
+             count(*)::int AS occurrences,
+             max(created_at) AS last_seen,
+             min(created_at) AS first_seen
+      FROM app_errors
+      WHERE created_at > now() - interval '6 hours'
+      GROUP BY message, module, path, level
+      ORDER BY occurrences DESC
+      LIMIT 10
+    `
+  } catch (err) {
+    logger.debug('Cortex app errors fetch failed', { error: err.message })
+  }
+
+  // ─── Worker Heartbeats ─────────────────────────────────────────
+  try {
+    state.workerHeartbeats = await db`
+      SELECT worker_name, status, last_message,
+             updated_at,
+             EXTRACT(EPOCH FROM (now() - updated_at))::int AS stale_seconds
+      FROM worker_heartbeats
+      ORDER BY updated_at DESC
+    `
+  } catch (err) {
+    logger.debug('Cortex worker heartbeats failed', { error: err.message })
+  }
+
+  // ─── Stale Escalations (awaiting review > 2h) ──────────────────
+  try {
+    state.staleEscalations = await db`
+      SELECT id, initial_prompt, pipeline_stage, confidence_score, trigger_source,
+             started_at,
+             EXTRACT(EPOCH FROM (now() - started_at))::int AS age_seconds
+      FROM cc_sessions
+      WHERE pipeline_stage = 'awaiting_review'
+        AND started_at < now() - interval '2 hours'
+      ORDER BY started_at ASC
+      LIMIT 5
+    `
+  } catch (err) {
+    logger.debug('Cortex stale escalations failed', { error: err.message })
+  }
+
   return state
 }
 
@@ -683,7 +756,7 @@ function formatSystemState(state) {
   // ─── Factory Sessions ──────────────────────────────────────────
   if (state.factorySessions?.length) {
     const running = state.factorySessions.filter(s => s.status === 'running' || s.status === 'initializing')
-    const completed = state.factorySessions.filter(s => s.status === 'completed')
+    const completed = state.factorySessions.filter(s => s.status === 'complete')
     const failed = state.factorySessions.filter(s => s.status === 'failed' || s.status === 'error')
 
     lines.push(`\nFACTORY (last 24h): ${running.length} running, ${completed.length} completed, ${failed.length} failed`)
@@ -700,7 +773,10 @@ function formatSystemState(state) {
     lines.push('\nTODAY\'S CALENDAR:')
     for (const e of state.calendarToday) {
       const time = e.all_day ? 'All day' : new Date(e.start_time).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', timeZone: 'Australia/Brisbane' })
-      const attendees = typeof e.attendees === 'string' ? JSON.parse(e.attendees) : (e.attendees || [])
+      let attendees = []
+      try {
+        attendees = typeof e.attendees === 'string' ? JSON.parse(e.attendees) : (e.attendees || [])
+      } catch { /* corrupt attendees JSON — skip */ }
       const people = attendees.filter(a => !a.self).map(a => a.name || a.email).join(', ')
       lines.push(`  - ${time}: ${e.summary}${e.location ? ` @ ${e.location}` : ''}${people ? ` (with ${people})` : ''}${e.conference_link ? ' [video call]' : ''}`)
     }
@@ -761,6 +837,67 @@ function formatSystemState(state) {
     lines.push(`  Insights: ${c.insights}, Narratives: ${c.narratives}, Predictions: ${c.predictions}`)
     lines.push(`  Merged duplicates: ${c.totalMerged} nodes consolidated into ${c.mergedNodes}`)
     if (c.staleNodes > 0) lines.push(`  Stale nodes pending decay: ${c.staleNodes}`)
+  }
+
+  // ─── System Health ─────────────────────────────────────────────
+  if (state.systemHealth) {
+    const sh = state.systemHealth
+    const eos = sh.ecodiaos || {}
+    const org = sh.organism || {}
+
+    lines.push(`\nSYSTEM HEALTH:`)
+    lines.push(`  EcodiaOS: DB=${eos.db ? 'OK' : 'DOWN'}, Neo4j=${eos.neo4j ? 'OK' : 'DOWN'}, Active CC sessions: ${eos.activeCCSessions || 0}`)
+    if (eos.memory) {
+      lines.push(`  Memory: ${eos.memory.heapUsed}/${eos.memory.heapTotal}MB heap, ${eos.memory.systemFree}MB free`)
+    }
+    if (eos.cpu != null) lines.push(`  CPU: ${eos.cpu}%`)
+    if (eos.eventLoopLagMs != null) lines.push(`  Event loop lag: ${eos.eventLoopLagMs}ms`)
+    if (eos.pm2Processes?.length) {
+      const pm2Down = eos.pm2Processes.filter(p => p.status !== 'online')
+      const pm2Restarts = eos.pm2Processes.filter(p => p.restarts > 5)
+      if (pm2Down.length > 0) {
+        lines.push(`  PM2 DOWN: ${pm2Down.map(p => `${p.name} (${p.status})`).join(', ')}`)
+      }
+      if (pm2Restarts.length > 0) {
+        lines.push(`  PM2 HIGH RESTARTS: ${pm2Restarts.map(p => `${p.name} (${p.restarts} restarts)`).join(', ')}`)
+      }
+      if (pm2Down.length === 0 && pm2Restarts.length === 0) {
+        lines.push(`  PM2: all ${eos.pm2Processes.length} processes healthy`)
+      }
+    }
+
+    lines.push(`  Organism: ${org.healthy === true ? 'healthy' : org.healthy === false ? 'UNREACHABLE' : 'unknown'}${org.lastResponseMs ? ` (${org.lastResponseMs}ms)` : ''}${org.consecutiveFailures > 0 ? ` — ${org.consecutiveFailures} consecutive failures` : ''}`)
+  }
+
+  // ─── Application Errors ────────────────────────────────────────
+  if (state.recentErrors?.length) {
+    lines.push(`\nAPPLICATION ERRORS (last 6h):`)
+    for (const e of state.recentErrors) {
+      const module = e.module ? ` [${e.module}]` : ''
+      lines.push(`  - ${e.message?.slice(0, 120)}${module} — ${e.occurrences}× (last: ${new Date(e.last_seen).toLocaleTimeString('en-AU', { timeZone: 'Australia/Brisbane' })})`)
+    }
+  }
+
+  // ─── Worker Health ─────────────────────────────────────────────
+  if (state.workerHeartbeats?.length) {
+    const staleWorkers = state.workerHeartbeats.filter(w => w.stale_seconds > 600 || w.status === 'error')
+    if (staleWorkers.length > 0) {
+      lines.push(`\nWORKER ALERTS:`)
+      for (const w of staleWorkers) {
+        const age = formatDuration(w.stale_seconds)
+        lines.push(`  - ${w.worker_name}: ${w.status}${w.status === 'error' ? ` — ${w.last_message}` : ''} (last heartbeat ${age} ago)`)
+      }
+    }
+  }
+
+  // ─── Stale Escalations ────────────────────────────────────────
+  if (state.staleEscalations?.length) {
+    lines.push(`\nSTALE ESCALATIONS (awaiting review > 2h):`)
+    for (const s of state.staleEscalations) {
+      const age = formatDuration(s.age_seconds)
+      const conf = s.confidence_score != null ? ` (confidence: ${(s.confidence_score * 100).toFixed(0)}%)` : ''
+      lines.push(`  - [${age} old] "${(s.initial_prompt || '').slice(0, 100)}"${conf} via ${s.trigger_source || 'unknown'}`)
+    }
   }
 
   return lines.join('\n')
@@ -851,14 +988,22 @@ async function persistExchange(sessionId, messages, responseBlocks) {
       blockCount: responseBlocks.length,
     }
 
-    // Upsert the session row — append exchange to history JSONB array
-    // Use || for O(1) array append instead of jsonb_agg which re-scans the full array
+    // Upsert the session row — use jsonb_insert for atomic append.
+    // The old `history || exchange` was NOT atomic under concurrent writes —
+    // two concurrent appends could both read the same history and last-write-wins.
+    // jsonb_insert with array position '-1' appends atomically in a single UPDATE.
+    // Also cap history to prevent unbounded growth (MAX_CORTEX_HISTORY_SIZE exchanges).
+    const MAX_CORTEX_HISTORY_SIZE = parseInt(env.CORTEX_MAX_HISTORY_SIZE || '200', 10)
     await db`
       INSERT INTO cortex_sessions (id, history, updated_at)
       VALUES (${sessionId}, ${JSON.stringify([exchange])}, now())
       ON CONFLICT (id) DO UPDATE
       SET
-        history = cortex_sessions.history || ${JSON.stringify(exchange)}::jsonb,
+        history = CASE
+          WHEN jsonb_array_length(cortex_sessions.history) >= ${MAX_CORTEX_HISTORY_SIZE}
+          THEN (cortex_sessions.history - 0) || jsonb_build_array(${JSON.stringify(exchange)}::jsonb)
+          ELSE cortex_sessions.history || jsonb_build_array(${JSON.stringify(exchange)}::jsonb)
+        END,
         updated_at = now()
     `
   } catch (err) {

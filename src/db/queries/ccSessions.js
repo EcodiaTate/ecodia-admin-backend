@@ -5,19 +5,31 @@ async function appendLog(sessionId, chunk) {
 }
 
 async function updateSessionStatus(sessionId, status, extra = {}) {
-  const updates = { status, ...extra }
-  if (status === 'complete' || status === 'error') {
-    updates.completed_at = new Date()
+  const isTerminal = status === 'complete' || status === 'error' || status === 'stopped'
+  const completedAt = isTerminal ? new Date() : undefined
+
+  // Only update fields that are explicitly provided — never clobber existing values with null.
+  // Previous version unconditionally set error_message, cc_session_id, cc_cost_usd to null
+  // on every status update, wiping data recorded by earlier pipeline stages.
+  if ('error_message' in extra || 'cc_session_id' in extra || 'cc_cost_usd' in extra) {
+    await db`
+      UPDATE cc_sessions
+      SET status = ${status},
+          completed_at = COALESCE(${completedAt ?? null}, completed_at),
+          error_message = COALESCE(${extra.error_message ?? null}, error_message),
+          cc_session_id = COALESCE(${extra.cc_session_id ?? null}, cc_session_id),
+          cc_cost_usd = COALESCE(${extra.cc_cost_usd ?? null}, cc_cost_usd)
+      WHERE id = ${sessionId}
+    `
+  } else {
+    // Fast path: just status + maybe completed_at
+    await db`
+      UPDATE cc_sessions
+      SET status = ${status},
+          completed_at = COALESCE(${completedAt ?? null}, completed_at)
+      WHERE id = ${sessionId}
+    `
   }
-  await db`
-    UPDATE cc_sessions
-    SET status = ${updates.status},
-        completed_at = ${updates.completed_at || null},
-        error_message = ${updates.error_message || null},
-        cc_session_id = ${updates.cc_session_id || null},
-        cc_cost_usd = ${updates.cc_cost_usd || null}
-    WHERE id = ${sessionId}
-  `
 }
 
 module.exports = { appendLog, updateSessionStatus }

@@ -22,18 +22,23 @@ async function checkBudget() {
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 
-  // Re-query at most once per minute to keep DB load low
+  // Re-query at most once per minute — dedup concurrent checks
   if (!_budgetCache || _budgetCache.month !== month || Date.now() - _budgetCache.checkedAt > 60_000) {
-    try {
-      const [row] = await db`
+    if (!_budgetCheckInFlight) {
+      _budgetCheckInFlight = db`
         SELECT COALESCE(SUM(cost_usd), 0)::float AS spent
         FROM deepseek_usage
         WHERE date_trunc('month', created_at) = date_trunc('month', now())
-      `
-      _budgetCache = { month, spentUSD: row?.spent ?? 0, checkedAt: Date.now() }
-    } catch {
-      return  // if DB check fails, don't block calls
+      `.then(([row]) => {
+        _budgetCache = { month, spentUSD: row?.spent ?? 0, checkedAt: Date.now() }
+      }).catch(err => {
+        logger.debug('Budget check DB query failed', { error: err.message })
+      }).finally(() => {
+        _budgetCheckInFlight = null
+      })
     }
+    await _budgetCheckInFlight
+    if (!_budgetCache) return  // DB failed, don't block
   }
 
   const spentAUD = _budgetCache.spentUSD * USD_TO_AUD
@@ -97,9 +102,9 @@ async function callDeepSeek(messages, {
   if (!skipRetrieval && contextQuery && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {
     try {
       const ctx = await kg.getContext(contextQuery, {
-        maxSeeds: 15,
-        maxDepth: 5,
-        minSimilarity: 0.4,
+        maxSeeds: parseInt(env.DEEPSEEK_KG_MAX_SEEDS || '15'),
+        maxDepth: parseInt(env.DEEPSEEK_KG_MAX_DEPTH || '5'),
+        minSimilarity: parseFloat(env.DEEPSEEK_KG_MIN_SIMILARITY || '0.4'),
       })
       if (ctx.summary) {
         kgContext = ctx.summary
@@ -130,16 +135,36 @@ ${kgContext}
     logger.debug(`KG context injected for ${module} (${kgContext.length} chars)`)
   }
 
-  // ─── 3. EXECUTE: Call DeepSeek ─────────────────────────────────────
-  const response = await axios.post(
-    DEEPSEEK_API_URL,
-    { model, messages: enrichedMessages, ...(temperature !== null && { temperature }) },
-    { headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' } }
-  )
+  // ─── 3. EXECUTE: Call DeepSeek with retry + timeout ─────────────────
+  let response
+  for (let attempt = 0; attempt < DEEPSEEK_MAX_RETRIES; attempt++) {
+    try {
+      response = await axios.post(
+        DEEPSEEK_API_URL,
+        { model, messages: enrichedMessages, ...(temperature !== null && { temperature }) },
+        {
+          headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
+          timeout: DEEPSEEK_TIMEOUT_MS,
+        }
+      )
+      break  // success
+    } catch (err) {
+      const status = err.response?.status
+      const retryable = !status || status === 429 || status >= 500
+      if (!retryable || attempt === DEEPSEEK_MAX_RETRIES - 1) throw err
+      const delayMs = DEEPSEEK_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500
+      logger.debug(`DeepSeek retry ${attempt + 1}/${DEEPSEEK_MAX_RETRIES} after ${status || 'timeout'} (${Math.round(delayMs)}ms)`, { module })
+      await new Promise(r => setTimeout(r, delayMs))
+    }
+  }
 
   const usage = response.data.usage
   const durationMs = Date.now() - start
-  const content = response.data.choices[0].message.content.replace(/\u2014/g, '-')
+  const choices = response.data.choices
+  if (!choices?.length || !choices[0]?.message?.content) {
+    throw new Error(`DeepSeek returned empty response (module: ${module})`)
+  }
+  const content = choices[0].message.content.replace(/\u2014/g, '-')
 
   // Track usage
   await db`

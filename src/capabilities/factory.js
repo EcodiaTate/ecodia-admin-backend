@@ -11,6 +11,7 @@ registry.registerMany([
       prompt: { type: 'string', required: true, description: 'What to build, fix, or improve' },
       codebaseId: { type: 'string', required: false, description: 'Target codebase ID (resolved by AI if omitted)' },
       codebaseName: { type: 'string', required: false, description: 'Codebase name hint for resolution' },
+      workingDir: { type: 'string', required: false, description: 'Explicit working directory path for the CC session' },
     },
     handler: async (params) => {
       const triggers = require('../services/factoryTriggerService')
@@ -28,6 +29,7 @@ registry.registerMany([
       const session = await triggers.dispatchFromCortex(prompt, {
         codebaseId: params.codebaseId,
         codebaseName: params.codebaseName,
+        workingDir: params.workingDir || null,
       })
       return { message: `Factory session started`, sessionId: session?.id }
     },

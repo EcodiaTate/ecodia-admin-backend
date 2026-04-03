@@ -135,17 +135,20 @@ function has(name) {
 function checkPressureGate(name, cap) {
   try {
     const metabolismBridge = require('./metabolismBridgeService')
-    const pressure = metabolismBridge.getPressure()
-    const gate = parseFloat(env.SURVIVAL_PRESSURE_GATE || '0.95')
+    const rawPressure = metabolismBridge.getPressure()
+    const pressure = Number.isFinite(rawPressure) ? rawPressure : 0
+    const gate = parseFloat(env.SURVIVAL_PRESSURE_GATE || '0.95') || 0.95
     if (gate <= 0 || pressure < gate) return null
     if (cap?.priority === 'critical') return null
 
+    logger.info(`CapabilityRegistry: pressure gate blocking "${name}" (pressure: ${pressure.toFixed(2)}, gate: ${gate})`)
     return {
       success: false,
       error: `Survival pressure (${pressure.toFixed(2)}) — deferring non-critical write "${name}"`,
       pressure,
     }
-  } catch {
+  } catch (err) {
+    logger.debug('CapabilityRegistry: pressure gate check failed', { error: err.message })
     return null  // if metabolism bridge is down, don't block
   }
 }

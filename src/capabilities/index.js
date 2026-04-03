@@ -14,6 +14,7 @@ require('./crm')
 require('./social')
 require('./factory')
 require('./finance')
+require('./system')
 
 const registry = require('../services/capabilityRegistry')
 const logger = require('../config/logger')

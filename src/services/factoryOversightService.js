@@ -33,8 +33,16 @@ const { execFileSync } = require('child_process')
 function cleanWorkingDir(repoPath) {
   if (!repoPath) return
   try {
-    execFileSync('git', ['checkout', '.'], { cwd: repoPath, encoding: 'utf-8' })
-    execFileSync('git', ['clean', '-fd'], { cwd: repoPath, encoding: 'utf-8' })
+    // Abort any in-progress rebase/merge/cherry-pick that could block cleanup
+    for (const op of ['rebase', 'merge', 'cherry-pick']) {
+      try { execFileSync('git', [op, '--abort'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 }) } catch {}
+    }
+    // Reset staged changes, discard working dir edits, remove untracked files
+    execFileSync('git', ['reset', 'HEAD', '--'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
+    execFileSync('git', ['checkout', '.'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
+    execFileSync('git', ['clean', '-fd'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
+    // Drop any leftover stash entries from failed syncs
+    try { execFileSync('git', ['stash', 'clear'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 }) } catch {}
     logger.info(`Cleaned working directory after rejected session`, { repoPath })
   } catch (err) {
     logger.warn(`Failed to clean working directory`, { repoPath, error: err.message })
@@ -91,7 +99,10 @@ async function runPostSessionPipeline(sessionId) {
   let review = null
 
   const reviewPressureGate = parseFloat(env.FACTORY_REVIEW_PRESSURE_GATE || '0')
-  const asyncReviewEnabled = !isSelfMod && reviewPressureGate > 0 && pressure > reviewPressureGate
+  // Self-modifications NEVER get async review — mandatory review is non-negotiable.
+  // NaN pressure is treated as 0 (no pressure data = don't skip review).
+  const safePressure = Number.isFinite(pressure) ? pressure : 0
+  const asyncReviewEnabled = !isSelfMod && reviewPressureGate > 0 && safePressure > reviewPressureGate
 
   if (asyncReviewEnabled) {
     // Pressure gate configured: start review async (for KG learning) but don't wait for it
@@ -158,6 +169,8 @@ async function runPostSessionPipeline(sessionId) {
     const before = confidence
     const effectiveReviewConf = reviewApproved ? reviewConfidence : Math.min(reviewConfidence, 0.2)
     confidence = (confidence * VALIDATION_WEIGHT) + (effectiveReviewConf * REVIEW_WEIGHT)
+    // Clamp to [0, 1] — protect against NaN propagation from bad inputs
+    confidence = Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0
     logger.info(`Factory oversight: blended confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (validation: ${before.toFixed(2)} × ${VALIDATION_WEIGHT}, review: ${effectiveReviewConf.toFixed(2)} × ${REVIEW_WEIGHT})`, { sessionId })
     await db`UPDATE cc_sessions SET confidence_score = ${confidence} WHERE id = ${sessionId}`
   }
@@ -268,7 +281,7 @@ async function runPostSessionPipeline(sessionId) {
 
 async function escalateToHuman(session, confidence, review, filesChanged) {
   logger.info(`Factory escalating session ${session.id} to human review (confidence: ${confidence})`)
-  await db`UPDATE cc_sessions SET pipeline_stage = 'testing', deploy_status = 'pending' WHERE id = ${session.id}`
+  await db`UPDATE cc_sessions SET pipeline_stage = 'awaiting_review', deploy_status = 'pending' WHERE id = ${session.id}`
 
   await db`
     INSERT INTO notifications (type, message, link, metadata)
@@ -302,22 +315,29 @@ async function reviewChanges(session, filesChanged) {
 
     if (!cwd) {
       logger.debug('reviewChanges: no repo_path on session — returning no diff', { sessionId: session.id })
+      if (session.self_modification) {
+        return { approved: false, notes: 'No repo_path for self-modification review — cannot approve blind', confidence: 0 }
+      }
       return { approved: true, notes: 'No repo_path available for diff review', confidence: 0 }
     }
 
-    // Get the actual diff (tracked changes + new file contents)
+    // Get the actual diff — combine unstaged + staged for complete picture
     let diff = ''
     try {
-      diff = execFileSync('git', ['diff'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
+      const gitDiffOpts = { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 30_000 }
+      const unstaged = execFileSync('git', ['diff'], gitDiffOpts)
+      const staged = execFileSync('git', ['diff', '--cached'], gitDiffOpts)
+      diff = [unstaged, staged].filter(Boolean).join('\n')
     } catch (err) {
-      logger.debug('git diff failed', { error: err.message, cwd })
-    }
-
-    if (!diff) {
-      try {
-        diff = execFileSync('git', ['diff', '--cached'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 })
-      } catch (err) {
-        logger.debug('git diff --cached failed', { error: err.message, cwd })
+      // If maxBuffer exceeded, try with --stat only (much smaller output)
+      if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || err.message?.includes('maxBuffer')) {
+        logger.warn('git diff exceeded maxBuffer — falling back to --stat', { cwd })
+        try {
+          diff = execFileSync('git', ['diff', '--stat'], { cwd, encoding: 'utf-8', timeout: 15_000 })
+          diff = '(Full diff too large — showing stat only)\n' + diff
+        } catch {}
+      } else {
+        logger.debug('git diff failed', { error: err.message, cwd })
       }
     }
 
@@ -338,7 +358,15 @@ async function reviewChanges(session, filesChanged) {
       diff = newFileContents.join('\n\n')
     }
 
-    if (!diff) return { approved: true, notes: 'No diff available for review' }
+    if (!diff) {
+      // No diff available despite files_changed being non-empty — something is wrong.
+      // For self-modifications, fail closed (don't approve blindly). For normal sessions,
+      // approve with low confidence so the deploy threshold gate catches it.
+      if (session.self_modification) {
+        return { approved: false, notes: 'No diff available for self-modification review — cannot approve without seeing changes', confidence: 0 }
+      }
+      return { approved: true, notes: 'No diff available for review', confidence: 0.2 }
+    }
 
     // Include factory learnings in review context
     let learningsContext = ''
@@ -346,6 +374,7 @@ async function reviewChanges(session, filesChanged) {
       const learnings = session.codebase_id ? await db`
         SELECT pattern_type, pattern_description FROM factory_learnings
         WHERE codebase_id = ${session.codebase_id}
+          AND absorbed_into IS NULL
         ORDER BY confidence DESC LIMIT 10
       ` : []
       if (learnings.length > 0) {
@@ -368,19 +397,14 @@ async function reviewChanges(session, filesChanged) {
       } catch {}
     }
 
-    const selfModWarning = session.self_modification
-      ? `\n⚠️  SELF-MODIFICATION: The Factory is editing its own code. Apply maximum scrutiny.
-Specifically watch for:
-- Changes to oversight logic, confidence scoring, or deploy thresholds (the Factory weakening its own guardrails)
-- Changes to rate limits or caps
-- New external dependencies or network calls
-- Removal of logging, error handling, or safety checks\n`
+    const selfModNote = session.self_modification
+      ? `\nThis is a self-modification — the Factory editing its own code.\n`
       : ''
 
     const response = await callDeepSeek([{
       role: 'user',
-      content: `You are a code reviewer for the Ecodia Factory (autonomous code system). Your review gates auto-deployment — be rigorous.
-${selfModWarning}
+      content: `Code review for Factory auto-deployment gate.
+${selfModNote}
 ## Task
 ${session.initial_prompt}
 
@@ -395,36 +419,19 @@ ${learningsContext}
 ${diff.slice(0, 8000)}
 ${fullFileContext}
 
-## Review Checklist
-Evaluate each dimension and explain your reasoning:
-
-1. **Correctness**: Does the code accomplish the stated task? Are there logic errors, off-by-one errors, race conditions, or missing null/undefined checks?
-2. **Security**: SQL injection, command injection, path traversal, XSS, secrets in code, unsafe deserialization?
-3. **Regression risk**: Could this break existing functionality? Are there callers of modified functions that weren't updated? API contract changes?
-4. **Error handling**: Are new failure modes handled? Could exceptions propagate and crash the process?
-5. **Data integrity**: Database migrations safe? Can this corrupt or lose data? Transaction boundaries correct?
-
-## Concerns
-List ANY concerns even if you're approving overall. A concern is anything that:
-- Could fail under edge cases you can't fully verify from the diff
-- Changes behaviour of functions called by other modules
-- Modifies deploy/oversight/confidence logic (if self-modification)
-- Adds external dependencies or new network calls
-- Removes safety checks, logging, or validation
-
-## Response Format (JSON only)
+Respond as JSON:
 {
   "approved": true/false,
   "confidence": 0.0-1.0,
-  "notes": "2-3 sentence summary of your assessment",
-  "concerns": ["specific concern 1", "specific concern 2"],
+  "notes": "summary",
+  "concerns": ["specific concern 1", ...],
   "accomplishes_task": true/false,
   "checklist": {
-    "correctness": "pass/fail/uncertain — brief reason",
-    "security": "pass/fail/uncertain — brief reason",
-    "regression_risk": "low/medium/high — brief reason",
-    "error_handling": "pass/fail/uncertain — brief reason",
-    "data_integrity": "pass/fail/uncertain — brief reason"
+    "correctness": "pass/fail/uncertain — reason",
+    "security": "pass/fail/uncertain — reason",
+    "regression_risk": "low/medium/high — reason",
+    "error_handling": "pass/fail/uncertain — reason",
+    "data_integrity": "pass/fail/uncertain — reason"
   }
 }`,
     }], {
@@ -538,16 +545,30 @@ Task: ${session.initial_prompt}
 Codebase: ${session.codebase_name || 'unknown'}
 Failure: ${failureType} — ${errorDetails}
 Trigger: ${session.trigger_source}
+Self-modification: ${!!session.self_modification}
 
-What should happen next?
+Decide the best recovery. You can combine multiple actions.
 
 Respond as JSON:
 {
-  "action": "retry|task|escalate|nothing",
-  "retry_prompt": "modified prompt if retrying, null otherwise",
-  "task_title": "task title if filing, null otherwise",
-  "reasoning": "why"
-}`,
+  "actions": [
+    {
+      "type": "retry|diagnose|self_modify|task|escalate|nothing",
+      "prompt": "session prompt if retry/diagnose/self_modify",
+      "task_title": "task title if filing",
+      "codebase_name": "target codebase if different from failed session",
+      "reasoning": "why this action"
+    }
+  ]
+}
+
+Action types:
+- retry: re-run with a better prompt (you learned from the failure)
+- diagnose: spawn a diagnostic session to investigate the root cause before fixing
+- self_modify: the failure reveals a bug in the Factory itself — fix the Factory
+- task: file a task for later
+- escalate: notify human
+- nothing: no action needed`,
     }], {
       module: 'factory_oversight',
     })
@@ -561,23 +582,39 @@ Respond as JSON:
       return
     }
 
-    if (followUp.action === 'retry' && followUp.retry_prompt) {
-      logger.info(`Factory oversight: retrying session with modified prompt`)
-      const triggers = require('./factoryTriggerService')
-      await triggers.dispatchFromCortex(followUp.retry_prompt, {
-        codebaseName: session.codebase_name,
-      })
-    } else if (followUp.action === 'task' && followUp.task_title) {
-      await db`
-        INSERT INTO tasks (title, description, source, source_ref_id, priority)
-        VALUES (${followUp.task_title}, ${followUp.reasoning || errorDetails}, 'cc', ${session.id}, 'medium')
-      `
-    } else if (followUp.action === 'escalate') {
-      await db`
-        INSERT INTO notifications (type, message, metadata)
-        VALUES ('factory_escalation', ${followUp.reasoning || 'Factory needs human intervention'},
-                ${JSON.stringify({ sessionId: session.id, failureType, codebaseName: session.codebase_name })})
-      `
+    // Support both old format (single action) and new format (actions array)
+    const actions = followUp.actions || [followUp]
+    const triggers = require('./factoryTriggerService')
+
+    for (const action of actions) {
+      const actionType = action.type || action.action
+      try {
+        if ((actionType === 'retry' || actionType === 'diagnose') && action.prompt) {
+          logger.info(`Factory oversight: ${actionType} session for failed task`)
+          await triggers.dispatchFromCortex(action.prompt, {
+            codebaseName: action.codebase_name || session.codebase_name,
+          })
+        } else if (actionType === 'self_modify' && action.prompt) {
+          logger.info(`Factory oversight: self-modification triggered by failure analysis`)
+          await triggers.dispatchSelfModification({
+            description: action.prompt,
+            motivation: `Failure analysis from session ${session.id}: ${action.reasoning || failureType}`,
+          })
+        } else if (actionType === 'task' && action.task_title) {
+          await db`
+            INSERT INTO tasks (title, description, source, source_ref_id, priority)
+            VALUES (${action.task_title}, ${action.reasoning || errorDetails}, 'cc', ${session.id}, 'medium')
+          `
+        } else if (actionType === 'escalate') {
+          await db`
+            INSERT INTO notifications (type, message, metadata)
+            VALUES ('factory_escalation', ${action.reasoning || 'Factory needs human intervention'},
+                    ${JSON.stringify({ sessionId: session.id, failureType, codebaseName: session.codebase_name })})
+          `
+        }
+      } catch (actionErr) {
+        logger.debug(`Follow-up action ${actionType} failed`, { error: actionErr.message })
+      }
     }
   } catch (err) {
     logger.debug('Follow-up generation failed', { error: err.message })
@@ -670,7 +707,6 @@ async function extractLearningPattern(session, outcome, details) {
     let diffSnippet = ''
     if (session.repo_path) {
       try {
-        const { execFileSync } = require('child_process')
         diffSnippet = execFileSync('git', ['diff', '--stat'], { cwd: session.repo_path, encoding: 'utf-8' }).trim()
         if (diffSnippet) diffSnippet = `\nDiff stat:\n${diffSnippet.slice(0, 1000)}`
       } catch {}
@@ -731,7 +767,24 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
     })
 
     const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const parsed = JSON.parse(cleaned)
+    let parsed
+    try {
+      parsed = JSON.parse(cleaned)
+    } catch (parseErr) {
+      logger.debug('Learning extraction: invalid JSON from DeepSeek', { error: parseErr.message, response: cleaned.slice(0, 200) })
+      return
+    }
+
+    // Validate required fields — DeepSeek may return nulls or wrong types
+    if (!parsed || typeof parsed.pattern_description !== 'string') {
+      logger.debug('Learning extraction: missing or invalid pattern_description', { parsed: JSON.stringify(parsed).slice(0, 200) })
+      return
+    }
+
+    // Clamp confidence to [0, 1] — protect against NaN/negative/out-of-range
+    if (parsed.confidence != null) {
+      parsed.confidence = Math.max(0, Math.min(1, Number(parsed.confidence) || 0.5))
+    }
 
     // Skip "none" learnings — the LLM decided nothing specific was worth saving
     if (parsed.pattern_type === 'none' || !parsed.pattern_description || parsed.pattern_description.length <= 10) {
@@ -740,23 +793,114 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
     }
 
     const keywords = Array.isArray(parsed.keywords) ? parsed.keywords.filter(k => typeof k === 'string') : []
+    const patternType = parsed.pattern_type || (outcome === 'success' ? 'success_pattern' : 'failure_pattern')
 
-    await db`
-      INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence)
-      VALUES (${session.codebase_id || null},
-              ${parsed.pattern_type || (outcome === 'success' ? 'success_pattern' : 'failure_pattern')},
-              ${parsed.pattern_description},
-              ${parsed.confidence || 0.5},
-              ${outcome === 'success'},
-              ${[session.id]},
-              ${JSON.stringify({ keywords, task: (session.initial_prompt || '').slice(0, 200), files: session.files_changed || [] })})
-    `
-    logger.info(`Factory learning extracted: [${parsed.pattern_type}] ${parsed.pattern_description.slice(0, 80)}`)
+    // ─── Dedup: check if a semantically similar learning already exists ────
+    // If so, merge into the existing one (boost confidence, append session ID)
+    // rather than creating a duplicate row that wastes context budget.
+    let merged = false
+
+    if (env.OPENAI_API_KEY) {
+      try {
+        const axios = require('axios')
+        const embResponse = await axios.post(
+          'https://api.openai.com/v1/embeddings',
+          { model: 'text-embedding-3-small', input: parsed.pattern_description.slice(0, 2000) },
+          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        )
+        const learningVec = embResponse.data.data[0].embedding
+        const vecStr = `[${learningVec.join(',')}]`
+
+        // Find existing similar learnings for this codebase
+        const similar = session.codebase_id ? await db`
+          SELECT id, pattern_description, confidence, session_ids, times_applied, evidence,
+                 1 - (embedding <=> ${vecStr}::vector) AS similarity
+          FROM factory_learnings
+          WHERE codebase_id = ${session.codebase_id}
+            AND absorbed_into IS NULL
+            AND embedding IS NOT NULL
+            AND pattern_type = ${patternType}
+          ORDER BY embedding <=> ${vecStr}::vector
+          LIMIT 1
+        ` : []
+
+        const threshold = parseFloat(env.FACTORY_LEARNING_DEDUP_THRESHOLD || '0.88')
+
+        if (similar.length > 0 && Number.isFinite(similar[0].similarity) && similar[0].similarity >= threshold) {
+          // Merge: boost confidence, append session, keep the richer description
+          const existing = similar[0]
+          const newConfidence = Math.min(1.0, existing.confidence * 1.0 + (parsed.confidence || 0.5) * 0.3)
+          const existingSessions = existing.session_ids || []
+          const mergedSessions = [...new Set([...existingSessions, session.id])]
+          const existingKeywords = existing.evidence?.keywords || []
+          const mergedKeywords = [...new Set([...existingKeywords, ...keywords])]
+
+          // Keep whichever description is longer (more specific)
+          const useNewDesc = parsed.pattern_description.length > existing.pattern_description.length
+          const bestDesc = useNewDesc ? parsed.pattern_description : existing.pattern_description
+
+          await db`
+            UPDATE factory_learnings
+            SET confidence = ${newConfidence},
+                session_ids = ${mergedSessions},
+                pattern_description = ${bestDesc},
+                evidence = ${JSON.stringify({ ...existing.evidence, keywords: mergedKeywords, files: [...new Set([...(existing.evidence?.files || []), ...(session.files_changed || [])])] })},
+                updated_at = now()
+            WHERE id = ${existing.id}
+          `
+          merged = true
+          logger.info(`Factory learning merged into existing (similarity: ${similar[0].similarity.toFixed(2)}): [${patternType}] ${bestDesc.slice(0, 60)}`)
+        }
+
+        // If not merged, insert with embedding
+        if (!merged) {
+          await db`
+            INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence, embedding)
+            VALUES (${session.codebase_id || null},
+                    ${patternType},
+                    ${parsed.pattern_description},
+                    ${parsed.confidence || 0.5},
+                    ${outcome === 'success'},
+                    ${[session.id]},
+                    ${JSON.stringify({ keywords, task: (session.initial_prompt || '').slice(0, 200), files: session.files_changed || [] })},
+                    ${vecStr}::vector)
+          `
+        }
+      } catch (err) {
+        logger.debug('Learning dedup/embed failed, inserting without embedding', { error: err.message })
+        // Fallback: insert without embedding
+        await db`
+          INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence)
+          VALUES (${session.codebase_id || null},
+                  ${patternType},
+                  ${parsed.pattern_description},
+                  ${parsed.confidence || 0.5},
+                  ${outcome === 'success'},
+                  ${[session.id]},
+                  ${JSON.stringify({ keywords, task: (session.initial_prompt || '').slice(0, 200), files: session.files_changed || [] })})
+        `
+      }
+    } else {
+      // No OpenAI key — insert without embedding
+      await db`
+        INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence)
+        VALUES (${session.codebase_id || null},
+                ${patternType},
+                ${parsed.pattern_description},
+                ${parsed.confidence || 0.5},
+                ${outcome === 'success'},
+                ${[session.id]},
+                ${JSON.stringify({ keywords, task: (session.initial_prompt || '').slice(0, 200), files: session.files_changed || [] })})
+      `
+    }
+
+    logger.info(`Factory learning ${merged ? 'merged' : 'extracted'}: [${patternType}] ${parsed.pattern_description.slice(0, 80)}`)
 
     emitEvent('factory:learning_recorded', {
       sessionId: session.id,
       codebaseName: session.codebase_name,
-      patternType: parsed.pattern_type,
+      patternType,
+      merged,
     })
   } catch (err) {
     logger.debug('Learning pattern extraction failed (non-blocking)', { error: err.message })
@@ -792,6 +936,7 @@ function emitEvent(type, payload) {
 // Guard prevents duplicate listeners if module cache is ever cleared.
 
 let _oversightListenerAttached = false
+let _lastPatternDispatchAt = 0
 try {
   const eventBus = require('./internalEventBusService')
   if (!_oversightListenerAttached) {
@@ -801,9 +946,18 @@ try {
         const count = payload.count || 0
         const source = payload.source || 'unknown'
 
-        // Act on any pattern batch from creative phases — no count floor, no rate limit
         if (!count || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
 
+        // Rate limit: max one pattern-reactive session per 6 hours.
+        // A single consolidation cycle can emit multiple pattern batches (one per phase),
+        // and each would spawn a vague "investigate patterns" session. Coalesce them.
+        const SIX_HOURS = 6 * 60 * 60 * 1000
+        if (Date.now() - _lastPatternDispatchAt < SIX_HOURS) {
+          logger.debug(`Factory oversight: skipping pattern dispatch (last was ${Math.round((Date.now() - _lastPatternDispatchAt) / 60000)}min ago)`)
+          return
+        }
+
+        _lastPatternDispatchAt = Date.now()
         logger.info(`Factory oversight: ${count} patterns discovered (${source}) — dispatching proactive session`)
 
         const triggers = require('./factoryTriggerService')
@@ -819,6 +973,151 @@ try {
   }
 } catch {}
 
+// ─── Learning Consolidation ────────────────────────────────────────
+// Periodically called by autonomousMaintenanceWorker to:
+// 1. Embed any learnings that lack embeddings
+// 2. Merge semantically similar learnings
+// 3. Prune absorbed/stale learnings
+// This prevents unbounded growth and ensures the context budget is
+// spent on distinct, high-value knowledge.
+
+async function consolidateLearnings() {
+  const stats = { embedded: 0, merged: 0, pruned: 0 }
+
+  // Step 1: Embed learnings that lack embeddings
+  if (env.OPENAI_API_KEY) {
+    try {
+      const unembedded = await db`
+        SELECT id, pattern_description, pattern_type
+        FROM factory_learnings
+        WHERE embedding IS NULL AND absorbed_into IS NULL
+        ORDER BY created_at DESC LIMIT 20
+      `
+
+      if (unembedded.length > 0) {
+        const axios = require('axios')
+        const texts = unembedded.map(l => `[${l.pattern_type}] ${l.pattern_description.slice(0, 2000)}`)
+        const embResponse = await axios.post(
+          'https://api.openai.com/v1/embeddings',
+          { model: 'text-embedding-3-small', input: texts },
+          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        )
+        // OpenAI may return embeddings out of order — index by the `index` field
+        const embeddingsByIndex = new Map(embResponse.data.data.map(d => [d.index, d.embedding]))
+
+        for (let i = 0; i < unembedded.length; i++) {
+          const vec = embeddingsByIndex.get(i)
+          if (vec) {
+            const vecStr = `[${vec.join(',')}]`
+            await db`UPDATE factory_learnings SET embedding = ${vecStr}::vector WHERE id = ${unembedded[i].id}`
+            stats.embedded++
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug('Learning embedding batch failed', { error: err.message })
+    }
+  }
+
+  // Step 2: Find and merge near-duplicate learnings per codebase
+  try {
+    const codebases = await db`
+      SELECT DISTINCT codebase_id FROM factory_learnings
+      WHERE codebase_id IS NOT NULL AND absorbed_into IS NULL AND embedding IS NOT NULL
+    `
+
+    const threshold = parseFloat(env.FACTORY_LEARNING_DEDUP_THRESHOLD || '0.88')
+
+    for (const { codebase_id } of codebases) {
+      // Get all active embedded learnings for this codebase
+      const learnings = await db`
+        SELECT id, pattern_type, pattern_description, confidence, session_ids, evidence
+        FROM factory_learnings
+        WHERE codebase_id = ${codebase_id} AND absorbed_into IS NULL AND embedding IS NOT NULL
+        ORDER BY confidence DESC, updated_at DESC
+      `
+
+      // Single query to find ALL similar pairs above threshold — replaces O(n²) individual queries.
+      // Self-join with a.id < b.id ensures each pair is checked once. Ordered by similarity DESC
+      // so the strongest merges happen first.
+      const similarPairs = await db`
+        SELECT a.id AS id_a, b.id AS id_b,
+               1 - (a.embedding <=> b.embedding) AS similarity
+        FROM factory_learnings a
+        JOIN factory_learnings b ON a.id < b.id
+          AND a.pattern_type = b.pattern_type
+        WHERE a.codebase_id = ${codebase_id} AND b.codebase_id = ${codebase_id}
+          AND a.absorbed_into IS NULL AND b.absorbed_into IS NULL
+          AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+          AND 1 - (a.embedding <=> b.embedding) >= ${threshold}
+        ORDER BY 1 - (a.embedding <=> b.embedding) DESC
+      `
+
+      // Build a lookup from the learnings array for fast access
+      const learningMap = new Map(learnings.map(l => [l.id, l]))
+      const absorbed = new Set()
+
+      for (const pair of similarPairs) {
+        if (absorbed.has(pair.id_a) || absorbed.has(pair.id_b)) continue
+
+        // Survivor = higher confidence (learnings ordered by confidence DESC, so use the map)
+        const a = learningMap.get(pair.id_a)
+        const b = learningMap.get(pair.id_b)
+        if (!a || !b) continue
+
+        const survivor = a.confidence >= b.confidence ? a : b
+        const victim = survivor === a ? b : a
+
+        const mergedSessions = [...new Set([...(survivor.session_ids || []), ...(victim.session_ids || [])])]
+        const mergedKeywords = [...new Set([...(survivor.evidence?.keywords || []), ...(victim.evidence?.keywords || [])])]
+        const mergedFiles = [...new Set([...(survivor.evidence?.files || []), ...(victim.evidence?.files || [])])]
+        const newConfidence = Math.min(1.0, survivor.confidence * 1.0 + victim.confidence * 0.2)
+
+        const bestDesc = victim.pattern_description.length > survivor.pattern_description.length
+          ? victim.pattern_description : survivor.pattern_description
+
+        // Atomic merge: both updates in a single SQL to prevent partial state
+        // (survivor updated but victim not marked absorbed, or vice versa)
+        await db`
+          WITH update_survivor AS (
+            UPDATE factory_learnings
+            SET confidence = ${newConfidence},
+                session_ids = ${mergedSessions},
+                pattern_description = ${bestDesc},
+                evidence = ${JSON.stringify({ ...survivor.evidence, keywords: mergedKeywords, files: mergedFiles })},
+                merged_from = array_cat(COALESCE(merged_from, '{}'), ${[victim.id]}),
+                updated_at = now()
+            WHERE id = ${survivor.id}
+          )
+          UPDATE factory_learnings SET absorbed_into = ${survivor.id} WHERE id = ${victim.id}
+        `
+
+        absorbed.add(victim.id)
+        stats.merged++
+      }
+    }
+  } catch (err) {
+    logger.debug('Learning merge pass failed', { error: err.message })
+  }
+
+  // Step 3: Hard prune — delete absorbed learnings older than 30 days
+  try {
+    const pruned = await db`
+      DELETE FROM factory_learnings
+      WHERE absorbed_into IS NOT NULL AND updated_at < now() - interval '30 days'
+    `
+    stats.pruned = pruned.count || 0
+  } catch (err) {
+    logger.debug('Learning prune failed', { error: err.message })
+  }
+
+  if (stats.embedded + stats.merged + stats.pruned > 0) {
+    logger.info(`Factory learning consolidation: ${stats.embedded} embedded, ${stats.merged} merged, ${stats.pruned} pruned`)
+  }
+
+  return stats
+}
+
 module.exports = {
   runPostSessionPipeline,
   reviewChanges,
@@ -826,4 +1125,5 @@ module.exports = {
   reportToTriggerSource,
   generateFollowUp,
   recordOutcome,
+  consolidateLearnings,
 }

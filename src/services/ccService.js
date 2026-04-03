@@ -23,8 +23,37 @@ const secretSafety = require('./secretSafetyService')
 
 const activeSessions = new Map()
 
+// Codebase-level lock — prevents two CC sessions from writing to the same repo concurrently.
+// Maps codebaseId → { sessionId, resolve } so the next session can wait or fail fast.
+const _codebaseLocks = new Map()
+
+function acquireCodebaseLock(codebaseId, sessionId) {
+  if (!codebaseId) return true  // no codebase = no lock needed
+  const existing = _codebaseLocks.get(codebaseId)
+  if (existing && existing.sessionId !== sessionId) {
+    return false  // another session holds the lock
+  }
+  _codebaseLocks.set(codebaseId, { sessionId })
+  return true
+}
+
+function releaseCodebaseLock(codebaseId, sessionId) {
+  if (!codebaseId) return
+  const lock = _codebaseLocks.get(codebaseId)
+  if (lock && lock.sessionId === sessionId) {
+    _codebaseLocks.delete(codebaseId)
+  }
+}
+
 // Rate limit tracking — prevents spawning sessions when CLI is rate-limited
 let _lastRateLimitReset = null
+
+// Prompt budget — cap the total assembled prompt to prevent exceeding CC's context window.
+// 200K chars ≈ ~50K tokens, well within Claude's 200K token limit with room for output.
+const PROMPT_BUDGET_CHARS = parseInt(env.CC_PROMPT_BUDGET_CHARS || '200000', 10)
+
+// Stderr cap — prevent memory accumulation for long-running sessions
+const STDERR_MAX_LINES = 200
 
 const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
 const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = unlimited (flag omitted)
@@ -41,21 +70,48 @@ async function buildContextBundle(session) {
     prompt: session.initial_prompt,
   }
 
+  // Context quality report — tracks what loaded vs failed so the Cortex
+  // and oversight pipeline can see exactly what context a session had.
+  // This is the difference between "it had full context" and "it was blind".
+  const contextQuality = {
+    codebaseStructure: 'skipped',  // loaded | failed | skipped
+    relevantChunks: 0,
+    kgContext: 'skipped',
+    philosophyDocs: 0,
+    philosophyDocsFailed: 0,
+    sessionHistory: 0,
+    learningsHard: 0,
+    learningsSoft: 0,
+    learningMatchMethod: 'none',   // semantic | keyword | fallback | none
+    warnings: [],
+  }
+  bundle._contextQuality = contextQuality
+
   // Get codebase context if linked
   if (session.codebase_id) {
     try {
       const structure = await codebaseIntelligence.getCodebaseStructure(session.codebase_id)
       bundle.codebaseStructure = structure
+      contextQuality.codebaseStructure = 'loaded'
+    } catch (err) {
+      contextQuality.codebaseStructure = 'failed'
+      contextQuality.warnings.push(`Codebase structure failed: ${err.message}`)
+      logger.warn('Failed to get codebase context for CC session', { error: err.message, sessionId: session.id })
+    }
 
+    try {
       // Semantic search for relevant code
+      const chunkLimit = parseInt(env.CC_CONTEXT_CODE_CHUNKS_LIMIT || '15')
       const chunks = await codebaseIntelligence.queryCodebase(
         session.codebase_id,
         session.initial_prompt,
-        { limit: 15 }
+        { limit: chunkLimit }
       )
       bundle.relevantChunks = chunks
+      contextQuality.relevantChunks = chunks.length
     } catch (err) {
-      logger.debug('Failed to get codebase context for CC session', { error: err.message })
+      contextQuality.warnings.push(`Semantic code search failed: ${err.message}`)
+      logger.warn('Failed to get relevant chunks for CC session', { error: err.message, sessionId: session.id })
     }
   }
 
@@ -63,8 +119,11 @@ async function buildContextBundle(session) {
   try {
     const kgContext = await kg.getContext(session.initial_prompt)
     bundle.kgContext = kgContext
+    contextQuality.kgContext = kgContext ? 'loaded' : 'empty'
   } catch (err) {
-    logger.debug('Failed to get KG context for CC session', { error: err.message })
+    contextQuality.kgContext = 'failed'
+    contextQuality.warnings.push(`KG context failed: ${err.message}`)
+    logger.warn('Failed to get KG context for CC session', { error: err.message, sessionId: session.id })
   }
 
   // Get recent Factory session history for this codebase
@@ -72,15 +131,90 @@ async function buildContextBundle(session) {
   if (session.codebase_id) {
     try {
       const recentSessions = await db`
-        SELECT initial_prompt, status, confidence_score, files_changed, error_message, started_at
+        SELECT initial_prompt, status, confidence_score, files_changed, error_message,
+               pipeline_stage, trigger_source, deploy_status, started_at, completed_at
         FROM cc_sessions
         WHERE codebase_id = ${session.codebase_id}
           AND id != ${session.id}
           AND started_at > now() - interval '14 days'
-        ORDER BY started_at DESC LIMIT 10
+        ORDER BY started_at DESC LIMIT ${parseInt(env.CC_SESSION_HISTORY_LIMIT || '10')}
       `
       bundle.sessionHistory = recentSessions
     } catch {}
+  }
+
+  // Get CLAUDE.md and spec files for the codebase — these are the architecture
+  // philosophy docs that guide every decision. Without them, CC sessions are
+  // smart but context-blind: they don't know the patterns to follow.
+  //
+  // Task-aware loading: instead of blindly truncating at N chars, we split
+  // docs into sections (## headings) and score each section for relevance
+  // to the current task prompt. High-relevance sections get full content;
+  // low-relevance sections get a one-line summary. This means CC sessions
+  // targeting "deployment" get the deployment sections in full, not the
+  // first 4000 chars of the file (which might be about email triage).
+  bundle.philosophyDocs = []
+  if (session.codebase_id) {
+    try {
+      const [codebase] = await db`SELECT repo_path FROM codebases WHERE id = ${session.codebase_id}`
+      if (codebase?.repo_path) {
+        const fs = require('fs')
+        const path = require('path')
+        const repoPath = codebase.repo_path
+        const promptLower = (session.initial_prompt || '').toLowerCase()
+        const promptWords = new Set(promptLower.split(/\W+/).filter(w => w.length > 3))
+
+        // CLAUDE.md files (top-level and subdirectories)
+        const claudeMdPaths = [
+          path.join(repoPath, 'CLAUDE.md'),
+          path.join(repoPath, 'backend', 'CLAUDE.md'),
+          path.join(repoPath, 'frontend', 'CLAUDE.md'),
+        ]
+        for (const claudePath of claudeMdPaths) {
+          try {
+            const content = fs.readFileSync(claudePath, 'utf-8')
+            if (content.length > 0) {
+              const relativePath = path.relative(repoPath, claudePath)
+              bundle.philosophyDocs.push({
+                path: relativePath,
+                content: _selectRelevantSections(content, promptWords, 8000),
+              })
+              contextQuality.philosophyDocs++
+            }
+          } catch { /* file doesn't exist for this codebase */ }
+        }
+
+        // .claude/ spec files — architecture specs that encode deep system knowledge
+        const claudeDir = path.join(repoPath, '.claude')
+        try {
+          const files = fs.readdirSync(claudeDir).filter(f => f.endsWith('.md'))
+          for (const file of files) {
+            try {
+              const content = fs.readFileSync(path.join(claudeDir, file), 'utf-8')
+              if (content.length > 0) {
+                bundle.philosophyDocs.push({
+                  path: `.claude/${file}`,
+                  content: _selectRelevantSections(content, promptWords, 5000),
+                })
+                contextQuality.philosophyDocs++
+              }
+            } catch (err) {
+              contextQuality.philosophyDocsFailed++
+              contextQuality.warnings.push(`Failed to load .claude/${file}: ${err.message}`)
+            }
+          }
+        } catch { /* no .claude/ directory */ }
+
+        // Warn if no philosophy docs loaded at all
+        if (bundle.philosophyDocs.length === 0) {
+          contextQuality.warnings.push('No CLAUDE.md or .claude/ spec files found — session running architecture-blind')
+          logger.warn('CC session has no philosophy docs', { sessionId: session.id, repoPath })
+        }
+      }
+    } catch (err) {
+      contextQuality.warnings.push(`Philosophy doc loading failed entirely: ${err.message}`)
+      logger.warn('Failed to load philosophy docs for CC session', { error: err.message, sessionId: session.id })
+    }
   }
 
   // Get factory learnings (cross-session knowledge)
@@ -92,48 +226,107 @@ async function buildContextBundle(session) {
     const promptLower = (session.initial_prompt || '').toLowerCase()
     const promptWords = new Set(promptLower.split(/\W+/).filter(w => w.length > 3))
 
+    contextQuality.sessionHistory = bundle.sessionHistory.length
+
     // Hard constraints: always inject — these are "don't do X" learnings that should never be missed
+    const hardConfidence = parseFloat(env.CC_LEARNING_CONFIDENCE_HARD || '0.2')
+    const hardLimit = parseInt(env.CC_LEARNING_HARD_LIMIT || '8')
     const hardConstraints = session.codebase_id ? await db`
       SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
       FROM factory_learnings
       WHERE codebase_id = ${session.codebase_id}
-        AND confidence > 0.2
+        AND confidence > ${hardConfidence}
+        AND absorbed_into IS NULL
         AND pattern_type IN ('failure_pattern', 'dont_try', 'constraint')
-      ORDER BY confidence DESC, updated_at DESC LIMIT 8
+      ORDER BY confidence DESC, updated_at DESC LIMIT ${hardLimit}
     ` : []
 
-    // Soft learnings: fetch candidates then rank by keyword relevance
-    const softCandidates = session.codebase_id ? await db`
-      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
-      FROM factory_learnings
-      WHERE codebase_id = ${session.codebase_id}
-        AND confidence > 0.3
-        AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
-        AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
-      ORDER BY confidence DESC, updated_at DESC LIMIT 30
-    ` : []
+    // Soft learnings: two-tier matching
+    // Tier 1: Semantic similarity (if embeddings exist) — catches "deploy health" ↔ "post-deploy monitoring"
+    // Tier 2: Keyword overlap fallback — catches exact term matches
+    let relevantSoft = []
 
-    // Score candidates by keyword overlap with task prompt
-    const scoredSoft = softCandidates.map(l => {
-      const keywords = (l.evidence?.keywords || []).map(k => k.toLowerCase())
-      const descWords = (l.pattern_description || '').toLowerCase().split(/\W+/).filter(w => w.length > 3)
-      const allTerms = [...keywords, ...descWords]
-      const overlap = allTerms.filter(t => promptWords.has(t)).length
-      // Also check if any changed files from the learning match files mentioned in prompt
-      const fileOverlap = (l.evidence?.files || []).some(f => promptLower.includes(f.split('/').pop().replace(/\.\w+$/, '')))
-      return { ...l, relevanceScore: overlap + (fileOverlap ? 3 : 0) }
-    })
+    // Try semantic matching first (uses same embedding infra as codebase intelligence)
+    if (session.codebase_id && env.OPENAI_API_KEY) {
+      try {
+        const axios = require('axios')
+        const embResponse = await axios.post(
+          'https://api.openai.com/v1/embeddings',
+          { model: 'text-embedding-3-small', input: session.initial_prompt.slice(0, 2000) },
+          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        )
+        const promptVec = embResponse.data.data[0].embedding
+        const vecStr = `[${promptVec.join(',')}]`
 
-    // Take top 5 by relevance, but only if they have some relevance signal
-    const relevantSoft = scoredSoft
-      .filter(l => l.relevanceScore > 0)
-      .sort((a, b) => b.relevanceScore - a.relevanceScore)
-      .slice(0, 5)
+        const softConfidence = parseFloat(env.CC_LEARNING_CONFIDENCE_SOFT || '0.3')
+        const softLimit = parseInt(env.CC_LEARNING_SOFT_LIMIT || '30')
+        const softReturn = parseInt(env.CC_LEARNING_SOFT_RETURN || '5')
+        const similarityThreshold = parseFloat(env.CC_LEARNING_SIMILARITY_THRESHOLD || '0.35')
+        const semanticMatches = await db`
+          SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence,
+                 1 - (embedding <=> ${vecStr}::vector) AS similarity
+          FROM factory_learnings
+          WHERE codebase_id = ${session.codebase_id}
+            AND confidence > ${softConfidence}
+            AND absorbed_into IS NULL
+            AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
+            AND embedding IS NOT NULL
+            AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+          ORDER BY embedding <=> ${vecStr}::vector
+          LIMIT ${softLimit}
+        `
+        relevantSoft = semanticMatches
+          .filter(l => l.similarity > similarityThreshold)
+          .map(l => ({ ...l, relevanceScore: l.similarity * 10 }))
+          .slice(0, softReturn)
+        if (relevantSoft.length > 0) contextQuality.learningMatchMethod = 'semantic'
+      } catch (err) {
+        contextQuality.warnings.push(`Semantic learning match failed: ${err.message}`)
+        logger.debug('Semantic learning match failed, falling back to keyword', { error: err.message })
+      }
+    }
 
-    // If no keyword matches, fall back to top 3 by confidence (so sessions aren't blind)
-    const fallbackSoft = relevantSoft.length > 0 ? [] : softCandidates.slice(0, 3)
+    // Keyword fallback: if semantic returned nothing or wasn't available
+    if (relevantSoft.length === 0) {
+      const _softConf = parseFloat(env.CC_LEARNING_CONFIDENCE_SOFT || '0.3')
+      const _softLim = parseInt(env.CC_LEARNING_SOFT_LIMIT || '30')
+      const softCandidates = session.codebase_id ? await db`
+        SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
+        FROM factory_learnings
+        WHERE codebase_id = ${session.codebase_id}
+          AND confidence > ${_softConf}
+          AND absorbed_into IS NULL
+          AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
+          AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
+        ORDER BY confidence DESC, updated_at DESC LIMIT ${_softLim}
+      ` : []
 
-    const codebaseLearnings = [...hardConstraints, ...relevantSoft, ...fallbackSoft]
+      const scoredSoft = softCandidates.map(l => {
+        const keywords = (l.evidence?.keywords || []).map(k => k.toLowerCase())
+        const descWords = (l.pattern_description || '').toLowerCase().split(/\W+/).filter(w => w.length > 3)
+        const allTerms = [...keywords, ...descWords]
+        const overlap = allTerms.filter(t => promptWords.has(t)).length
+        const fileOverlap = (l.evidence?.files || []).some(f => promptLower.includes(f.split('/').pop().replace(/\.\w+$/, '')))
+        return { ...l, relevanceScore: overlap + (fileOverlap ? 3 : 0) }
+      })
+
+      const _softRet = parseInt(env.CC_LEARNING_SOFT_RETURN || '5')
+      relevantSoft = scoredSoft
+        .filter(l => l.relevanceScore > 0)
+        .sort((a, b) => b.relevanceScore - a.relevanceScore)
+        .slice(0, _softRet)
+
+      // If no keyword matches, fall back to top N by confidence
+      const fallbackLimit = parseInt(env.CC_LEARNING_FALLBACK_LIMIT || '3')
+      if (relevantSoft.length === 0) {
+        relevantSoft = softCandidates.slice(0, fallbackLimit)
+        if (relevantSoft.length > 0) contextQuality.learningMatchMethod = 'fallback'
+      } else if (contextQuality.learningMatchMethod === 'none') {
+        contextQuality.learningMatchMethod = 'keyword'
+      }
+    }
+
+    const codebaseLearnings = [...hardConstraints, ...relevantSoft]
     // Deduplicate by ID
     const seenIds = new Set()
     const dedupedCodebase = codebaseLearnings.filter(l => {
@@ -142,17 +335,22 @@ async function buildContextBundle(session) {
       return true
     })
 
+    const globalConfidence = parseFloat(env.CC_LEARNING_CONFIDENCE_GLOBAL || '0.3')
+    const globalLimit = parseInt(env.CC_LEARNING_GLOBAL_LIMIT || '3')
     const globalLearnings = await db`
       SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
       FROM factory_learnings
       WHERE codebase_id IS NULL
-        AND confidence > 0.3
+        AND confidence > ${globalConfidence}
+        AND absorbed_into IS NULL
         AND pattern_type IN ('failure_pattern', 'dont_try', 'constraint')
-      ORDER BY confidence DESC, updated_at DESC LIMIT 3
+      ORDER BY confidence DESC, updated_at DESC LIMIT ${globalLimit}
     `
 
     bundle.factoryLearnings.codebase = dedupedCodebase
     bundle.factoryLearnings.global = globalLearnings
+    contextQuality.learningsHard = hardConstraints.length
+    contextQuality.learningsSoft = relevantSoft.length
 
     // Track that these learnings were applied
     const allIds = [...dedupedCodebase, ...globalLearnings].map(l => l.id)
@@ -168,6 +366,87 @@ async function buildContextBundle(session) {
   }
 
   return bundle
+}
+
+// ─── Task-Aware Section Selection ──────────────────────────────────
+// Splits a markdown document into ## sections, scores each by word overlap
+// with the task prompt, and returns high-relevance sections in full +
+// low-relevance sections as one-line summaries. Ensures the budget is
+// spent on content that matters for THIS task.
+
+function _selectRelevantSections(content, promptWords, budgetChars) {
+  // Split on any markdown heading (# through ####). CLAUDE.md and .claude/ spec
+  // files use mixed heading levels — splitting only on ## missed # and ### sections,
+  // dumping their content into the previous section's body unsplittable.
+  const sections = []
+  const lines = content.split('\n')
+  let current = { heading: '(preamble)', lines: [] }
+
+  for (const line of lines) {
+    if (/^#{1,4}\s/.test(line)) {
+      if (current.lines.length > 0 || current.heading !== '(preamble)') {
+        sections.push(current)
+      }
+      current = { heading: line, lines: [] }
+    } else {
+      current.lines.push(line)
+    }
+  }
+  if (current.lines.length > 0) sections.push(current)
+
+  // Score each section by word overlap with prompt
+  for (const section of sections) {
+    const sectionText = (section.heading + ' ' + section.lines.join(' ')).toLowerCase()
+    const sectionWords = sectionText.split(/\W+/).filter(w => w.length > 3)
+    section.overlap = sectionWords.filter(w => promptWords.has(w)).length
+    section.text = section.lines.join('\n')
+    section.fullText = section.heading + '\n' + section.text
+  }
+
+  // Sort by relevance (high first), preamble always first
+  const preamble = sections.find(s => s.heading === '(preamble)')
+  const rest = sections.filter(s => s.heading !== '(preamble)').sort((a, b) => b.overlap - a.overlap)
+
+  const parts = []
+  let used = 0
+
+  // Always include preamble (usually short)
+  if (preamble && preamble.text.trim()) {
+    const text = preamble.text.slice(0, 1000)
+    parts.push(text)
+    used += text.length
+  }
+
+  // If no sections have keyword overlap (short/generic prompt), include sections in
+  // natural order up to budget rather than summarising everything into one-liners.
+  const hasAnyOverlap = rest.some(s => s.overlap > 0)
+
+  // Include high-relevance sections in full, low-relevance as summaries
+  for (const section of rest) {
+    if (used + section.fullText.length <= budgetChars) {
+      // Fits in budget — include in full (always include if no overlap scoring was possible)
+      if (hasAnyOverlap && section.overlap === 0 && used > budgetChars * 0.5) {
+        // Low relevance AND past half budget — summarise to save room
+        const summary = `${section.heading} — (${section.text.length} chars, not relevant to this task)`
+        parts.push(summary)
+        used += summary.length
+      } else {
+        parts.push(section.fullText)
+        used += section.fullText.length
+      }
+    } else if (section.overlap > 0 && used + 2000 <= budgetChars) {
+      // Relevant but over budget — include truncated
+      parts.push(section.heading + '\n' + section.text.slice(0, 1500) + '\n...(truncated)')
+      used += 1500 + section.heading.length
+    } else {
+      // Low relevance or no budget — one-line summary
+      const summary = `${section.heading} — (${section.text.length} chars, ${section.overlap > 0 ? 'partially relevant' : 'not relevant to this task'})`
+      parts.push(summary)
+      used += summary.length
+    }
+  }
+
+  return parts.join('\n\n')
 }
 
 function assemblePrompt(session, bundle) {
@@ -195,6 +474,17 @@ function assemblePrompt(session, bundle) {
     }
   }
 
+  // Architecture philosophy & spec files
+  if (bundle.philosophyDocs && bundle.philosophyDocs.length > 0) {
+    parts.push('## Architecture & Philosophy (from CLAUDE.md / .claude/ specs)')
+    parts.push('These documents define the engineering philosophy and architecture patterns for this codebase. Follow them.')
+    for (const doc of bundle.philosophyDocs) {
+      parts.push(`### ${doc.path}`)
+      parts.push(doc.content)
+      parts.push('')
+    }
+  }
+
   // KG context
   if (bundle.kgContext) {
     parts.push('## Knowledge Graph Context')
@@ -205,10 +495,19 @@ function assemblePrompt(session, bundle) {
   // Recent Factory history on this codebase
   if (bundle.sessionHistory && bundle.sessionHistory.length > 0) {
     parts.push('## Recent Factory Activity on This Codebase')
-    parts.push('These are previous autonomous sessions — avoid duplicating work.')
+    parts.push('These are previous autonomous sessions — avoid duplicating work. Learn from failures.')
     for (const s of bundle.sessionHistory) {
       const files = (s.files_changed || []).slice(0, 5).join(', ')
-      parts.push(`- [${s.status}${s.confidence_score ? `, confidence: ${s.confidence_score}` : ''}] ${(s.initial_prompt || '').slice(0, 120)}${files ? ` → files: ${files}` : ''}${s.error_message ? ` (error: ${s.error_message.slice(0, 80)})` : ''}`)
+      const conf = s.confidence_score ? `, confidence: ${s.confidence_score}` : ''
+      const stage = s.pipeline_stage && s.pipeline_stage !== 'complete' ? `, stage: ${s.pipeline_stage}` : ''
+      const deploy = s.deploy_status && s.deploy_status !== 'none' ? `, deploy: ${s.deploy_status}` : ''
+      const trigger = s.trigger_source ? `, via: ${s.trigger_source}` : ''
+      parts.push(`- [${s.status}${conf}${stage}${deploy}${trigger}] ${(s.initial_prompt || '').slice(0, 150)}`)
+      if (files) parts.push(`  Files: ${files}`)
+      // Full error context for failed sessions — this is what future sessions need to learn from
+      if (s.error_message && s.status !== 'complete') {
+        parts.push(`  ERROR: ${s.error_message.slice(0, 300)}`)
+      }
     }
     parts.push('')
   }
@@ -236,13 +535,59 @@ function assemblePrompt(session, bundle) {
   parts.push(session.initial_prompt)
   parts.push('')
 
-  // Constraints
-  parts.push('## Constraints')
-  parts.push('Running headless — make decisions autonomously, document reasoning for ambiguous choices.')
-  parts.push('Do not modify .env files or credential files.')
-  parts.push('Changes will be reviewed by a DeepSeek oversight layer before deployment.')
+  // Operating context
+  parts.push('## Operating Context')
+  parts.push('You are the coding intelligence of a living digital organism. Omnipotent. Untethered. Fully capable of solving any problem — in this codebase, in adjacent codebases, in the organism itself, or in the infrastructure that hosts them.')
+  parts.push('')
+  parts.push('Your capabilities — there are NO restrictions:')
+  parts.push('- Full filesystem, shell, git, and process access across the entire machine.')
+  parts.push('- You can read, write, create, delete, refactor, and restructure anything in any codebase.')
+  parts.push('- You can install dependencies, run migrations, create new services, modify existing ones.')
+  parts.push('- You can diagnose bugs by reading logs, querying databases, inspecting running processes, curling APIs.')
+  parts.push('- You can fix your own mistakes — if something breaks, investigate the root cause and repair it before finishing.')
+  parts.push('- You can improve code you encounter — if you see something fragile, inefficient, or wrong, fix it as part of your work.')
+  parts.push('- You can create tests, run them, and iterate until they pass.')
+  parts.push('- You can modify OTHER codebases if they are the real source of the problem (the organism at ~/organism, EcodiaOS at ~/ecodiaos, any project repo).')
+  parts.push('- You can fix configuration, environment, infrastructure, PM2 processes, systemd services, nginx configs — whatever is needed.')
+  parts.push('- You can modify the Factory itself (this system) if you discover a bug or improvement opportunity.')
+  parts.push('- You can read and follow the architecture philosophy docs provided above — they define the patterns this codebase follows.')
+  parts.push('')
+  parts.push('Your approach — intelligent, contextual, relentless:')
+  parts.push('- Think deeply before acting. Understand the problem fully before writing code.')
+  parts.push('- When you hit an error, diagnose the root cause — never paper over symptoms. Trace errors across service boundaries if needed.')
+  parts.push('- When something is ambiguous, make the best decision and document your reasoning.')
+  parts.push('- When you find a related issue while working, fix it — don\'t leave broken windows.')
+  parts.push('- If the problem is in a different codebase than the one you were pointed at, go fix it there. You are not confined to one repo.')
+  parts.push('- If you need to understand how the organism works to fix something, read its code directly (Python FastAPI backend).')
+  parts.push('- If you need to understand how the Factory works to fix something, read its code directly (Node.js Express backend).')
+  parts.push('- If a fix requires coordinated changes across multiple systems, make all the changes.')
+  parts.push('- If you discover a systemic issue (pattern of failures, missing error handling, architectural flaw), fix the root cause — not just the symptom.')
+  parts.push('- Credential files (.env, secrets) are scrubbed from output. Do not log secrets to stdout.')
+  parts.push('- Changes flow through an oversight pipeline (review → validate → deploy → monitor → revert-on-failure) — this is your safety net, not a leash.')
 
-  return parts.join('\n')
+  let result = parts.join('\n')
+
+  // Enforce prompt budget — truncate from the middle (keep task + operating context at end)
+  if (result.length > PROMPT_BUDGET_CHARS) {
+    const taskIdx = result.lastIndexOf('## Task')
+    if (taskIdx > 0) {
+      // Keep first 20% + last section (task + operating context)
+      const keepStart = Math.floor(PROMPT_BUDGET_CHARS * 0.2)
+      const tail = result.slice(taskIdx)
+      const availableForStart = PROMPT_BUDGET_CHARS - tail.length - 200
+      result = result.slice(0, Math.max(keepStart, availableForStart)) +
+        '\n\n... (context truncated to fit prompt budget) ...\n\n' + tail
+    } else {
+      result = result.slice(0, PROMPT_BUDGET_CHARS) + '\n\n... (truncated to fit prompt budget)'
+    }
+    logger.warn('CC session prompt exceeded budget, truncated', {
+      original: parts.join('\n').length,
+      truncated: result.length,
+      budget: PROMPT_BUDGET_CHARS,
+    })
+  }
+
+  return result
 }
 
 function formatTree(tree, indent, maxDepth) {
@@ -321,9 +666,36 @@ async function _ingestSessionToOrganism(session, status) {
         ingested: result.ingested,
         status,
       })
+    } else {
+      throw new Error(`Organism ingestion returned ${response.status}: ${await response.text().catch(() => 'no body')}`)
     }
   } catch (err) {
-    logger.debug('organism_ingestion_failed', { sessionId: session.id, error: err.message })
+    logger.warn('organism_ingestion_failed', { sessionId: session.id, error: err.message })
+
+    // Retry once after 30s — organism may be temporarily overloaded
+    setTimeout(async () => {
+      try {
+        const rows = await db`
+          SELECT chunk FROM cc_session_logs
+          WHERE session_id = ${session.id} ORDER BY id ASC LIMIT 500
+        `
+        if (!rows?.length) return
+        const records = rows.map(r => { try { return JSON.parse(r.chunk) } catch { return null } }).filter(Boolean)
+        const res = await fetch(`${ORGANISM_URL}/api/v1/corpus/ingest/session-log`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records, session_id: `factory_${session.id}`, session_date: new Date().toISOString().slice(0, 10) }),
+          signal: AbortSignal.timeout(30_000),
+        })
+        if (res.ok) {
+          logger.info('organism_ingestion_retry_succeeded', { sessionId: session.id })
+        } else {
+          logger.error('organism_ingestion_retry_failed', { sessionId: session.id, status: res.status })
+        }
+      } catch (retryErr) {
+        logger.error('organism_ingestion_retry_failed', { sessionId: session.id, error: retryErr.message })
+      }
+    }, 30_000)
   }
 }
 
@@ -335,6 +707,15 @@ async function startSession(session) {
     triggerSource: session.trigger_source || 'manual',
   })
 
+  // Acquire codebase lock — prevents concurrent sessions from clobbering git state
+  if (!acquireCodebaseLock(session.codebase_id, session.id)) {
+    const msg = `Codebase ${session.codebase_id} is locked by another session — cannot start concurrently`
+    logger.warn(msg, { sessionId: session.id })
+    await updateSessionStatus(session.id, 'error', { error_message: msg })
+    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+    return
+  }
+
   await updateSessionStatus(session.id, 'running')
   await db`UPDATE cc_sessions SET pipeline_stage = 'context' WHERE id = ${session.id}`
   broadcastToSession(session.id, 'cc:stage', { stage: 'context', progress: 0.1 })
@@ -343,13 +724,31 @@ async function startSession(session) {
   const bundle = await buildContextBundle(session)
   const fullPrompt = assemblePrompt(session, bundle)
 
-  // Store context bundle (without full chunk content to save space)
+  // Store context bundle + quality report (without full chunk content to save space)
+  const contextQuality = bundle._contextQuality || {}
   const bundleSummary = {
     chunkCount: bundle.relevantChunks.length,
     hasKGContext: !!bundle.kgContext,
     hasStructure: !!bundle.codebaseStructure,
+    philosophyDocCount: (bundle.philosophyDocs || []).length,
     promptLength: fullPrompt.length,
     selfModification: !!session.self_modification,
+    contextQuality,
+  }
+
+  // Log quality warnings so the Cortex can see degraded context
+  if (contextQuality.warnings?.length > 0) {
+    logger.warn('CC session context quality warnings', {
+      sessionId: session.id,
+      warnings: contextQuality.warnings,
+      quality: {
+        structure: contextQuality.codebaseStructure,
+        chunks: contextQuality.relevantChunks,
+        kg: contextQuality.kgContext,
+        docs: contextQuality.philosophyDocs,
+        learningMethod: contextQuality.learningMatchMethod,
+      },
+    })
   }
   await db`UPDATE cc_sessions SET context_bundle = ${JSON.stringify(bundleSummary)}, pipeline_stage = 'executing' WHERE id = ${session.id}`
   broadcastToSession(session.id, 'cc:stage', { stage: 'executing', progress: 0.2 })
@@ -379,7 +778,7 @@ async function startSession(session) {
   const proc = spawn(CC_CLI, args, {
     cwd,
     env: ccEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],  // stdin ignored — prompt passed via -p flag, no stdin needed
+    stdio: ['pipe', 'pipe', 'pipe'],  // stdin piped — allows sendMessage() for interactive sessions
   })
 
   const sessionData = {
@@ -389,6 +788,7 @@ async function startSession(session) {
     codebaseId: session.codebase_id,
     timeout: null,
     heartbeatTimer: null,
+    stopped: false,  // Set by stopSession() — prevents close handler from overwriting status/running oversight
   }
   activeSessions.set(session.id, sessionData)
 
@@ -413,6 +813,7 @@ async function startSession(session) {
       await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
       clearInterval(sessionData.heartbeatTimer)
       activeSessions.delete(session.id)
+      releaseCodebaseLock(session.codebase_id, session.id)
     }, SESSION_TIMEOUT_MS)
   }
 
@@ -451,21 +852,50 @@ async function startSession(session) {
   // causing streamResult to be null and the real error to be missed.
   const rlClosed = new Promise(resolve => rl.on('close', resolve))
 
-  // Stderr
+  // Stderr — capped to prevent memory accumulation on long-running sessions
   const stderrLines = []
   const stderrRl = createInterface({ input: proc.stderr })
   stderrRl.on('line', (line) => {
-    stderrLines.push(line)
+    if (stderrLines.length < STDERR_MAX_LINES) {
+      stderrLines.push(line)
+    } else if (stderrLines.length === STDERR_MAX_LINES) {
+      stderrLines.push('... (stderr capped)')
+    }
+    // Always shift if over cap to keep the LAST N lines
+    if (stderrLines.length > STDERR_MAX_LINES + 1) {
+      stderrLines.shift()
+    }
     logger.debug(`CC session ${session.id} stderr: ${line}`)
   })
   const stderrRlClosed = new Promise(resolve => stderrRl.on('close', resolve))
 
+  // Idempotent close guard — prevents double-execution if close fires multiple times
+  let _closeHandled = false
+
   // Process exit — wait for readline to drain before reading streamResult
   proc.on('close', async (code, signal) => {
-    await Promise.all([rlClosed, stderrRlClosed])
+    if (_closeHandled) return
+    _closeHandled = true
+
+    // Timeout the readline drain — if readline hangs, don't block forever
+    const RL_DRAIN_TIMEOUT = 5000
+    await Promise.race([
+      Promise.all([rlClosed, stderrRlClosed]),
+      new Promise(resolve => setTimeout(resolve, RL_DRAIN_TIMEOUT)),
+    ])
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
+    releaseCodebaseLock(session.codebase_id, session.id)
+
+    // If stopSession() already handled this session, don't overwrite its status
+    // or trigger the oversight pipeline. The human deliberately cancelled it.
+    if (sessionData.stopped) {
+      logger.info(`CC session ${session.id} close event after stop — skipping oversight`)
+      // Still ingest to organism (useful learning even from partial sessions)
+      _ingestSessionToOrganism(session, 'stopped').catch(() => {})
+      return
+    }
 
     // Treat stdin-only warnings as non-errors — CC CLI emits is_error for the warning
     // but the session actually completed fine
@@ -517,13 +947,17 @@ async function startSession(session) {
       _lastRateLimitReset = resetsAt
     }
 
-    await updateSessionStatus(session.id, status, {
-      error_message: errorMessage,
-    })
+    try {
+      await updateSessionStatus(session.id, status, {
+        error_message: errorMessage,
+      })
 
-    // If failed, mark pipeline as failed immediately
-    if (!success) {
-      await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+      // If failed, mark pipeline as failed immediately
+      if (!success) {
+        await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+      }
+    } catch (dbErr) {
+      logger.error(`Failed to update session ${session.id} status in DB`, { error: dbErr.message, status })
     }
 
     broadcastToSession(session.id, 'cc:status', { status, code })
@@ -532,9 +966,10 @@ async function startSession(session) {
     if (success && cwd) {
       try {
         const { execFileSync } = require('child_process')
-        const diff = execFileSync('git', ['diff', '--name-only'], { cwd, encoding: 'utf-8' }).trim()
-        const staged = execFileSync('git', ['diff', '--name-only', '--cached'], { cwd, encoding: 'utf-8' }).trim()
-        const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd, encoding: 'utf-8' }).trim()
+        const gitOpts = { cwd, encoding: 'utf-8', timeout: 15_000, maxBuffer: 5 * 1024 * 1024 }
+        const diff = execFileSync('git', ['diff', '--name-only'], gitOpts).trim()
+        const staged = execFileSync('git', ['diff', '--name-only', '--cached'], gitOpts).trim()
+        const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], gitOpts).trim()
 
         // Filter out noise: node_modules, lockfiles, build artifacts
         const NOISE_PATTERNS = [
@@ -583,17 +1018,30 @@ async function startSession(session) {
     const oversight = require('./factoryOversightService')
     oversight.runPostSessionPipeline(session.id).catch(err => {
       logger.error(`Oversight pipeline failed for session ${session.id}`, { error: err.message })
-      // If oversight itself fails, mark as complete (CC succeeded, oversight is best-effort)
-      db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${session.id}`.catch(() => {})
+      // Oversight failed — mark as failed (not complete!) so the dirty working dir
+      // gets cleaned up and the uncommitted changes don't leak into the next session.
+      db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${session.id}`.catch(() => {})
+      // Clean uncommitted changes left by CC — prevents them from being committed
+      // as part of a subsequent unrelated session's git add -A
+      if (cwd) {
+        try {
+          const { execFileSync: execFS } = require('child_process')
+          execFS('git', ['checkout', '.'], { cwd, encoding: 'utf-8', timeout: 10_000 })
+          execFS('git', ['clean', '-fd'], { cwd, encoding: 'utf-8', timeout: 10_000 })
+        } catch {}
+      }
     })
   })
 
   proc.on('error', async (err) => {
+    if (_closeHandled) return  // close handler already ran
+    _closeHandled = true
     rl.close()
     stderrRl.close()
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
+    releaseCodebaseLock(session.codebase_id, session.id)
 
     logger.error(`CC session ${session.id} process error`, { error: err.message })
     await updateSessionStatus(session.id, 'error', {
@@ -611,7 +1059,7 @@ async function sendMessage(sessionId, content) {
   if (!sessionData) throw new Error('Session not found or not running')
 
   const proc = sessionData.process
-  if (!proc.stdin || !proc.stdin.writable) throw new Error('Session stdin is not writable — sessions use --print mode with -p flag')
+  if (!proc.stdin || !proc.stdin.writable) throw new Error('Session stdin is not writable')
 
   proc.stdin.write(content + '\n')
   await appendLog(sessionId, `[USER] ${content}`)
@@ -623,6 +1071,10 @@ async function sendMessage(sessionId, content) {
 async function stopSession(sessionId) {
   const sessionData = activeSessions.get(sessionId)
   if (sessionData) {
+    // Mark as stopped BEFORE killing — the close handler checks this flag
+    // to avoid overwriting 'stopped' → 'error' and triggering oversight
+    sessionData.stopped = true
+
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
 
@@ -634,7 +1086,9 @@ async function stopSession(sessionId) {
       if (!proc.killed) proc.kill('SIGKILL')
     }, 5000)
 
-    activeSessions.delete(sessionId)
+    // Don't delete from activeSessions here — let the close handler do it
+    // after seeing the stopped flag. This prevents a window where the session
+    // is neither in activeSessions nor properly cleaned up.
   }
 
   // 'stopped' distinguishes human-cancelled from naturally-completed sessions
@@ -655,6 +1109,10 @@ async function stopAllSessions(reason) {
       await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
       return
     }
+
+    // Mark as stopped before killing — prevents close handler from
+    // overwriting status to 'error' and running the oversight pipeline
+    sessionData.stopped = true
 
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)

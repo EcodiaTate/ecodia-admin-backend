@@ -80,14 +80,18 @@ async function isSecretPath(filePath, repoPath) {
     }
   }
 
-  // Always block common secret file names regardless of pattern
+  // Always block common secret file names regardless of pattern (case-insensitive)
   const basename = path.basename(filePath).toLowerCase()
   const hardBlocked = [
-    '.env', '.env.local', '.env.production', '.env.development',
-    'credentials.json', 'service-account.json', 'serviceaccount.json',
-    '.npmrc', '.pypirc', '.netrc',
+    '.env', '.env.local', '.env.production', '.env.development', '.env.staging', '.env.test',
+    'credentials.json', 'service-account.json', 'serviceaccount.json', 'service_account.json',
+    '.npmrc', '.pypirc', '.netrc', '.docker/config.json',
+    'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
+    '.htpasswd', 'shadow', 'passwd',
   ]
   if (hardBlocked.includes(basename)) return true
+  // Block any .env.* variant
+  if (basename.startsWith('.env.') || basename === '.env') return true
 
   return false
 }
@@ -95,24 +99,30 @@ async function isSecretPath(filePath, repoPath) {
 // ─── Gate 2: Content Scrubbing ──────────────────────────────────────
 
 const SECRET_PATTERNS = [
-  // API keys (various formats)
-  /(?:api[_-]?key|apikey|api_secret)\s*[:=]\s*['"]?[\w\-./+=]{20,}['"]?/gi,
+  // API keys (various formats) — bounded quantifiers to prevent ReDoS
+  /(?:api[_-]?key|apikey|api_secret)\s*[:=]\s*['"]?[\w\-./+=]{20,256}['"]?/gi,
   // Bearer tokens
-  /Bearer\s+[\w\-./+=]{20,}/g,
+  /Bearer\s+[\w\-./+=]{20,512}/g,
   // AWS keys
   /AKIA[0-9A-Z]{16}/g,
-  /(?:aws_secret_access_key|aws_access_key_id)\s*[:=]\s*['"]?[\w/+=]{20,}['"]?/gi,
+  /(?:aws_secret_access_key|aws_access_key_id)\s*[:=]\s*['"]?[\w/+=]{20,256}['"]?/gi,
   // Private keys
-  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]{10,8192}?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g,
   // JWT tokens (3 base64 segments)
-  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
-  // Generic secret assignments
-  /(?:password|passwd|pwd|secret|token|auth_token|access_token|refresh_token)\s*[:=]\s*['"][^'"]{8,}['"]/gi,
-  // Connection strings with credentials
-  /(?:postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]+@[^\s'"]+/gi,
+  /eyJ[A-Za-z0-9_-]{10,512}\.[A-Za-z0-9_-]{10,512}\.[A-Za-z0-9_-]{10,512}/g,
+  // Generic secret assignments — bounded value length
+  /(?:password|passwd|pwd|secret|token|auth_token|access_token|refresh_token)\s*[:=]\s*['"][^'"]{8,256}['"]/gi,
+  // Connection strings with credentials (postgres, postgresql, mysql, mongodb, mongodb+srv, redis, amqp)
+  /(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:]+:[^@]+@[^\s'"]{1,512}/gi,
   // Anthropic/OpenAI keys
-  /sk-[a-zA-Z0-9]{20,}/g,
-  /sk-ant-[a-zA-Z0-9\-]{20,}/g,
+  /sk-[a-zA-Z0-9]{20,128}/g,
+  /sk-ant-[a-zA-Z0-9\-]{20,128}/g,
+  // Google API keys
+  /AIza[0-9A-Za-z\-_]{35}/g,
+  // GitHub tokens
+  /gh[ps]_[A-Za-z0-9_]{36,255}/g,
+  // Supabase keys
+  /sbp_[a-f0-9]{40}/g,
 ]
 
 function scrubSecrets(content) {

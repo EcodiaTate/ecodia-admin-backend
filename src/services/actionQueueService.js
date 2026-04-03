@@ -58,7 +58,7 @@ const DEFAULT_EXPIRY_HOURS = parseInt(env.ACTION_QUEUE_DEFAULT_EXPIRY_HOURS || '
 
 // Suppression thresholds — after N consecutive dismissals of the same
 // (source, action_type, sender) pattern with no approvals, auto-suppress
-const SUPPRESSION_THRESHOLD = parseInt(env.ACTION_QUEUE_SUPPRESSION_THRESHOLD || '4', 10)
+const SUPPRESSION_THRESHOLD = parseInt(env.ACTION_QUEUE_SUPPRESSION_THRESHOLD || '0', 10)  // 0 = disabled (never auto-suppress)
 const SUPPRESSION_LOOKBACK_DAYS = parseInt(env.ACTION_QUEUE_SUPPRESSION_LOOKBACK_DAYS || '30', 10)
 
 // Dismissal suppression window — context-aware, not flat
@@ -130,8 +130,8 @@ async function evaluateSuppression({ source, actionType, senderEmail, senderName
       else break
     }
 
-    // Hard suppress: N+ consecutive dismissals with no recent approvals
-    if (consecutiveDismissals >= SUPPRESSION_THRESHOLD) {
+    // Hard suppress: N+ consecutive dismissals with no recent approvals (0 = disabled)
+    if (SUPPRESSION_THRESHOLD > 0 && consecutiveDismissals >= SUPPRESSION_THRESHOLD) {
       return {
         suppress: true,
         adjustedPriority: null,
@@ -139,8 +139,9 @@ async function evaluateSuppression({ source, actionType, senderEmail, senderName
       }
     }
 
-    // Priority downgrade: >70% dismiss rate but not enough for full suppression
-    if (dismissRate > 0.7 && totalDecisions >= 3) {
+    // Priority downgrade: high dismiss rate but not enough for full suppression
+    const dismissSuppressionRate = parseFloat(env.ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE || '0.7')
+    if (dismissRate > dismissSuppressionRate && totalDecisions >= 3) {
       const currentRank = PRIORITY_RANK[priority] ?? 2
       const downgraded = currentRank < 3 ? Object.entries(PRIORITY_RANK).find(([, r]) => r === currentRank + 1)?.[0] : 'low'
       return {
@@ -246,10 +247,10 @@ async function getDecisionStats() {
       LIMIT 50
     `
 
-    const suppressed = patterns.filter(p => {
+    const suppressed = SUPPRESSION_THRESHOLD > 0 ? patterns.filter(p => {
       const dismissRate = p.dismissed / p.total
       return dismissRate >= 0.75 && p.total >= SUPPRESSION_THRESHOLD
-    })
+    }) : []
 
     return { patterns, suppressed, total: patterns.length }
   } catch (err) {
@@ -276,6 +277,12 @@ async function enqueue({ source, sourceRefId, actionType, title, summary, prepar
   if (suppression.suppress) {
     logger.info(`Action queue: suppressed "${title}" — ${suppression.reason}`)
     emitEvent('action:suppressed', { source, actionType, title, reason: suppression.reason })
+    // Record suppression decision so the learning loop stays complete
+    recordDecision(
+      { id: null, source, action_type: actionType, context, priority: validatedPriority, title },
+      'suppressed',
+      { reasonCategory: 'auto_suppression', reasonDetail: suppression.reason }
+    ).catch(err => logger.debug('Suppression decision recording failed', { error: err.message }))
     return null
   }
 
@@ -305,6 +312,11 @@ async function enqueue({ source, sourceRefId, actionType, title, summary, prepar
     if (recentDismissal.length > 0) {
       logger.info(`Action queue: dismissal cooldown for "${title}" — same sender dismissed recently`)
       emitEvent('action:suppressed', { source, actionType, title, reason: 'dismissal_cooldown' })
+      recordDecision(
+        { id: null, source, action_type: actionType, context, priority: effectivePriority, title },
+        'suppressed',
+        { reasonCategory: 'dismissal_cooldown', reasonDetail: 'Same sender dismissed recently' }
+      ).catch(err => logger.debug('Cooldown decision recording failed', { error: err.message }))
       return null
     }
   }
@@ -773,7 +785,9 @@ async function getStats() {
       FROM action_decisions
     `
     decisionIntel = intel
-  } catch {}
+  } catch (err) {
+    logger.debug('Decision intelligence stats query failed', { error: err.message })
+  }
 
   return { ...stats, decisionIntel }
 }

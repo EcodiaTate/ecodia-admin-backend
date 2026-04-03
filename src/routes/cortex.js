@@ -28,13 +28,7 @@ router.post('/chat', async (req, res, next) => {
 
     const result = await cortexService.chat(messages, { sessionId, ambientEvents })
 
-    // Persist the latest exchange to this session's history
-    if (sessionId) {
-      cortexService.persistExchange(sessionId, messages, result.blocks).catch((err) => {
-        logger.debug('Cortex session persist failed', { error: err.message })
-      })
-    }
-
+    // persistExchange is already called inside cortexService.chat() — don't double-write
     res.json(result)
   } catch (err) {
     logger.error('Cortex chat failed', { error: err.message })

@@ -17,8 +17,8 @@ const HEALTH_CHECK_TIMEOUT = Number(env.HEALTH_CHECK_TIMEOUT_MS) || 60_000
 const HEALTH_CHECK_RETRIES = Number(env.HEALTH_CHECK_RETRIES) || 3
 const HEALTH_CHECK_INTERVAL = Number(env.HEALTH_CHECK_INTERVAL_MS) || 10_000
 
-function git(args, cwd) {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }).trim()
+function git(args, cwd, { timeout = 120_000 } = {}) {
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout }).trim()
 }
 
 async function deploySession(sessionId) {
@@ -81,8 +81,21 @@ async function deploySession(sessionId) {
     `
     deploymentId = deployment.id
 
-    // 2. Git push
-    git(['push', 'origin', branch], repoPath)
+    // 2. Git push — pull rebase first to handle remote-ahead (e.g. another Factory
+    //    session or manual push landed while this session was running)
+    try {
+      git(['push', 'origin', branch], repoPath)
+    } catch (pushErr) {
+      if (/non-fast-forward|rejected|fetch first/.test(pushErr.message)) {
+        logger.info('Push rejected (remote ahead) — rebasing and retrying', { branch, repoPath })
+        git(['pull', '--rebase', 'origin', branch], repoPath)
+        commitSha = git(['rev-parse', 'HEAD'], repoPath) // SHA may change after rebase
+        await db`UPDATE cc_sessions SET commit_sha = ${commitSha} WHERE id = ${sessionId}`
+        git(['push', 'origin', branch], repoPath)
+      } else {
+        throw pushErr
+      }
+    }
 
     // 3. Self-deployment: run migrations only if new migration files were added in this commit
     const isSelfMod = !!(session.self_modification || session.context_bundle?.selfModification)
@@ -163,6 +176,38 @@ async function deploySession(sessionId) {
       try {
         execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
       } catch (restartErr) {
+        // Self-healing: if PM2 restart fails on self-modification, revert and try again
+        if (isSelfMod) {
+          logger.error(`Self-modification PM2 restart failed — self-healing: reverting and restarting`, { error: restartErr.message })
+          try {
+            git(['reset', '--hard', 'HEAD'], repoPath) // clean state before revert
+            git(['revert', '--no-edit', commitSha], repoPath)
+            try {
+              git(['push', 'origin', branch], repoPath)
+            } catch (pushErr) {
+              if (/non-fast-forward|rejected|fetch first/.test(pushErr.message)) {
+                git(['pull', '--rebase', 'origin', branch], repoPath)
+                git(['push', 'origin', branch], repoPath)
+              } else { throw pushErr }
+            }
+            execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8', timeout: 30_000 })
+            logger.info('Self-healing: reverted git changes and restarted PM2 successfully')
+
+            // Record this as a failed deploy (self-healed)
+            if (deploymentId) {
+              await db`UPDATE deployments SET deploy_status = 'reverted', error_message = ${'Self-healed: PM2 restart failed, auto-reverted'}, reverted_at = now() WHERE id = ${deploymentId}`
+            }
+            await db`UPDATE cc_sessions SET deploy_status = 'reverted', pipeline_stage = 'failed' WHERE id = ${sessionId}`
+            return { status: 'self_healed_revert', commitSha, reason: 'PM2 restart failed, auto-reverted' }
+          } catch (healErr) {
+            logger.error('CRITICAL: Self-healing also failed', { error: healErr.message })
+            await db`
+              INSERT INTO notifications (type, message, metadata)
+              VALUES ('deployment_revert_failed', 'CRITICAL: Self-mod PM2 restart and self-heal both failed — manual intervention needed',
+                      ${JSON.stringify({ sessionId, commitSha, deploymentId, error: healErr.message })})
+            `.catch(() => {})
+          }
+        }
         throw restartErr
       }
 
@@ -245,9 +290,26 @@ async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, br
   logger.warn(`Reverting deployment ${deploymentId}`, { commitSha })
 
   try {
+    // Ensure clean state before reverting — a dirty working dir will block git revert
+    const status = git(['status', '--porcelain'], repoPath)
+    if (status) {
+      git(['reset', '--hard', 'HEAD'], repoPath)
+    }
+
     git(['revert', '--no-edit', commitSha], repoPath)
     const revertSha = git(['rev-parse', 'HEAD'], repoPath)
-    git(['push', 'origin', branch], repoPath)
+
+    // Push the revert, handling remote-ahead just like deploy push
+    try {
+      git(['push', 'origin', branch], repoPath)
+    } catch (pushErr) {
+      if (/non-fast-forward|rejected|fetch first/.test(pushErr.message)) {
+        git(['pull', '--rebase', 'origin', branch], repoPath)
+        git(['push', 'origin', branch], repoPath)
+      } else {
+        throw pushErr
+      }
+    }
 
     if (pm2Name) {
       execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })

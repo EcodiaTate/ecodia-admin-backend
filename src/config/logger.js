@@ -15,6 +15,8 @@ class DBErrorTransport extends Transport {
     this.name = 'db-error'
     this._ready = false
     this._queue = []
+    this._retryQueue = [] // errors that failed to write to DB
+    this._retryTimer = null
 
     // Defer DB require until after module graph is fully loaded
     setImmediate(() => {
@@ -66,10 +68,40 @@ class DBErrorTransport extends Transport {
           ${info.stack ? String(info.stack).slice(0, 5000) : null},
           ${JSON.stringify(meta)}
         )
-      `.catch(() => {})  // never let logging crash the app
+      `.catch(() => {
+          // DB write failed — queue for retry (keep last 50 to avoid unbounded growth)
+          if (this._retryQueue.length < 50) {
+            this._retryQueue.push(info)
+            this._scheduleRetry()
+          }
+        })
+
+      // Broadcast error to WebSocket so Cortex sees it immediately,
+      // not on the next 15-min maintenance worker poll cycle.
+      try {
+        const wsManager = require('../websocket/wsManager')
+        wsManager.broadcast('app:error', {
+          level: info.level || 'error',
+          message: (info.message || '').slice(0, 500),
+          module: info.module || meta.domain || null,
+          service: info.service || null,
+          timestamp: info.timestamp || new Date().toISOString(),
+        })
+      } catch {
+        // WebSocket may not be initialised yet during startup
+      }
     } catch {
       // absolutely never throw from a logger
     }
+  }
+
+  _scheduleRetry() {
+    if (this._retryTimer) return
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null
+      const batch = this._retryQueue.splice(0)
+      for (const info of batch) this._write(info)
+    }, 30_000) // retry after 30s
   }
 }
 

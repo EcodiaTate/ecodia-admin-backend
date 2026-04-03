@@ -1,5 +1,8 @@
 const axios = require('axios')
 const os = require('os')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
+const execFileAsync = promisify(execFile)
 const db = require('../config/db')
 const env = require('../config/env')
 const logger = require('../config/logger')
@@ -12,6 +15,10 @@ const ccService = require('./ccService')
 // Both bodies continuously monitor each other's health.
 // EcodiaOS checks the organism every 15s.
 // Reports combined vitals via symbridge for organism consumption.
+//
+// Tracks: DB, Neo4j, memory, CPU, event loop lag, PM2 processes,
+// restart storms. Per-anomaly cooldowns prevent alert spam while
+// ensuring distinct anomaly types are never silenced by each other.
 // ═══════════════════════════════════════════════════════════════════════
 
 let organismHealthState = {
@@ -24,6 +31,89 @@ let organismHealthState = {
 const HEALTH_CHECK_INTERVAL = Number(env.ORGANISM_HEALTH_CHECK_INTERVAL_MS) || 15_000
 const MAX_CONSECUTIVE_FAILURES = Number(env.ORGANISM_MAX_CONSECUTIVE_FAILURES) || 3
 
+// ─── CPU Tracking (rolling average over last N samples) ────────────
+let _prevCpuTimes = null
+function getCpuUsagePercent() {
+  const cpus = os.cpus()
+  const totals = { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 }
+  for (const cpu of cpus) {
+    for (const type of Object.keys(cpu.times)) {
+      totals[type] = (totals[type] || 0) + cpu.times[type]
+    }
+  }
+  if (!_prevCpuTimes) {
+    _prevCpuTimes = totals
+    return null // first sample, need delta
+  }
+  const prev = _prevCpuTimes
+  _prevCpuTimes = totals
+  const dIdle = totals.idle - prev.idle
+  const dTotal = Object.keys(totals).reduce((s, k) => s + (totals[k] - (prev[k] || 0)), 0)
+  if (dTotal <= 0) return 0
+  return Math.round(((dTotal - dIdle) / dTotal) * 100)
+}
+
+// ─── Event Loop Lag ─────────────────────────────────��──────────────
+let _eventLoopLagMs = 0
+let _lagTimer = null
+function startEventLoopLagMonitor() {
+  if (_lagTimer) return
+  let lastTs = process.hrtime.bigint()
+  _lagTimer = setInterval(() => {
+    const now = process.hrtime.bigint()
+    const elapsed = Number(now - lastTs) / 1e6 // ms
+    _eventLoopLagMs = Math.round(Math.max(0, elapsed - 1000)) // target is 1000ms interval
+    lastTs = now
+  }, 1000)
+  _lagTimer.unref() // don't keep process alive for monitoring
+}
+
+// ─── PM2 Process Monitoring ────────────────────────────────────────
+let _pm2Cache = { processes: [], lastCheck: 0 }
+const PM2_CACHE_TTL_MS = 30_000 // refresh PM2 state every 30s at most
+
+async function getPM2Processes() {
+  const now = Date.now()
+  if (now - _pm2Cache.lastCheck < PM2_CACHE_TTL_MS) return _pm2Cache.processes
+  try {
+    const { stdout } = await execFileAsync('pm2', ['jlist'], { timeout: 10_000, maxBuffer: 5 * 1024 * 1024 })
+    const list = JSON.parse(stdout)
+    _pm2Cache.processes = list.map(p => ({
+      name: p.name,
+      pm_id: p.pm_id,
+      status: p.pm2_env?.status || 'unknown',
+      restarts: p.pm2_env?.restart_time || 0,
+      unstable_restarts: p.pm2_env?.unstable_restarts || 0,
+      uptime: p.pm2_env?.pm_uptime ? now - p.pm2_env.pm_uptime : null,
+      memory: p.monit?.memory ? Math.round(p.monit.memory / 1024 / 1024) : null, // MB
+      cpu: p.monit?.cpu || 0,
+    }))
+    _pm2Cache.lastCheck = now
+  } catch (err) {
+    logger.debug('PM2 process list failed', { error: err.message })
+    // Return stale cache rather than nothing
+  }
+  return _pm2Cache.processes
+}
+
+// ─── Restart Storm Detection ─────────────────────────��─────────────
+// Track restart counts over time to detect processes that keep crashing
+let _prevRestartCounts = new Map() // name → restarts
+
+function detectRestartStorms(pm2Processes) {
+  const storms = []
+  for (const p of pm2Processes) {
+    const prev = _prevRestartCounts.get(p.name) || 0
+    const delta = p.restarts - prev
+    _prevRestartCounts.set(p.name, p.restarts)
+    // If a process has restarted 3+ times since last check (~15s), it's storming
+    if (delta >= 3) {
+      storms.push({ name: p.name, restartsDelta: delta, totalRestarts: p.restarts })
+    }
+  }
+  return storms
+}
+
 // ─── Self Health ────────────────────────────────────────────────────
 
 async function checkSelfHealth() {
@@ -31,7 +121,11 @@ async function checkSelfHealth() {
     db: false,
     neo4j: false,
     memory: null,
+    cpu: null,
+    eventLoopLagMs: _eventLoopLagMs,
     activeCCSessions: 0,
+    pm2Processes: [],
+    restartStorms: [],
   }
 
   // DB
@@ -60,8 +154,15 @@ async function checkSelfHealth() {
     systemFree: Math.round(os.freemem() / 1024 / 1024),
   }
 
+  // CPU
+  checks.cpu = getCpuUsagePercent()
+
   // CC sessions
   checks.activeCCSessions = ccService.getActiveSessionCount()
+
+  // PM2 process state
+  checks.pm2Processes = await getPM2Processes()
+  checks.restartStorms = detectRestartStorms(checks.pm2Processes)
 
   return checks
 }
@@ -70,8 +171,13 @@ async function checkSelfHealth() {
 
 // ─── Anomaly Detection + Cognitive Broadcast ───────────────────────
 
-let lastAnomalyBroadcast = 0
-const ANOMALY_BROADCAST_COOLDOWN_MS = 5 * 60 * 1000 // 5 min debounce
+// Per-anomaly cooldowns: each anomaly type has its own timer so a DB
+// anomaly doesn't silence a restart storm alert that appears 1min later.
+const _anomalyCooldowns = new Map() // anomalyType → lastBroadcastTimestamp
+const ANOMALY_BROADCAST_COOLDOWN_MS = 5 * 60 * 1000 // 5 min per anomaly type
+const CRITICAL_ANOMALY_COOLDOWN_MS = 60 * 1000       // 1 min for critical
+
+const CRITICAL_ANOMALIES = new Set(['database_unreachable', 'restart_storm', 'event_loop_blocked'])
 
 function detectAnomaly(selfHealth) {
   const anomalies = []
@@ -83,32 +189,88 @@ function detectAnomaly(selfHealth) {
   if (selfHealth.memory && selfHealth.memory.systemFree < 256) {
     anomalies.push('low_system_memory')
   }
+  if (selfHealth.cpu != null && selfHealth.cpu > 90) {
+    anomalies.push('high_cpu')
+  }
+  if (selfHealth.eventLoopLagMs > 500) {
+    anomalies.push('event_loop_blocked')
+  }
+  // PM2 process down
+  for (const p of selfHealth.pm2Processes || []) {
+    if (p.status !== 'online') {
+      anomalies.push(`pm2_down:${p.name}`)
+    }
+  }
+  // Restart storms
+  for (const storm of selfHealth.restartStorms || []) {
+    anomalies.push(`restart_storm:${storm.name}`)
+  }
   return anomalies
 }
 
 async function broadcastHealthAnomaly(anomalies, selfHealth) {
   if (anomalies.length === 0) return
-  // Debounce: don't spam the organism with repeated anomaly broadcasts
   const now = Date.now()
-  if (now - lastAnomalyBroadcast < ANOMALY_BROADCAST_COOLDOWN_MS) return
-  lastAnomalyBroadcast = now
+
+  // Filter to only anomalies that have passed their per-type cooldown
+  const freshAnomalies = anomalies.filter(a => {
+    const baseType = a.split(':')[0] // 'pm2_down:ecodia-api' → 'pm2_down'
+    const lastBroadcast = _anomalyCooldowns.get(a) || 0
+    const cooldown = CRITICAL_ANOMALIES.has(baseType) ? CRITICAL_ANOMALY_COOLDOWN_MS : ANOMALY_BROADCAST_COOLDOWN_MS
+    return (now - lastBroadcast) >= cooldown
+  })
+
+  if (freshAnomalies.length === 0) return
+
+  // Mark all fresh anomalies as broadcast
+  for (const a of freshAnomalies) _anomalyCooldowns.set(a, now)
+
+  // Broadcast to organism via KG hooks
   try {
     const kgHooks = require('./kgIngestionHooks')
     kgHooks.sendCognitiveBroadcast('health_anomaly', 0.9, {
-      anomalies,
+      anomalies: freshAnomalies,
       db_healthy: selfHealth.db,
       neo4j_healthy: selfHealth.neo4j,
       memory: selfHealth.memory,
+      cpu: selfHealth.cpu,
+      eventLoopLagMs: selfHealth.eventLoopLagMs,
+      pm2Processes: (selfHealth.pm2Processes || []).filter(p => p.status !== 'online'),
+      restartStorms: selfHealth.restartStorms,
       active_sessions: selfHealth.activeCCSessions,
       timestamp: new Date().toISOString(),
     })
-  } catch {}
+  } catch (err) {
+    logger.warn('Failed to broadcast health anomaly to organism', { error: err.message, anomalies: freshAnomalies })
+  }
 
-  // Also emit on event bus for local services
+  // Emit on event bus for local services
   try {
     const eventBus = require('./internalEventBusService')
-    eventBus.emit('health:anomaly_detected', { anomalies, timestamp: new Date().toISOString() })
-  } catch {}
+    eventBus.emit('health:anomaly_detected', { anomalies: freshAnomalies, timestamp: new Date().toISOString() })
+  } catch (err) {
+    logger.warn('Failed to emit health anomaly to event bus', { error: err.message })
+  }
+
+  // Broadcast to WebSocket so Cortex/frontend sees it immediately
+  try {
+    const wsManager = require('../websocket/wsManager')
+    wsManager.broadcast('health:anomaly', {
+      anomalies: freshAnomalies,
+      selfHealth: {
+        db: selfHealth.db,
+        neo4j: selfHealth.neo4j,
+        cpu: selfHealth.cpu,
+        eventLoopLagMs: selfHealth.eventLoopLagMs,
+        memory: selfHealth.memory,
+        pm2Down: (selfHealth.pm2Processes || []).filter(p => p.status !== 'online').map(p => p.name),
+        restartStorms: (selfHealth.restartStorms || []).map(s => s.name),
+      },
+      timestamp: new Date().toISOString(),
+    })
+  } catch (err) {
+    logger.debug('Failed to broadcast health anomaly via WebSocket', { error: err.message })
+  }
 }
 
 async function checkOrganismHealth() {
@@ -227,6 +389,7 @@ let monitorInterval = null
 
 function startMonitoring() {
   if (monitorInterval) return
+  startEventLoopLagMonitor()
 
   let cycleCount = 0
   monitorInterval = setInterval(async () => {
@@ -261,6 +424,10 @@ function stopMonitoring() {
     clearInterval(monitorInterval)
     monitorInterval = null
   }
+  if (_lagTimer) {
+    clearInterval(_lagTimer)
+    _lagTimer = null
+  }
 }
 
 // Clean up on process exit
@@ -275,4 +442,5 @@ module.exports = {
   reportVitals,
   startMonitoring,
   stopMonitoring,
+  getPM2Processes,
 }

@@ -8,6 +8,7 @@ const { findClientByEmail } = require('../db/queries/clients')
 const { createTask } = require('../db/queries/tasks')
 const kgHooks = require('./kgIngestionHooks')
 
+const GMAIL_ENABLED = (env.GMAIL_ENABLED || 'false').toLowerCase() === 'true'
 const INBOXES = env.GMAIL_INBOXES
   ? env.GMAIL_INBOXES.split(',').map(s => s.trim()).filter(Boolean)
   : [env.GOOGLE_PRIMARY_ACCOUNT]
@@ -33,6 +34,10 @@ function getGmailClient(userEmail) {
 // ─── Poll All Inboxes ────────────────────────────────────────────────────────
 
 async function pollInbox() {
+  if (!GMAIL_ENABLED) {
+    logger.debug('Gmail polling disabled (GMAIL_ENABLED=false) — set to "true" in .env to re-enable')
+    return
+  }
   for (const inbox of INBOXES) {
     try {
       logger.info(`Polling inbox: ${inbox}`)
@@ -406,6 +411,7 @@ async function autoAct(thread, triage) {
 // ─── Send reply autonomously ────────────────────────────────────────────────
 
 async function sendReplyToThread(thread, body) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled (GMAIL_ENABLED=false)')
   const inbox = thread.inbox || INBOXES[0]
   const gmail = getGmailClient(inbox)
 
@@ -473,6 +479,7 @@ async function saveDraftToGmail(thread, draftBody) {
 // ─── Email Actions ───────────────────────────────────────────────────────────
 
 async function archiveThread(threadId) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled (GMAIL_ENABLED=false)')
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
@@ -516,6 +523,7 @@ async function trashThread(threadId) {
 }
 
 async function sendReply(threadId, body) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled (GMAIL_ENABLED=false)')
   const [thread] = await db`SELECT * FROM email_threads WHERE gmail_thread_id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 

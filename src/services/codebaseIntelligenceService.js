@@ -116,11 +116,32 @@ async function syncCodebase(codebaseId) {
 
   if (fs.existsSync(codebase.repo_path)) {
     // Stash any in-progress changes (e.g. mid-CC-session files), pull, then restore.
-    // --no-rebase overrides any global pull.rebase=true config.
     const stashOut = gitExec(['stash', '--include-untracked'], codebase.repo_path)
     const stashed = stashOut && !stashOut.includes('No local changes')
-    gitExec(['pull', '--no-rebase', '--ff-only'], codebase.repo_path)
-    if (stashed) gitExec(['stash', 'pop'], codebase.repo_path)
+
+    // Try fast-forward first (clean linear history). If that fails (diverged branches),
+    // fall back to rebase so local commits replay on top of remote — this is the exact
+    // scenario that was causing "fatal: Not possible to fast-forward, aborting." in prod.
+    const ffResult = gitExec(['pull', '--ff-only'], codebase.repo_path)
+    if (ffResult === null) {
+      logger.info('Fast-forward pull failed, falling back to rebase', { repoPath: codebase.repo_path })
+      const rebaseResult = gitExec(['pull', '--rebase'], codebase.repo_path)
+      if (rebaseResult === null) {
+        // Rebase failed (conflicts) — abort to leave repo in clean state
+        gitExec(['rebase', '--abort'], codebase.repo_path)
+        logger.error('Pull rebase failed (conflicts) — aborting rebase, repo unchanged', { repoPath: codebase.repo_path })
+      }
+    }
+
+    if (stashed) {
+      const popResult = gitExec(['stash', 'pop'], codebase.repo_path)
+      if (popResult === null) {
+        // Stash pop conflict — drop the stash entry to avoid it piling up,
+        // the files are still in the working dir as conflict markers
+        logger.warn('Stash pop had conflicts — dropping stash, check working dir', { repoPath: codebase.repo_path })
+        gitExec(['stash', 'drop'], codebase.repo_path)
+      }
+    }
   }
 
   await db`UPDATE codebases SET last_synced_at = now() WHERE id = ${codebaseId}`

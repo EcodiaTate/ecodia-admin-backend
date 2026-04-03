@@ -17,6 +17,7 @@ if (!env.NEO4J_URI) {
 
   let running = true
   let embedTimer = null
+  let sweepCounter = 0
 
   async function embedCycle() {
     if (!running) return
@@ -24,17 +25,30 @@ if (!env.NEO4J_URI) {
     let nextDelayMs = 10 * 60 * 1000  // 10 min default
 
     try {
+      // Periodic defensive sweep: catch nodes where embedding IS NULL but stale flag wasn't set
+      // Runs every 10th cycle (~every 100min in quiet periods, more often under load)
+      sweepCounter++
+      if (sweepCounter % 10 === 0) {
+        try {
+          await kg.sweepOrphanedEmbeddings()
+        } catch (err) {
+          logger.debug('KG orphan sweep failed', { error: err.message })
+        }
+      }
+
       const count = await kg.embedStaleNodes(100)
       if (count > 0) {
         logger.info(`KG embedding worker: embedded ${count} nodes`)
-        // Still work to do — check how much is left
+        // Check remaining backlog — use conservative estimate if count fails
+        let remaining = count
         try {
-          const remaining = await kg.countStaleNodes?.() ?? count
-          if (remaining > 500) nextDelayMs = 60 * 1000
-          else if (remaining > 100) nextDelayMs = 3 * 60 * 1000
+          remaining = await kg.countStaleNodes?.() ?? count
         } catch {
-          nextDelayMs = 3 * 60 * 1000  // assume more work if count fails
+          // If count query fails, assume worst case: full batch means large backlog
+          remaining = count >= 100 ? 1000 : count * 5
         }
+        if (remaining > 500) nextDelayMs = 60 * 1000
+        else if (remaining > 100) nextDelayMs = 3 * 60 * 1000
       }
       await recordHeartbeat('kg_embedding', 'active')
     } catch (err) {

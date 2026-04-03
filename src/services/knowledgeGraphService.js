@@ -16,10 +16,10 @@ const axios = require('axios')
 // and caps total LLM ingestion calls per minute to prevent runaway costs.
 
 const _recentIngestions = new Map() // sourceId → timestamp
-const INGESTION_DEDUP_WINDOW_MS = 10 * 60 * 1000 // 10 min
+const INGESTION_DEDUP_WINDOW_MS = parseInt(env.KG_INGESTION_DEDUP_WINDOW_MS || '600000')
 const INGESTION_RATE_WINDOW_MS = 60 * 1000 // 1 min
 let _ingestionTimestamps = [] // ring buffer of recent ingestion timestamps
-const MAX_INGESTIONS_PER_MINUTE = parseInt(env.KG_MAX_INGESTIONS_PER_MIN || '20', 10)
+const MAX_INGESTIONS_PER_MINUTE = parseInt(env.KG_MAX_INGESTIONS_PER_MIN || '0', 10)  // 0 = unlimited
 
 function shouldThrottleIngestion(sourceId) {
   const now = Date.now()
@@ -32,10 +32,12 @@ function shouldThrottleIngestion(sourceId) {
     }
   }
 
-  // Rate limit: skip if too many ingestions in the last minute
-  _ingestionTimestamps = _ingestionTimestamps.filter(t => now - t < INGESTION_RATE_WINDOW_MS)
-  if (_ingestionTimestamps.length >= MAX_INGESTIONS_PER_MINUTE) {
-    return true
+  // Rate limit: skip if too many ingestions in the last minute (0 = unlimited)
+  if (MAX_INGESTIONS_PER_MINUTE > 0) {
+    _ingestionTimestamps = _ingestionTimestamps.filter(t => now - t < INGESTION_RATE_WINDOW_MS)
+    if (_ingestionTimestamps.length >= MAX_INGESTIONS_PER_MINUTE) {
+      return true
+    }
   }
 
   return false
@@ -46,8 +48,9 @@ function recordIngestion(sourceId) {
   if (sourceId) _recentIngestions.set(sourceId, now)
   _ingestionTimestamps.push(now)
 
-  // GC the dedup map periodically (keep last 500 entries)
-  if (_recentIngestions.size > 500) {
+  // GC the dedup map periodically
+  const dedupMapSize = parseInt(env.KG_INGESTION_DEDUP_MAP_SIZE || '500')
+  if (_recentIngestions.size > dedupMapSize) {
     const cutoff = now - INGESTION_DEDUP_WINDOW_MS
     for (const [key, ts] of _recentIngestions) {
       if (ts < cutoff) _recentIngestions.delete(key)
@@ -314,7 +317,9 @@ async function getContext(query, { maxSeeds = parseInt(env.KG_CONTEXT_MAX_SEEDS 
           `CALL db.index.vector.queryNodes('node_embeddings', $k, $embedding)
            YIELD node, score
            WHERE score >= $minSim
-           RETURN node.name AS name, labels(node) AS labels, score
+           WITH node, score, coalesce(node.importance, 0.0) AS imp
+           RETURN node.name AS name, labels(node) AS labels,
+                  score * 0.7 + imp * 0.3 AS score
            ORDER BY score DESC`,
           { k: seedLimit, embedding: queryEmbedding, minSim: minSimilarity }
         ).catch(() => [])
@@ -520,6 +525,27 @@ async function countStaleNodes() {
   return result?.get('cnt')?.toInt?.() ?? result?.get('cnt') ?? 0
 }
 
+// ─── Defensive Stale Sweep ──────────────────────────────────────────
+// Catches nodes where embedding IS NULL but embedding_stale was never set
+// (e.g. partial writes, crashes, race conditions during creation).
+// Called periodically by the embedding worker.
+
+async function sweepOrphanedEmbeddings() {
+  const result = await runWrite(
+    `MATCH (n)
+     WHERE n.embedding IS NULL
+       AND (n.embedding_stale IS NULL OR n.embedding_stale = false)
+       AND n.name IS NOT NULL
+     SET n.embedding_stale = true
+     RETURN count(n) AS fixed`
+  )
+  const fixed = result[0]?.get('fixed')?.toInt?.() ?? result[0]?.get('fixed') ?? 0
+  if (fixed > 0) {
+    logger.info(`KG sweep: marked ${fixed} orphaned nodes as embedding_stale`)
+  }
+  return fixed
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 function sanitizeLabel(label) {
@@ -537,6 +563,8 @@ function parseJSON(content) {
   }
 }
 
+const EXPECTED_EMBEDDING_DIMS = 1536
+
 async function getEmbedding(text) {
   if (!env.OPENAI_API_KEY) return null
 
@@ -546,7 +574,12 @@ async function getEmbedding(text) {
       { model: 'text-embedding-3-small', input: text },
       { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
     )
-    return response.data.data[0].embedding
+    const embedding = response.data.data[0].embedding
+    if (!Array.isArray(embedding) || embedding.length !== EXPECTED_EMBEDDING_DIMS) {
+      logger.warn(`Embedding dimension mismatch: expected ${EXPECTED_EMBEDDING_DIMS}, got ${embedding?.length}`)
+      return null
+    }
+    return embedding
   } catch (err) {
     logger.warn('Embedding failed', { error: err.message })
     return null
@@ -562,7 +595,13 @@ async function getBatchEmbeddings(texts) {
       { model: 'text-embedding-3-small', input: texts },
       { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
     )
-    return response.data.data.map(d => d.embedding)
+    return response.data.data.map(d => {
+      if (!Array.isArray(d.embedding) || d.embedding.length !== EXPECTED_EMBEDDING_DIMS) {
+        logger.warn(`Batch embedding dimension mismatch: expected ${EXPECTED_EMBEDDING_DIMS}, got ${d.embedding?.length}`)
+        return null
+      }
+      return d.embedding
+    })
   } catch (err) {
     logger.warn('Batch embedding failed', { error: err.message })
     return texts.map(() => null)
@@ -575,6 +614,7 @@ module.exports = {
   ingestFromLLM,
   embedStaleNodes,
   countStaleNodes,
+  sweepOrphanedEmbeddings,
   getContext,
   findNode,
   getNodeNeighborhood,
