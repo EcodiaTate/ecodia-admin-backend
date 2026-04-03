@@ -84,19 +84,21 @@ async function deploySession(sessionId) {
     // 2. Git push
     git(['push', 'origin', branch], repoPath)
 
-    // 3. Self-deployment: run migrations if new migration files were added
+    // 3. Self-deployment: run migrations only if new migration files were added in this commit
     const isSelfMod = !!(session.self_modification || session.context_bundle?.selfModification)
     if (isSelfMod) {
       try {
-        const fs = require('fs')
-        const migrationsDir = require('path').join(repoPath, 'src/db/migrations')
-        if (fs.existsSync(migrationsDir)) {
-          logger.info('Self-modification: checking for new migrations...')
+        // Check if the commit actually touched migration files — avoids running
+        // migrate.js on every self-mod deploy (was causing 14+ "Skipping" log entries per 48h)
+        const diffFiles = git(['diff', '--name-only', 'HEAD~1', 'HEAD'], repoPath)
+        const hasMigrationChanges = diffFiles.split('\n').some(f => f.startsWith('src/db/migrations/'))
+        if (hasMigrationChanges) {
+          logger.info('Self-modification: new migration files detected, running migrations...')
           execFileSync('node', ['src/db/migrate.js'], { cwd: repoPath, encoding: 'utf-8', timeout: 30_000 })
           logger.info('Self-modification: migrations applied successfully')
         }
       } catch (err) {
-        logger.warn('Self-modification: migration execution failed', { error: err.message })
+        logger.warn('Self-modification: migration check/execution failed', { error: err.message })
         // Don't fail the deploy — migrations might not exist or already applied
       }
     }

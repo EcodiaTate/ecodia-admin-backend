@@ -31,7 +31,6 @@ async function migrate() {
   for (const file of files) {
     if (appliedSet.has(file)) {
       skipped++
-      logger.debug(`Skipping ${file} (already applied)`)
       continue
     }
 
