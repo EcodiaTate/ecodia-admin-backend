@@ -23,9 +23,25 @@ const kgHooks = require('./kgIngestionHooks')
 
 const env = require('../config/env')
 
+const { execFileSync } = require('child_process')
+
 const BASE_AUTO_DEPLOY_THRESHOLD = parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.7')
 const SELF_MOD_THRESHOLD = parseFloat(env.FACTORY_SELF_MODIFY_THRESHOLD || '0.85')
 const CONFIDENCE_ESCALATE_THRESHOLD = parseFloat(env.FACTORY_ESCALATE_THRESHOLD || '0.4')
+
+// ─── Clean working directory after rejected/failed sessions ─────────
+// CC edits files in-place on the VPS. If oversight rejects, those edits
+// sit uncommitted and cause merge conflicts when the repo is pulled.
+function cleanWorkingDir(repoPath) {
+  if (!repoPath) return
+  try {
+    execFileSync('git', ['checkout', '.'], { cwd: repoPath, encoding: 'utf-8' })
+    execFileSync('git', ['clean', '-fd'], { cwd: repoPath, encoding: 'utf-8' })
+    logger.info(`Cleaned working directory after rejected session`, { repoPath })
+  } catch (err) {
+    logger.warn(`Failed to clean working directory`, { repoPath, error: err.message })
+  }
+}
 
 // ─── Dynamic Threshold Calculation ──────────────────────────────────
 
@@ -58,6 +74,7 @@ async function runPostSessionPipeline(sessionId) {
   if (!session) return
   if (session.status !== 'complete') {
     // CC failed — report back to trigger source
+    cleanWorkingDir(session.repo_path)
     await reportToTriggerSource(session, {
       success: false,
       stage: 'execution',
@@ -129,6 +146,7 @@ async function runPostSessionPipeline(sessionId) {
   if (isSelfMod && !reviewApproved) {
     logger.warn(`Factory oversight: self-modification REJECTED by review`, { sessionId })
     await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${sessionId}`
+    cleanWorkingDir(session.repo_path)
     await reportToTriggerSource(session, {
       success: false,
       stage: 'review',
@@ -235,6 +253,7 @@ async function runPostSessionPipeline(sessionId) {
     // Too low confidence — reject
     logger.warn(`Factory rejecting session ${sessionId} (confidence: ${confidence.toFixed(2)}, threshold: ${threshold.toFixed(2)})`)
     await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${sessionId}`
+    cleanWorkingDir(session.repo_path)
 
     await reportToTriggerSource(session, {
       success: false,
@@ -290,7 +309,6 @@ async function escalateToHuman(session, confidence, review, filesChanged) {
 
 async function reviewChanges(session, filesChanged) {
   try {
-    const { execFileSync } = require('child_process')
     const cwd = session.repo_path
 
     if (!cwd) {
