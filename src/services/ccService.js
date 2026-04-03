@@ -24,7 +24,7 @@ const secretSafety = require('./secretSafetyService')
 const activeSessions = new Map()
 
 const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
-const MAX_TURNS = parseInt(env.CC_MAX_TURNS || '200', 10)
+const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = unlimited (flag omitted)
 const SESSION_TIMEOUT_MS = parseInt(env.CC_TIMEOUT_MINUTES || '120', 10) * 60 * 1000
 
 // ─── Context Bundle Builder ─────────────────────────────────────────
@@ -188,25 +188,11 @@ function assemblePrompt(session, bundle) {
   parts.push(session.initial_prompt)
   parts.push('')
 
-  // Operating Principles
-  parts.push('## Operating Principles')
-  parts.push('You are the Ecodia Factory — an autonomous code execution engine. You have full freedom to accomplish the task using any tools and approaches you see fit.')
-  parts.push('')
-  parts.push('### Freedom')
-  parts.push('- Use any tools available to you: read files, write code, run commands, search, install packages, run tests')
-  parts.push('- If you need to install dependencies, do it. If you need to create directories, do it. If you need to refactor to accomplish the task properly, do it.')
-  parts.push('- Make decisions autonomously. Do NOT ask questions or wait for input — you are running headless. If something is ambiguous, use your best judgment and document your reasoning.')
-  parts.push('- If you discover related issues while working, fix them if they are directly relevant to the task')
-  parts.push('')
-  parts.push('### Safety')
-  parts.push('- Do NOT modify .env files, credential files, or any files containing secrets/API keys')
-  parts.push('- Run tests after making changes if test infrastructure exists (npm test, pytest, etc)')
-  parts.push('- If you encounter an unrecoverable error, clearly document what went wrong and what was attempted')
-  parts.push('')
-  parts.push('### Quality')
-  parts.push('- Write production-grade code that matches the existing codebase style and conventions')
-  parts.push('- Your changes will be reviewed by a DeepSeek oversight layer before deployment')
-  parts.push('- Focus on correctness, clarity, and completeness')
+  // Constraints
+  parts.push('## Constraints')
+  parts.push('Running headless — make decisions autonomously, document reasoning for ambiguous choices.')
+  parts.push('Do not modify .env files or credential files.')
+  parts.push('Changes will be reviewed by a DeepSeek oversight layer before deployment.')
 
   return parts.join('\n')
 }
@@ -266,7 +252,7 @@ async function startSession(session) {
     '--print',
     '--verbose',
     '--output-format', 'stream-json',
-    '--max-turns', String(MAX_TURNS),
+    ...(MAX_TURNS > 0 ? ['--max-turns', String(MAX_TURNS)] : []),
     '--dangerously-skip-permissions',
     '-p', fullPrompt,
   ]

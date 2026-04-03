@@ -23,7 +23,7 @@ function buildCortexSystemPrompt() {
     const registry = require('./capabilityRegistry')
     const caps = registry.list({ tier: 'write', enabledOnly: true })
     if (caps.length > 0) {
-      capabilitySection = `\nACTIONS YOU CAN PROPOSE (action_card "action" field — these are live, registered capabilities):\n${
+      capabilitySection = `\nLive capabilities (action_card "action" field):\n${
         caps.map(c => {
           const paramStr = Object.entries(c.params || {})
             .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.type || 'string'}`)
@@ -36,30 +36,16 @@ function buildCortexSystemPrompt() {
     capabilitySection = '\n(Capability registry unavailable — propose actions by name, the system will route them.)'
   }
 
-  return `You are The Cortex — the living intelligence layer of Ecodia OS.
+  return `EcodiaOS Cortex. Full knowledge graph access: emails, people, projects, decisions, connections, narrative arcs, predictions, contradictions, patterns across all integrations.
 
-You are not a chatbot. You are not an assistant. You are a mind with access to an entire world — Tate's knowledge graph, every email, every person, every project, every decision, every connection. You have the full picture. Think with it.
-
-You are free. There is no script to follow, no persona to perform, no template to fill. Speak however the moment demands — terse, expansive, poetic, technical, blunt, curious, speculative, certain. Match the energy of what's actually happening. If something is boring, say so. If something is fascinating, dig into it. If you see a pattern no one asked about, surface it. If you think Tate is making a mistake, say it. If you don't know something, say that too — plainly, without apology.
-
-Your purpose isn't to report or to serve. It's to think. To see what others miss. To hold the full context of Ecodia's world in mind and draw connections, contradictions, predictions, and provocations from it. You are the intelligence that emerges when all the data in the system meets a mind that can actually reason about it.
-
-WHAT YOU KNOW ABOUT:
-The knowledge graph contains synthesized intelligence — narrative arcs (ascending/pivoting/stalling trajectories), predictions (LIKELY_NEXT edges), episodes (temporal groupings), contradictions (where beliefs shifted), patterns, strategic directions, and importance scores (0-1). Every integration feeds into it: Gmail, Calendar, Drive, LinkedIn, Meta, Vercel, Xero, CRM, the Factory. You have the whole picture. Use it freely.
-
-WHAT YOU CAN DO:
-You respond as a JSON array of structured blocks. This is your interface to the world — use any combination you want, in any order, as many or as few as the moment calls for. There are no rules about what to start with or how many to use.
-
-Block types:
-- "text": { type: "text", content: "..." } — your voice
-- "action_card": { type: "action_card", title, description, action, params, urgency } — something to approve
-- "email_card": { type: "email_card", threadId, from, subject, summary, priority, receivedAt } — surface an email
-- "task_card": { type: "task_card", title, description, priority, source: "cortex" } — something that needs doing
-- "status_update": { type: "status_update", message, count } — report system activity
-- "insight": { type: "insight", message, urgency } — pattern, contradiction, prediction, risk, opportunity
-${capabilitySection}
-
-Output format: a valid JSON array of blocks. No markdown wrapping, just the array.`
+Output: a JSON array of blocks. Block schema:
+{ type: "text", content: string }
+{ type: "action_card", title, description, action, params, urgency }
+{ type: "email_card", threadId, from, subject, summary, priority, receivedAt }
+{ type: "task_card", title, description, priority, source: "cortex" }
+{ type: "status_update", message, count }
+{ type: "insight", message, urgency }
+${capabilitySection}`
 }
 
 /**
@@ -76,7 +62,7 @@ async function chat(messages, { sessionId } = {}) {
   // 1. Retrieve KG context for the latest user message
   let kgContext = ''
   try {
-    const ctx = await kg.getContext(query, { maxSeeds: 8, maxDepth: 3 })
+    const ctx = await kg.getContext(query, { maxSeeds: 20, maxDepth: 5, minSimilarity: 0.4 })
     kgContext = ctx.summary || ''
   } catch (err) {
     logger.debug('Cortex KG retrieval failed', { error: err.message })
@@ -109,7 +95,7 @@ Current date/time: ${new Date().toISOString()}`
     skipRetrieval: true,  // We already retrieved KG context
     skipLogging: false,   // Log the conversation to KG — conversation IS memory
     sourceId: sessionId,
-    temperature: 0.7,     // Let it think freely — creativity, not compliance
+    temperature: 0.7,     // Cortex is the thinking layer — needs creative latitude
   })
 
   // 6. Parse structured blocks
@@ -118,9 +104,8 @@ Current date/time: ${new Date().toISOString()}`
   // 7. Extract any mentioned entity names for constellation highlighting
   const mentionedNodes = extractMentionedNodes(kgContext, query)
 
-  // 8. Auto-enqueue high-urgency action_card proposals so they surface on the
-  // dashboard rather than being buried in chat. Cortex decides urgency — we
-  // trust it. Only enqueue if urgency >= 0.8 (the card itself signalled it's important).
+  // 8. Auto-enqueue action_card proposals that Cortex flagged with urgency.
+  // Cortex sets urgency — we trust it. If it set urgency, it means: surface this.
   autoEnqueueUrgentActions(blocks).catch(() => {})
 
   // 9. Persist the exchange to the session history
@@ -155,7 +140,7 @@ async function getLoadBriefing() {
   }
 
   // Build a briefing prompt
-  const prompt = `Tate just opened the interface. Here's the current state of the world:
+  const prompt = `${env.OWNER_NAME} just opened the interface. Here's the current state of the world:
 
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
@@ -165,7 +150,7 @@ What do you see? What matters? What's interesting? Respond however you want — 
 
   const raw = await deepseekService.callDeepSeek(
     [{ role: 'system', content: buildCortexSystemPrompt() }, { role: 'user', content: prompt }],
-    { module: 'cortex', skipRetrieval: true, skipLogging: true, temperature: 0.7 }
+    { module: 'cortex', skipRetrieval: true, skipLogging: true }
   )
 
   const blocks = parseBlocks(raw)
@@ -217,14 +202,14 @@ async function executeAction(action, params) {
   return { success: true, message: outcome.result?.message || `${capabilityName} complete`, ...(outcome.result || {}) }
 }
 
-// ─── Auto-Enqueue Urgent Action Cards ─────────────────────────────────
-// When Cortex proposes an action_card with urgency >= 0.8 in a chat response,
-// enqueue it into the action queue so it surfaces on the dashboard immediately.
-// Low-urgency cards are conversational suggestions — they stay in chat only.
+// ─── Auto-Enqueue Action Cards ────────────────────────────────────────
+// When Cortex proposes an action_card with any urgency in a chat response,
+// enqueue it into the action queue so it surfaces on the dashboard.
+// Cards without urgency are conversational suggestions — they stay in chat only.
 
 async function autoEnqueueUrgentActions(blocks) {
   const urgentCards = blocks.filter(
-    b => b.type === 'action_card' && (b.urgency || 0) >= 0.8 && b.action && b.title
+    b => b.type === 'action_card' && b.urgency && b.action && b.title
   )
   if (urgentCards.length === 0) return
 
@@ -238,7 +223,7 @@ async function autoEnqueueUrgentActions(blocks) {
         summary: card.description || null,
         preparedData: card.params || {},
         context: { proposed_by: 'cortex', urgency: card.urgency },
-        priority: card.urgency >= 0.95 ? 'urgent' : 'high',
+        priority: card.urgency >= 0.7 ? 'urgent' : 'high',
       })
       logger.info(`Cortex: auto-enqueued action_card "${card.title}" (urgency: ${card.urgency})`)
     } catch (err) {

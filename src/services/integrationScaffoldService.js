@@ -42,8 +42,8 @@ async function processItem(item) {
   // Fire KG hooks
 }
 
-// ── Action Execution ──
-// Functions called by actionQueueService.performAction()
+// ── Capability Handlers ──
+// Registered in src/capabilities/${integrationName}.js — never called directly from actionQueueService
 
 module.exports = { poll, processItem }
 \`\`\`
@@ -70,11 +70,8 @@ async function on${integrationName.charAt(0).toUpperCase() + integrationName.sli
 
 ### 4. Worker Entry: Add to src/workers/workspacePoller.js
 \`\`\`
-// ${integrationName} polling (every N minutes)
-cron.schedule('*/N * * * *', async () => {
-  const service = require('../services/${integrationName}Service')
-  await service.poll()
-})
+// Register ${integrationName} poll function — workspacePoller calls all registered pollers each cycle
+pollers.push(require('../services/${integrationName}Service').poll)
 \`\`\`
 
 ### 5. Mount Route: Add to src/app.js
@@ -82,20 +79,21 @@ cron.schedule('*/N * * * *', async () => {
 app.use('/api/${integrationName}', require('./routes/${integrationName}'))
 \`\`\`
 
-### 6. Action Queue Types: Add cases to actionQueueService.performAction()
+### 6. Capabilities: Create src/capabilities/${integrationName}.js
+Register read + write actions so they appear in the capability registry — Cortex, ActionQueue, and the organism's direct-action path all discover them automatically. Do NOT add cases to actionQueueService or cortexService.
 
 ### 7. Env Vars: Add any required API keys/secrets to src/config/env.js
 
-### 8. Direct Action: Add read/write actions to directActionService.js so the organism can use this integration directly
+### 8. KG Ingestion: every processed event feeds kgIngestionHooks — fire-and-forget, never blocking
 
-Follow the existing patterns exactly. Every integration:
-- Polls external API at regular intervals
+Follow the existing patterns. Every integration:
+- Polls external API (interval managed by workspacePoller — no per-integration crons)
 - Stores raw data in Postgres
-- Fires KG ingestion hooks (fire-and-forget)
-- Creates action queue items for human-actionable things
-- Has manual sync endpoint for the dashboard
-- Has stats endpoint for worker status display
-- Has direct action entries for organism fast-path access
+- Fires KG hooks for every processed item (fire-and-forget)
+- Registers capabilities in src/capabilities/ — never hardcodes in service dispatch
+- Creates action queue items for human-actionable things (AI decides, not heuristics)
+- Has stats endpoint for ambient worker status display
+- No manual sync buttons, no trigger endpoints surfaced in UI
 `
 }
 
@@ -105,7 +103,7 @@ function validateScaffold(filesChanged = []) {
     hasService: filesChanged.some(f => f.includes('services/') && f.endsWith('Service.js')),
     hasRoute: filesChanged.some(f => f.includes('routes/')),
     hasKGHooks: filesChanged.some(f => f.includes('kgIngestionHooks')),
-    hasWorkerEntry: filesChanged.some(f => f.includes('Worker') || f.includes('Poller') || f.includes('workspacePoller')),
+    hasCapabilities: filesChanged.some(f => f.includes('capabilities/')),
     hasEnvConfig: filesChanged.some(f => f.includes('env.js') || f.includes('config')),
   }
 

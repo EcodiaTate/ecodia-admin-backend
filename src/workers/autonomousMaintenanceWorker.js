@@ -3,6 +3,17 @@ const logger = require('../config/logger')
 const metabolismBridge = require('../services/metabolismBridgeService')
 const { recordHeartbeat } = require('./heartbeat')
 
+// Integration pollers — called on AI decision, not on schedule
+const workspacePollers = (() => {
+  try { return require('./workspacePoller') } catch { return {} }
+})()
+const gmailPoller = (() => {
+  try { return require('./gmailPoller') } catch { return {} }
+})()
+
+// Track last poll times so the AI can reason about staleness
+const _lastPolled = {}
+
 // ═══════════════════════════════════════════════════════════════════════
 // AUTONOMOUS MAINTENANCE WORKER
 //
@@ -34,8 +45,8 @@ async function _onDeployFailed() {
 
 async function _onKGPrediction(payload) {
   if (!running || inCycle) return
-  if ((payload.importance || 0) >= 0.8) {
-    logger.info('AutonomousMaintenanceWorker: high-importance KG prediction — considering maintenance')
+  if (payload.importance) {
+    logger.info(`AutonomousMaintenanceWorker: KG prediction (importance: ${payload.importance}) — considering maintenance`)
     await runCycle()
   }
 }
@@ -210,6 +221,15 @@ async function readSystemState() {
     `.catch(() => []).then(rows => { state.appErrors = rows }),
   ])
 
+  // Integration staleness — how long since each service was polled
+  const now = Date.now()
+  state.integrationStaleness = {
+    gmail:       _lastPolled.gmail       ? Math.round((now - _lastPolled.gmail)       / 60000) : null,
+    google_drive: _lastPolled.google_drive ? Math.round((now - _lastPolled.google_drive) / 60000) : null,
+    vercel:      _lastPolled.vercel      ? Math.round((now - _lastPolled.vercel)      / 60000) : null,
+    meta:        _lastPolled.meta        ? Math.round((now - _lastPolled.meta)        / 60000) : null,
+  }
+
   // Git activity runs after DB queries — needs state.codebases populated first
   state.gitActivity = []
   if (state.codebases?.length) {
@@ -241,31 +261,18 @@ async function thinkAboutMaintenance(state) {
   // Build a compact, honest system brief
   const brief = buildSystemBrief(state)
 
-  const systemPrompt = `You are the maintenance mind of an autonomous software system called EcodiaOS.
-You have full visibility into the system's health, recent history, and current state.
-Your job: decide what maintenance work, if any, should happen in this cycle.
+  const systemPrompt = `EcodiaOS maintenance mind. Full system state follows. Recent maintenance history is included — avoid redundant work.
 
-You are free. There is no schedule to follow. There are no required tasks.
-If the system is healthy and nothing needs attention, say so.
-If something genuinely needs work, propose it with clarity and reason.
+Metabolic pressure: ${pressure.toFixed(2)}
 
-You must respond with a JSON array of decisions, or an empty array if nothing is needed.
-
-Each decision:
-{
-  "intent": "what needs to happen — written as a clear, specific Factory session prompt",
-  "reason": "why now, based on what you observed",
-  "codebaseHint": "name of the relevant codebase, if applicable",
+Respond as JSON — an array of decisions, or [] if nothing is needed:
+[{
+  "intent": "specific Factory session prompt",
+  "reason": "why now",
+  "codebaseHint": "codebase name if applicable",
   "urgency": "immediate | normal | low",
   "type": "fix | improvement | security | cleanup | investigation"
-}
-
-Rules:
-- Maximum 2 decisions per cycle (don't flood the Factory)
-- Don't repeat recent maintenance (last 7 days shown)
-- Under high pressure (>0.7), only propose fixes for active errors
-- Under low pressure (<0.3), speculative improvements are welcome
-- If the system is healthy — return []`
+}]`
 
   const userMessage = `System state — ${new Date().toISOString()}
 
@@ -283,7 +290,7 @@ What does this system need right now?`
         module: 'autonomous_maintenance',
         skipRetrieval: false,
         skipLogging: false,
-        temperature: 0.4,
+        temperature: 0.5,
         contextQuery: 'system health maintenance codebase quality',
       }
     )
@@ -302,8 +309,31 @@ What does this system need right now?`
 
 // ─── Act On Decision ─────────────────────────────────────────────────
 
+// Integration poll types the AI can request directly
+const POLL_ACTIONS = {
+  poll_gmail:        async () => { if (gmailPoller.pollOnce) { await gmailPoller.pollOnce(); _lastPolled.gmail = Date.now() } },
+  poll_drive:        async () => { if (workspacePollers.pollDrive) { await workspacePollers.pollDrive(); _lastPolled.google_drive = Date.now() } },
+  extract_drive:     async () => { if (workspacePollers.extractDriveContent) await workspacePollers.extractDriveContent() },
+  embed_drive:       async () => { if (workspacePollers.embedDriveFiles) await workspacePollers.embedDriveFiles() },
+  poll_vercel:       async () => { if (workspacePollers.pollVercel) { await workspacePollers.pollVercel(); _lastPolled.vercel = Date.now() } },
+  poll_meta:         async () => { if (workspacePollers.pollMeta) { await workspacePollers.pollMeta(); _lastPolled.meta = Date.now() } },
+  expire_queue:      async () => { if (workspacePollers.expireStaleActions) await workspacePollers.expireStaleActions() },
+}
+
 async function actOnDecision(decision, state) {
   if (!decision.intent) return false
+
+  // Direct integration poll — no Factory session needed
+  if (decision.type === 'poll' && POLL_ACTIONS[decision.intent]) {
+    try {
+      logger.info(`AutonomousMaintenanceWorker: polling — ${decision.intent}`)
+      await POLL_ACTIONS[decision.intent]()
+      return true
+    } catch (err) {
+      logger.warn(`AutonomousMaintenanceWorker: poll failed — ${decision.intent}`, { error: err.message })
+      return false
+    }
+  }
 
   try {
     const triggers = require('../services/factoryTriggerService')
@@ -311,9 +341,9 @@ async function actOnDecision(decision, state) {
     // Find the codebase — by hint or by highest recent activity
     let codebaseId = null
     if (decision.codebaseHint && state.codebases) {
-      const match = state.codebases.find(cb =>
-        cb.name?.toLowerCase().includes(decision.codebaseHint.toLowerCase())
-      )
+      const hint = decision.codebaseHint.toLowerCase()
+      const match = state.codebases.find(cb => cb.name?.toLowerCase() === hint)
+        ?? state.codebases.find(cb => cb.name?.toLowerCase().includes(hint))
       if (match) codebaseId = match.id
     }
 
@@ -412,6 +442,14 @@ function buildSystemBrief(state) {
     )
   }
 
+  if (state.integrationStaleness) {
+    const stale = Object.entries(state.integrationStaleness)
+      .map(([k, v]) => `${k}: ${v === null ? 'never polled' : `${v}min ago`}`)
+      .join(', ')
+    lines.push(`\nIntegration staleness: ${stale}`)
+    lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue)`)
+  }
+
   return lines.join('\n')
 }
 
@@ -430,7 +468,6 @@ function parseDecisions(raw) {
 
     return parsed
       .filter(d => d && typeof d.intent === 'string' && d.intent.length > 10)
-      .slice(0, 2)  // hard cap: never more than 2 per cycle
 
   } catch (err) {
     logger.debug('AutonomousMaintenanceWorker: could not parse decisions', { raw: raw?.slice(0, 200) })

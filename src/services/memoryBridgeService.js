@@ -27,10 +27,11 @@ const SYNC_TO_ORGANISM_MIN_CONNECTIONS = 2
 // Labels worth pulling from the organism
 const SYNC_FROM_ORGANISM_LABELS = ['Narrative', 'Prediction', 'Pattern', 'Episode', 'CausalChain']
 
-// Debounce: no re-sync within 60s per node (except urgent)
+// Debounce: no re-sync within configured window per node (except urgent)
 const recentlySynced = new Map()
-const DEBOUNCE_MS = 60_000
+const DEBOUNCE_MS = parseInt(env.MEMORY_SYNC_DEBOUNCE_MS || '0', 10) || 60_000
 const IMPORTANCE_THRESHOLD = parseFloat(env.MEMORY_SYNC_IMMEDIATE_THRESHOLD || '0.7')
+const URGENT_THRESHOLD = parseFloat(env.MEMORY_SYNC_URGENT_THRESHOLD || '0.9')
 
 // ─── Immediate Single-Node Sync ─────────────────────────────────────
 
@@ -70,12 +71,10 @@ async function syncImmediateIfImportant(node) {
 
   recentlySynced.set(key, Date.now())
 
-  // Clean up stale debounce entries periodically
-  if (recentlySynced.size > 200) {
-    const cutoff = Date.now() - DEBOUNCE_MS
-    for (const [k, v] of recentlySynced) {
-      if (v < cutoff) recentlySynced.delete(k)
-    }
+  // Clean up expired debounce entries
+  const cutoff = Date.now() - DEBOUNCE_MS
+  for (const [k, v] of recentlySynced) {
+    if (v < cutoff) recentlySynced.delete(k)
   }
 
   await syncSingleNode(
@@ -102,7 +101,7 @@ async function syncImmediateIfUrgent(node) {
   if (!node || !node.name) return
 
   const importance = node.importance || node.properties?.importance || 0
-  if (importance < 0.9) return
+  if (importance < URGENT_THRESHOLD) return
 
   // Bypass debounce for urgent nodes
   recentlySynced.set(node.name, Date.now())

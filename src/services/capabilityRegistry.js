@@ -126,20 +126,21 @@ function has(name) {
 }
 
 // ─── Pressure gate ────────────────────────────────────────────────────
-// Generalised: capabilities declaring priority='critical' pass at any pressure.
-// Non-critical writes are blocked above 0.85.
-// cap is already resolved by execute() — passed in to avoid double-lookup.
+// Survival-only gate: at true survival pressure (organism-reported > 0.95),
+// block non-critical writes. This is the absolute last resort — not a
+// management policy. The organism's Oikos drives the pressure signal;
+// we only block when it's genuinely critical.
 
 function checkPressureGate(name, cap) {
   try {
     const metabolismBridge = require('./metabolismBridgeService')
     const pressure = metabolismBridge.getPressure()
-    if (pressure < 0.85) return null
+    if (pressure < 0.95) return null
     if (cap?.priority === 'critical') return null
 
     return {
       success: false,
-      error: `Metabolic pressure too high (${pressure.toFixed(2)}) for non-critical write "${name}"`,
+      error: `Survival pressure (${pressure.toFixed(2)}) — deferring non-critical write "${name}"`,
       pressure,
     }
   } catch {

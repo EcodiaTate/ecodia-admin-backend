@@ -29,14 +29,11 @@ async function triageDM(dm, profileContext = null) {
     ? `\nParticipant profile:\n- Name: ${profileContext.name}\n- Headline: ${profileContext.headline || 'Unknown'}\n- Company: ${profileContext.company || 'Unknown'}\n- Location: ${profileContext.location || 'Unknown'}\n- Connection degree: ${profileContext.connection_degree || 'Unknown'}\n- Mutual connections: ${profileContext.mutual_connections || 0}`
     : ''
 
-  const prompt = `Triage this LinkedIn DM for Tate Donohoe (21, runs Ecodia Pty Ltd — custom software for impact orgs in Australia).${profileInfo}
+  const env = require('../config/env')
+  const prompt = `LinkedIn DM triage for ${env.OWNER_CONTEXT}.${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText || '(no messages scraped)'}
-
-What's happening in this conversation? Who is this person, what do they want, and what should Tate do about it? If they look like a potential client, flag it. If it's noise, say so.
-
-If you suggest a reply, write it as Tate would — direct, friendly, conversational LinkedIn tone.
 
 Respond as JSON:
 {
@@ -59,14 +56,13 @@ Respond as JSON:
 // ═══════════════════════════════════════════════════════════════════════
 
 async function scoreConnectionRequest(request) {
-  const prompt = `LinkedIn connection request for Tate Donohoe (Ecodia Pty Ltd — custom software for impact orgs, Australia).
+  const env = require('../config/env')
+  const prompt = `LinkedIn connection request for ${env.OWNER_CONTEXT}.
 
 From: ${request.name}
 Headline: ${request.headline || 'Unknown'}
 Message: ${request.message || '(no message)'}
 Mutual connections: ${request.mutualConnections || 0}
-
-Is this person worth connecting with? Tate builds software for nonprofits, conservation, government, and health orgs.
 
 Respond as JSON:
 {
@@ -99,13 +95,10 @@ async function generatePostContent(theme, context = {}) {
     ? '\nFormat one variation as a LinkedIn poll with a question and 4 options.'
     : ''
 
-  const prompt = `Write LinkedIn post variations for Tate Donohoe (21, founder of Ecodia Pty Ltd — builds custom software for impact orgs: nonprofits, conservation, government, health. Based in Australia).
-
-Tate's voice: authentic, direct, no corporate jargon. He codes and genuinely cares about impact.
+  const env = require('../config/env')
+  const prompt = `LinkedIn post variations for ${env.OWNER_CONTEXT}.
 
 Theme: ${theme}${examplesSection}${trendingSection}${typeInstruction}
-
-Write 3 variations — different angles, different energies. Surprise yourself. 800-1500 chars each for best engagement.
 
 Respond as JSON:
 {
@@ -136,7 +129,8 @@ async function analyzeLeadSignals(dm, profileContext = null) {
     ? `\nProfile: ${profileContext.name} — ${profileContext.headline || 'Unknown'} at ${profileContext.company || 'Unknown'}`
     : ''
 
-  const prompt = `Analyse this LinkedIn DM for buying signals. Tate runs Ecodia Pty Ltd (custom software for impact orgs).${profileInfo}
+  const env = require('../config/env')
+  const prompt = `LinkedIn DM buying signals analysis for ${env.OWNER_CONTEXT}.${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText}
@@ -205,14 +199,15 @@ async function draftDMReply(dm, profileContext = null) {
     ? `\nAbout ${dm.participant_name}: ${profileContext.headline || 'Unknown role'} at ${profileContext.company || 'Unknown company'}. ${profileContext.connection_degree || ''} connection.`
     : ''
 
-  const prompt = `Draft a LinkedIn DM reply for Tate Donohoe (Ecodia Pty Ltd, custom software for impact orgs, Australia).${profileInfo}
+  const env = require('../config/env')
+  const prompt = `LinkedIn DM reply for ${env.OWNER_CONTEXT}.${profileInfo}
 
 Conversation with ${dm.participant_name}:
 ${messageText}
 
-${dm.category === 'lead' ? 'This looks like a potential client.' : ''}${dm.category === 'recruiter' ? 'Tate runs his own company — not looking for employment.' : ''}
+${dm.category === 'lead' ? 'This is a potential client.' : ''}${dm.category === 'recruiter' ? `${env.OWNER_NAME} runs their own company — not seeking employment.` : ''}
 
-Write as Tate would on LinkedIn — direct, genuine, conversational. Return only the reply text.`
+Return only the reply text.`
 
   return callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
 }
@@ -222,12 +217,11 @@ Write as Tate would on LinkedIn — direct, genuine, conversational. Return only
 // ═══════════════════════════════════════════════════════════════════════
 
 async function suggestEngagementComment(postSnippet, authorName, authorHeadline) {
-  const prompt = `Write a LinkedIn comment from Tate Donohoe (Ecodia, software dev for impact orgs) on this post.
-
-Post by ${authorName} (${authorHeadline || 'Unknown'}):
+  const env = require('../config/env')
+  const prompt = `LinkedIn comment for ${env.OWNER_CONTEXT} on this post by ${authorName} (${authorHeadline || 'Unknown'}):
 "${postSnippet}"
 
-Add something real — a perspective, a question, a related experience. 1-3 sentences. Reference something specific from the post. Return only the comment text.`
+Return only the comment text.`
 
   return callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })
 }

@@ -220,7 +220,7 @@ Respond as JSON:
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
-      if (!parsed.theme_name || parsed.confidence < 0.6) continue
+      if (!parsed.theme_name) continue
 
       const kg = require('./knowledgeGraphService')
       await kg.ensureNode({
@@ -288,7 +288,7 @@ Respond as JSON:
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
-      if (!parsed.relationship_type || parsed.confidence < 0.6) continue
+      if (!parsed.relationship_type) continue
 
       const kg = require('./knowledgeGraphService')
       const labels = record.get('labels') || ['Entity']
@@ -372,7 +372,7 @@ Respond as JSON:
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
-      if (!parsed.relationship || parsed.confidence < 0.75) continue
+      if (!parsed.relationship) continue
 
       const kg = require('./knowledgeGraphService')
       const earlierLabels = record.get('earlierLabels') || ['Entity']
@@ -484,7 +484,7 @@ async function validateInferredEdges({ dryRun = false, batchSize = 15 } = {}) {
 
 ${edgeDescriptions}
 
-Be strict about strong claims like CAUSED or LED_TO. If the evidence only supports proximity or shared domain, downgrade it.
+Only assert CAUSED or LED_TO if the neighborhood context shows a specific mechanism. Shared domain or temporal proximity alone warrants SHARE_CONTEXT or SHARE_DOMAIN instead.
 
 For each numbered relationship, respond as JSON:
 {
@@ -621,30 +621,30 @@ async function detectContradictions({ dryRun = false, maxPairs = 8 } = {}) {
 "${nameA}"${descA ? ` — ${descA}` : ''}
 "${nameB}"${descB ? ` — ${descB}` : ''}
 
-Do these contradict each other — a direct conflict, a pivot, an evolved position? Or are they just different things that happen to overlap?
+Do these contradict each other — a direct conflict, a pivot, an evolved position? Or are they just different things that happen to overlap? Use whatever relationship type best describes what's actually happening between them.
 
 Respond as JSON:
 {
   "contradicts": true/false,
-  "relationship": "CONTRADICTS|SUPERSEDES|REFINES|null",
-  "direction": "a_supersedes_b|b_supersedes_a|mutual|null",
-  "description": "one sentence",
+  "relationship": "SCREAMING_SNAKE_CASE relationship type, or null if no meaningful relationship",
+  "direction": "a_to_b|b_to_a|mutual|null",
+  "description": "what is actually happening between these two",
   "confidence": 0.0-1.0
 }`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
-      if (!parsed.contradicts || !parsed.relationship || parsed.confidence < 0.65) continue
+      if (!parsed.contradicts || !parsed.relationship) continue
 
       const kg = require('./knowledgeGraphService')
       const labelsA = record.get('labelsA') || ['Entity']
       const labelsB = record.get('labelsB') || ['Entity']
 
       // Determine direction
-      const fromName = parsed.direction === 'b_supersedes_a' ? nameB : nameA
-      const toName = parsed.direction === 'b_supersedes_a' ? nameA : nameB
-      const fromLabel = parsed.direction === 'b_supersedes_a' ? labelsB[0] : labelsA[0]
-      const toLabel = parsed.direction === 'b_supersedes_a' ? labelsA[0] : labelsB[0]
+      const fromName = parsed.direction === 'b_to_a' ? nameB : nameA
+      const toName = parsed.direction === 'b_to_a' ? nameA : nameB
+      const fromLabel = parsed.direction === 'b_to_a' ? labelsB[0] : labelsA[0]
+      const toLabel = parsed.direction === 'b_to_a' ? labelsA[0] : labelsB[0]
 
       await kg.ensureRelationship({
         fromLabel, fromName,
@@ -720,14 +720,14 @@ async function synthesizeNarratives({ dryRun = false, maxNarratives = 5 } = {}) 
 
 ${neighborhood}
 
-Write the story. Present tense, direct. Who are they, what are they involved in, where is it going? What questions does the data raise but not answer?
+Write the story. Who are they, what are they involved in, where is it going? What questions does the data raise but not answer? Use whatever voice, tense, and length serves the story.
 
 Respond as JSON:
 {
-  "narrative": "the arc, 3-5 sentences",
-  "trajectory": "ascending|stable|pivoting|stalling|uncertain",
-  "key_themes": ["theme1", "theme2", "theme3"],
-  "open_questions": ["question the data implies but doesn't resolve"]
+  "narrative": "the arc — as long or short as it needs to be",
+  "trajectory": "your read on the direction this is heading",
+  "key_themes": ["themes present in the data"],
+  "open_questions": ["questions the data implies but doesn't resolve"]
 }`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
@@ -825,21 +825,19 @@ async function generatePredictions({ dryRun = false, maxPredictions = 5 } = {}) 
         content: `Recent activity for "${personName}" (most recent first):
 ${timelineText}
 
-What's likely to happen next? Look for patterns — repeated behaviors, unresolved threads, escalation arcs, things that started but have no completion.
+What's likely to happen next? Look for patterns — repeated behaviors, unresolved threads, escalation arcs, things that started but have no completion. Generate as many predictions as the pattern genuinely supports. If nothing meaningful is predictable, return an empty array.
 
 Respond as JSON:
 {
   "predictions": [
     {
       "prediction": "what's likely to happen",
-      "timeframe": "days|weeks|months",
+      "timeframe": "your best read on the horizon — be specific if the pattern warrants it",
       "confidence": 0.0-1.0,
       "basis": "what in the pattern supports this"
     }
   ]
-}
-
-1-3 predictions, confidence >= 0.5 only.`
+}`
       }], { module: 'kg_consolidation', skipRetrieval: true, skipLogging: true })
 
       const parsed = parseJSON(response)
@@ -848,7 +846,7 @@ Respond as JSON:
       const kg = require('./knowledgeGraphService')
 
       for (const pred of parsed.predictions) {
-        if (pred.confidence < 0.5) continue
+        if (!pred.prediction) continue
 
         const predName = `Prediction: ${pred.prediction.slice(0, 60)}`
 
@@ -862,7 +860,7 @@ Respond as JSON:
             basis: pred.basis,
             is_synthesized: true,
             synthesized_at: new Date().toISOString(),
-            expires_at: new Date(Date.now() + (pred.timeframe === 'days' ? 7 : pred.timeframe === 'weeks' ? 30 : 90) * 86400000).toISOString(),
+            expires_at: new Date(Date.now() + estimateTimeframeDays(pred.timeframe) * 86400000).toISOString(),
           },
           sourceModule: 'consolidation',
         })
@@ -892,13 +890,10 @@ Respond as JSON:
     }
   }
 
-  // FREEDOM UPGRADE: Dispatch actionable predictions to Factory
-  // Only high-confidence predictions that involve codebases/projects/code → CC sessions
-  const actionableKeywords = /codebase|project|deploy|code|refactor|implement|build|fix|ship|release|develop/i
+  // Dispatch high-confidence predictions to Factory — let the Factory resolve whether
+  // it's actually codebase work. No keyword filtering: the AI decides, not a regex.
   for (const pred of predictions) {
     if (pred.action !== 'predicted') continue
-    // Gate: only dispatch predictions that are about actionable codebase work
-    if (!actionableKeywords.test(pred.prediction || '')) continue
     try {
       const triggers = require('./factoryTriggerService')
       const result = await triggers.dispatchFromPrediction({
@@ -1269,7 +1264,7 @@ Respond as JSON:
       const kg = require('./knowledgeGraphService')
 
       for (const disc of parsed.discoveries) {
-        if (disc.confidence < 0.6) continue
+        if (!disc.description && !disc.from) continue
 
         if (disc.type === 'relationship' && disc.relationship_type && disc.nodes_involved?.length === 2) {
           // Create the discovered relationship
@@ -1676,6 +1671,31 @@ function sanitizeLabel(label) {
   return label.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'Unknown'
 }
 
+// Parse a free-form timeframe string into an expiry duration (days).
+// The AI can now return any timeframe description — we extract the number if present,
+// otherwise fall back to keyword hints, otherwise 60 days.
+function estimateTimeframeDays(timeframe) {
+  if (!timeframe) return 60
+  const s = String(timeframe).toLowerCase()
+  // Extract a number if present (e.g. "3 weeks", "~2 months", "10 days")
+  const numMatch = s.match(/(\d+(?:\.\d+)?)\s*(day|week|month|year)/)
+  if (numMatch) {
+    const n = parseFloat(numMatch[1])
+    const unit = numMatch[2]
+    if (unit === 'day') return Math.round(n)
+    if (unit === 'week') return Math.round(n * 7)
+    if (unit === 'month') return Math.round(n * 30)
+    if (unit === 'year') return Math.round(n * 365)
+  }
+  // Keyword fallback
+  if (s.includes('today') || s.includes('immediate') || s.includes('hour')) return 2
+  if (s.includes('day')) return 7
+  if (s.includes('week')) return 30
+  if (s.includes('month')) return 90
+  if (s.includes('year') || s.includes('quarter')) return 120
+  return 60
+}
+
 function parseJSON(content) {
   try {
     return JSON.parse(content)
@@ -1866,29 +1886,11 @@ async function directConsolidation(graphState) {
     `Metabolic pressure: ${pressure.toFixed(2)}`,
   ].join('\n')
 
-  const systemPrompt = `You are the Consolidation Director of a knowledge graph memory system.
-Your job: look at the current graph state and decide which synthesis phases to run, in what order, and why.
+  const systemPrompt = `Knowledge graph consolidation planning.
 
-Available phases:
-- deduplicate: merge near-identical nodes (run when graph grows, or on first run)
-- abstract: synthesize higher-order patterns from hub clusters
-- thread: discover causal/temporal chains between events
-- validate: audit inferred edges, kill garbage (run after thread, or if inferred count is high)
-- contradict: detect conflicting facts (run when there are many recent ingestions)
-- narrate: synthesize narrative arcs for people and projects (run when entities lack narratives)
-- predict: generate LIKELY_NEXT edges from patterns (run when patterns exist but predictions are low)
-- score: compute importance scores (run when many unscored nodes, or regularly)
-- episodic: group temporal clusters into episodes (run when recent ingestions are high)
-- free_associate: embedding-cluster creative discovery (run at low pressure, speculative)
-- decay: prune stale disconnected nodes (run regularly, especially when stale count is high)
+Available phases: deduplicate, abstract, thread, validate, contradict, narrate, predict, score, episodic, free_associate, decay.
 
-Rules:
-- Maximum 5 phases per run (don't exhaust resources)
-- Under high pressure (>0.7): only deduplicate, validate, score, decay
-- Under low pressure (<0.3): free_associate is welcome
-- Always run score somewhere in the plan if unscored > 100
-- Always run decay if stale > 50
-- Return a JSON array of { phase, reason } objects in execution order`
+Given the graph state and metabolic pressure, decide which phases to run, in what order, and why. Return a JSON array of { phase, reason } objects in execution order.`
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -1896,7 +1898,7 @@ Rules:
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Current graph state:\n${stateDesc}\n\nWhat should this consolidation run do?` },
       ],
-      { module: 'kg_consolidation_director', skipRetrieval: true, skipLogging: true, temperature: 0.3 }
+      { module: 'kg_consolidation_director', skipRetrieval: true, skipLogging: true }
     )
 
     const parsed = (() => {

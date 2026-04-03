@@ -12,7 +12,7 @@ const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
 // AUD conversion: ~1.55× USD at time of writing — hardcoded conservatively.
 
 const MONTHLY_BUDGET_AUD = parseFloat(env.DEEPSEEK_MONTHLY_BUDGET_AUD || '0')
-const USD_TO_AUD = 1.55
+const USD_TO_AUD = parseFloat(env.USD_TO_AUD || '1.55')
 
 let _budgetCache = null  // { month: 'YYYY-MM', spentUSD: number, checkedAt: number }
 
@@ -97,9 +97,9 @@ async function callDeepSeek(messages, {
   if (!skipRetrieval && contextQuery && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {
     try {
       const ctx = await kg.getContext(contextQuery, {
-        maxSeeds: 5,
-        maxDepth: 3,
-        minSimilarity: 0.6,
+        maxSeeds: 15,
+        maxDepth: 5,
+        minSimilarity: 0.4,
       })
       if (ctx.summary) {
         kgContext = ctx.summary
@@ -184,11 +184,11 @@ function parseJSON(content) {
 }
 
 async function categorize({ description, amount, type, date }) {
-  const prompt = `Categorize this transaction for Ecodia Pty Ltd (Australian software dev company).
+  const prompt = `Categorize this transaction for ${env.OWNER_CONTEXT}.
 
 ${description} — AUD ${Math.abs(amount)} (${type}) on ${date}
 
-Categories: Software Subscriptions, Cloud Infrastructure, Contractor Payments, Office/Admin, Marketing, Travel, Meals/Entertainment, Legal/Accounting, Income - Software Dev, Income - Consulting, Tax, Superannuation, Bank Fees, Other
+Decide the most accurate category, Xero account code if you know it, and your confidence. Use whatever category name best describes this — don't constrain yourself to a predefined list.
 
 Respond as JSON:
 {
@@ -209,17 +209,17 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
   const hasExternalContext = !!kgContext
 
   const contextBlock = kgContext
-    ? `\n--- KNOWLEDGE GRAPH CONTEXT ---\nThe following is everything the system knows about the people, organisations, and topics related to this email:\n${kgContext}\n--- END CONTEXT ---\n`
+    ? `\n--- KNOWLEDGE GRAPH ---\n${kgContext}\n--- END ---\n`
     : clientContext
       ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})`
       : 'Unknown sender'
 
   const pendingBlock = pendingActionsContext
-    ? `\n--- ALREADY PENDING IN ACTION QUEUE ---\nThe following items from this sender are ALREADY queued and waiting for Tate's attention:\n${pendingActionsContext}\n\nIMPORTANT: If this email is about the same topic as an already-pending item, do NOT surface it again. Set surfaceToHuman to false and suggestedAction to "archive". The action queue will consolidate the signal automatically. Only surface if this email introduces genuinely NEW information or a different topic.\n--- END PENDING ---\n`
+    ? `\n--- ALREADY PENDING ---\n${pendingActionsContext}\n--- END ---\n`
     : ''
 
   const channelsBlock = activeChannelsContext
-    ? `\n--- ACTIVE CONVERSATIONS ON OTHER CHANNELS ---\nTate is already in contact with this person on other platforms. This conversation may have made this email irrelevant or already resolved:\n${activeChannelsContext}\n--- END CHANNELS ---\n`
+    ? `\n--- OTHER CHANNELS ---\n${activeChannelsContext}\n--- END ---\n`
     : ''
 
   const now = new Date()
@@ -233,32 +233,32 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
       })()
     : null
 
-  const prompt = `You are the autonomous email handler for Ecodia Pty Ltd (Tate Donohoe, 21, software dev, Australia). You handle emails — archive noise, reply when you can, create tasks when something needs doing, surface to Tate only when his personal judgment is genuinely needed.
+  const prompt = `Email for ${env.OWNER_CONTEXT}.
 
 Now: ${now.toISOString()}
-Inbox: ${inbox || 'code@ecodia.au'}
+Inbox: ${inbox || env.GOOGLE_PRIMARY_ACCOUNT}
 From: ${from}
 Subject: ${subject}${emailAge ? `\nReceived: ${emailAge}` : ''}
 ${contextBlock}${pendingBlock}${channelsBlock}
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 
-Decide what to do. If you can handle it, handle it. If you write a draftReply, it will be sent automatically — write it as Tate would (direct, friendly, signs off as "Tate"). Confidence below 0.7 auto-surfaces to Tate regardless of your surfaceToHuman choice.
+Read this email and decide what to do. You have full autonomy — reply, archive, create a task, snooze, ignore, or anything else appropriate. Draft a reply if warranted; leave draftReply null if not. Decide if this needs human attention and why.
 
 Respond as JSON:
 {
-  "priority": "urgent|high|normal|low|spam",
-  "summary": "what this email is and what it wants",
-  "autonomousAction": "send_reply|archive|create_task|snooze|ignore",
-  "reasoning": "why this action",
-  "draftReply": "complete reply if sending, null otherwise",
+  "priority": "...",
+  "summary": "...",
+  "autonomousAction": "...",
+  "reasoning": "...",
+  "draftReply": "...",
   "shouldCreateTask": true/false,
-  "taskTitle": "if creating task, null otherwise",
-  "taskDescription": "if creating task, null otherwise",
-  "taskPriority": "low|medium|high|urgent",
+  "taskTitle": "...",
+  "taskDescription": "...",
+  "taskPriority": "...",
   "confidence": 0.0-1.0,
   "surfaceToHuman": true/false,
-  "surfaceReason": "why Tate's judgment is needed, null otherwise"
+  "surfaceReason": "..."
 }`
 
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {
@@ -269,13 +269,11 @@ Respond as JSON:
 }
 
 async function draftEmailReply(thread) {
-  const prompt = `Draft a reply to this email for Tate Donohoe, founder of Ecodia Pty Ltd (software development company based in Australia).
+  const prompt = `Draft a reply for ${env.OWNER_CONTEXT}.
 
 From: ${thread.from_name || thread.from_email}
 Subject: ${thread.subject}
-Body: ${(thread.full_body || thread.snippet || '').slice(0, 3000)}
-
-Write a clear, natural reply. Tate's style: direct, friendly, no corporate fluff. Keep it concise. Sign off as just "Tate".`
+Body: ${(thread.full_body || thread.snippet || '').slice(0, 3000)}`
 
   return callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'gmail',
@@ -288,12 +286,10 @@ async function draftLinkedInReply(dm) {
   const messages = dm.messages || []
   const lastMessages = messages.slice(-5)
 
-  const prompt = `Draft a LinkedIn DM reply for Tate Donohoe, founder of Ecodia (software development).
+  const prompt = `LinkedIn DM reply for ${env.OWNER_CONTEXT}.
 
 Conversation with ${dm.participant_name}:
-${lastMessages.map(m => `${m.sender}: ${m.text}`).join('\n')}
-
-Write a brief, friendly, professional reply. Keep it conversational for LinkedIn.`
+${lastMessages.map(m => `${m.sender}: ${m.text}`).join('\n')}`
 
   return callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'linkedin',

@@ -22,9 +22,9 @@ router.get('/context', async (req, res, next) => {
     if (!q) return res.status(400).json({ error: 'Missing query parameter q' })
 
     const context = await kg.getContext(q, {
-      maxSeeds: parseInt(seeds) || 5,
-      maxDepth: parseInt(depth) || 3,
-      minSimilarity: parseFloat(similarity) || 0.7,
+      maxSeeds: parseInt(seeds) || 15,
+      maxDepth: parseInt(depth) || 5,
+      minSimilarity: parseFloat(similarity) || 0.4,
     })
     res.json(context)
   } catch (err) {

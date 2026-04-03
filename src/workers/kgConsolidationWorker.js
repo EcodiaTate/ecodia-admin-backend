@@ -1,29 +1,55 @@
-const cron = require('node-cron')
 const logger = require('../config/logger')
 const env = require('../config/env')
 const { recordHeartbeat } = require('./heartbeat')
 
 if (!env.NEO4J_URI || !env.DEEPSEEK_API_KEY) {
   logger.info('KG consolidation worker skipped — NEO4J_URI or DEEPSEEK_API_KEY not set')
-  // module-level return is not valid — use a flag instead
   module.exports = {}
 } else {
   const consolidation = require('../services/kgConsolidationService')
 
-  logger.info('KG consolidation worker started')
+  logger.info('KG consolidation worker started — adaptive loop, no fixed schedule')
 
-  // Track when the Director last ran so the dedup cron can skip if unnecessary
+  // ─── Adaptive state ────────────────────────────────────────────────
+  let running = true
+  let inCycle = false
+  let cycleTimer = null
   let lastDirectorRunAt = null
 
-  // ─── ConsolidationDirector: every 6 hours ───────────────────────────
-  // The Director reads the graph state and AI-selects which phases to run.
-  // This is NOT a fixed-schedule "run everything at 3am" — it runs regularly
-  // and lets the Director decide what (if anything) needs doing.
-  // The AutonomousMaintenanceMind can also trigger consolidation via the
-  // event bus when it detects patterns worth synthesising.
-  cron.schedule('0 */6 * * *', async () => {
-    logger.info('KG consolidation: Director cycle triggered')
+  // ─── Adaptive loop ─────────────────────────────────────────────────
+  // Instead of fixed cron times, the worker asks the graph how stale it is
+  // and decides the next interval from that signal. Heavy ingestion = run sooner.
+  // Graph stable = wait. The graph tells us when it needs maintenance.
+
+  async function scheduleNext() {
+    if (!running) return
+    let delayMs
+
     try {
+      const staleCount = await consolidation.countStaleNodes?.() ?? 0
+      const dedupBacklog = await consolidation.countDedupCandidates?.() ?? 0
+
+      if (staleCount > 500 || dedupBacklog > 100) {
+        delayMs = 30 * 60 * 1000       // 30 min — high pressure
+      } else if (staleCount > 100 || dedupBacklog > 20) {
+        delayMs = 2 * 60 * 60 * 1000  // 2 hr — moderate
+      } else {
+        delayMs = 6 * 60 * 60 * 1000  // 6 hr — low pressure
+      }
+    } catch {
+      delayMs = 3 * 60 * 60 * 1000    // 3 hr fallback if health check fails
+    }
+
+    cycleTimer = setTimeout(runCycle, delayMs)
+    logger.debug(`KG consolidation: next cycle in ${Math.round(delayMs / 60000)}min`)
+  }
+
+  async function runCycle() {
+    if (inCycle || !running) return
+    inCycle = true
+
+    try {
+      // Director reads the graph and AI-selects which phases to run
       const results = await consolidation.runConsolidationPipeline()
       lastDirectorRunAt = Date.now()
       logger.info('KG consolidation: Director cycle complete', {
@@ -34,29 +60,33 @@ if (!env.NEO4J_URI || !env.DEEPSEEK_API_KEY) {
     } catch (err) {
       logger.error('KG consolidation: Director cycle failed', { error: err.message })
       await recordHeartbeat('kg_consolidation', 'error', err.message)
+    } finally {
+      inCycle = false
+      scheduleNext()
     }
-  })
+  }
 
-  // ─── Lightweight dedup: runs every 2 hours ───────────────────────────
-  // Catches duplicates from high-volume ingestion before they accumulate.
-  // Skip if the Director ran in the last 2 hours — it already ran dedup
-  // when the graph state warranted it.
-  cron.schedule('0 */2 * * *', async () => {
-    const twoHoursMs = 2 * 60 * 60 * 1000
-    if (lastDirectorRunAt && Date.now() - lastDirectorRunAt < twoHoursMs) {
-      logger.debug('KG consolidation: 2h dedup skipped — Director ran recently')
-      return
-    }
-    try {
-      const merged = await consolidation.deduplicateNodes()
-      if (merged.length > 0) {
-        logger.info(`KG consolidation: 2h dedup merged ${merged.length} nodes`)
-        await recordHeartbeat('kg_consolidation', 'active')
+  // ─── Event-triggered consolidation ─────────────────────────────────
+  // High-volume ingestion events trigger the Director immediately rather
+  // than waiting for the next scheduled window.
+  try {
+    const eventBus = require('../services/internalEventBusService')
+    eventBus.on('kg:ingestion_spike', () => {
+      if (!inCycle && running) {
+        logger.info('KG consolidation: ingestion spike detected — triggering early cycle')
+        if (cycleTimer) clearTimeout(cycleTimer)
+        runCycle()
       }
-    } catch (err) {
-      logger.error('KG consolidation: 2h dedup failed', { error: err.message })
-    }
-  })
+    })
+  } catch {}
 
-  module.exports = { consolidation }
+  // Start first cycle after a short boot delay
+  cycleTimer = setTimeout(runCycle, 5 * 60 * 1000)
+
+  function stop() {
+    running = false
+    if (cycleTimer) clearTimeout(cycleTimer)
+  }
+
+  module.exports = { consolidation, stop }
 }

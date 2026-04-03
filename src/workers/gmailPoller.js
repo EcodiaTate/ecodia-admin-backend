@@ -1,14 +1,20 @@
 require('../config/env')
-const cron = require('node-cron')
 const logger = require('../config/logger')
 const gmailService = require('../services/gmailService')
 const { createNotification } = require('../db/queries/transactions')
 const { recordHeartbeat } = require('./heartbeat')
 
-logger.info('Gmail poller worker started')
+// ═══════════════════════════════════════════════════════════════════════
+// GMAIL POLLER — On-Demand
+//
+// No fixed schedule. Called by autonomousMaintenanceWorker when the AI
+// decides a poll is warranted — based on system pressure, time since
+// last poll, and any pending signals.
+//
+// Exported as a callable so other workers can trigger it too.
+// ═══════════════════════════════════════════════════════════════════════
 
-// Poll inbox every 3 minutes
-cron.schedule('*/3 * * * *', async () => {
+async function pollOnce() {
   try {
     await gmailService.pollInbox()
     await recordHeartbeat('gmail', 'active')
@@ -22,6 +28,8 @@ cron.schedule('*/3 * * * *', async () => {
       metadata: { error: e.message, worker: 'gmailPoller' },
     }).catch(notifErr => logger.error('Failed to create gmail poller notification', { error: notifErr.message }))
   }
-})
+}
 
-module.exports = {}
+logger.info('Gmail poller registered (on-demand, no fixed schedule)')
+
+module.exports = { pollOnce }

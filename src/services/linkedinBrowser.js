@@ -15,19 +15,21 @@ const VIEWPORT = { width: 1920, height: 1080 }
 const TIMEZONE = 'Australia/Brisbane'
 const LOCALE = 'en-AU'
 
-// Rate limiting
-const MAX_SESSIONS_PER_DAY = 5
-const MAX_SESSION_DURATION_MS = 15 * 60 * 1000 // 15 minutes
-const MIN_COOLDOWN_MS = 30 * 60 * 1000 // 30 minutes between sessions
-const MAX_NAVIGATIONS_PER_SESSION = 30
+const env = require('../config/env')
+
+// Rate limiting — all caps default to 0 (unlimited). Set env vars to restrict.
+const MAX_SESSIONS_PER_DAY = parseInt(env.LINKEDIN_MAX_SESSIONS_PER_DAY || '0', 10) || Infinity
+const MAX_SESSION_DURATION_MS = parseInt(env.LINKEDIN_MAX_SESSION_DURATION_MS || '0', 10) || Infinity
+const MIN_COOLDOWN_MS = parseInt(env.LINKEDIN_MIN_COOLDOWN_MS || '0', 10) || 0
+const MAX_NAVIGATIONS_PER_SESSION = parseInt(env.LINKEDIN_MAX_NAVIGATIONS_PER_SESSION || '0', 10) || Infinity
 
 const DAILY_BUDGETS = {
-  navigations: 80,
-  profile_views: 15,
-  dm_reads: 30,
-  messages_sent: 10,
-  connection_accepts: 20,
-  posts_published: 3,
+  navigations: parseInt(env.LINKEDIN_BUDGET_NAVIGATIONS || '0', 10) || Infinity,
+  profile_views: parseInt(env.LINKEDIN_BUDGET_PROFILE_VIEWS || '0', 10) || Infinity,
+  dm_reads: parseInt(env.LINKEDIN_BUDGET_DM_READS || '0', 10) || Infinity,
+  messages_sent: parseInt(env.LINKEDIN_BUDGET_MESSAGES_SENT || '0', 10) || Infinity,
+  connection_accepts: parseInt(env.LINKEDIN_BUDGET_CONNECTION_ACCEPTS || '0', 10) || Infinity,
+  posts_published: parseInt(env.LINKEDIN_BUDGET_POSTS_PUBLISHED || '0', 10) || Infinity,
 }
 
 // CAPTCHA/challenge URL patterns

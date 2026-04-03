@@ -47,14 +47,12 @@ async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
       const { callDeepSeek } = require('./deepseekService')
       const response = await callDeepSeek([{
         role: 'user',
-        content: `Given this task description, which codebase should it target? If no specific codebase is mentioned or implied, respond with "none".
+        content: `Which codebase does this task target? Respond with the exact name or "none".
 
 Available codebases:
 ${codebaseList}
 
-Task: ${prompt.slice(0, 500)}
-
-Respond with ONLY the exact codebase name (e.g. "wattleos") or "none". Nothing else.`,
+Task: ${prompt.slice(0, 500)}`,
       }], { module: 'factory_dispatch', skipRetrieval: true })
 
       const resolved = response.trim().toLowerCase().replace(/['"]/g, '')

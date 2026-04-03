@@ -64,12 +64,17 @@ CC sessions flow through: execute → DeepSeek review → validate (test/lint/ty
 | Building a feature for one integration | Build it for all integrations or build it generically |
 | Catching errors and swallowing them silently | Log, notify, enqueue a follow-up action, learn |
 | Writing rigid validation that rejects valid input | Validate at boundaries, trust internal data |
-| Polling on fixed intervals when events exist | Use webhooks/streams where available, poll as fallback |
+| Polling on fixed intervals | Expose poll functions, let `autonomousMaintenanceWorker` call them on AI decision |
+| Adding cron schedules to any worker | All scheduling decisions belong to the AI loop, not the clock |
 | Writing LLM prompts that cage the AI | See the Prompting Philosophy section below |
 | Adding a `case` to `cortexService.executeAction()` | Add a capability to `src/capabilities/` — registry handles dispatch |
 | Adding a `case` to `actionQueueService.performAction()` | Same — registry only |
-| Adding a cron schedule to `factoryScheduleWorker` | That file is replaced by `autonomousMaintenanceWorker.js` — the AI decides when to run maintenance |
+| Recreating `factoryScheduleWorker.js` | That file was deleted — `autonomousMaintenanceWorker.js` replaced it. The AI decides maintenance, not cron schedules |
 | Hardcoding what phases KG consolidation runs | `runConsolidationPipeline()` is the ConsolidationDirector — it reads the graph and decides |
+| Capping the number of AI decisions returned in a cycle | Let the AI return all decisions it thinks are needed — no `.slice()` limit |
+| Hardcoding urgency/importance thresholds in memoryBridgeService | Use `MEMORY_SYNC_URGENT_THRESHOLD`, `MEMORY_SYNC_IMMEDIATE_THRESHOLD`, `MEMORY_SYNC_DEBOUNCE_MS` env vars |
+| Hardcoding deployment health check retries/timeouts | Use `HEALTH_CHECK_RETRIES`, `HEALTH_CHECK_TIMEOUT_MS`, `HEALTH_CHECK_INTERVAL_MS` env vars |
+| Hardcoding organism vital-signs failure threshold | Use `ORGANISM_MAX_CONSECUTIVE_FAILURES`, `ORGANISM_HEALTH_CHECK_INTERVAL_MS` env vars |
 
 ---
 
@@ -144,11 +149,14 @@ Symbridge → Organism (shared survival, shared memory, shared metabolism)
 - `codebaseIntelligenceService.js` — Code chunking, embedding, semantic search
 
 ### Workers
-- Gmail (3 min), Calendar (5 min), Drive (10/15/20 min), Vercel (5 min), Meta (15 min)
-- Codebase index (10 min), KG embedding (15 min), KG consolidation (director-guided, not nightly fixed)
-- **`autonomousMaintenanceWorker.js`** — replaces factoryScheduleWorker; no crons; AI loop reads system state and decides what maintenance to dispatch
+- **All integration polling is on-demand, not cron-scheduled.**
+  - `gmailPoller.js`, `workspacePoller.js` expose `pollOnce()`/`pollDrive()`/`pollVercel()`/`pollMeta()` etc.
+  - `autonomousMaintenanceWorker.js` calls them when the AI decides a sync is needed — based on staleness, pressure, and signals.
+  - The AI sees `integrationStaleness` in the system brief and can request `type: "poll"` decisions.
+- **`autonomousMaintenanceWorker.js`** — the single AI loop. No crons. Reads full system state, decides what to do (poll integrations, dispatch Factory sessions, expire queue). Interval adapts to pressure.
+- Calendar, Codebase index, KG embedding, KG consolidation — own separate workers/PM2 processes
 - Symbridge (Redis consumer, Neo4j poller, vitals, memory bridge, metabolism)
-- Action queue expiry (hourly)
+- Action queue expiry — called by autonomousMaintenanceWorker on AI decision, not hourly cron
 
 ### Database
 - PostgreSQL (Supabase) with pgvector for code embeddings

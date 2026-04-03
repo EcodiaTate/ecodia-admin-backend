@@ -21,8 +21,8 @@ let organismHealthState = {
   lastResponseMs: null,
 }
 
-const HEALTH_CHECK_INTERVAL = 15_000 // 15s
-const MAX_CONSECUTIVE_FAILURES = 3
+const HEALTH_CHECK_INTERVAL = Number(env.ORGANISM_HEALTH_CHECK_INTERVAL_MS) || 15_000
+const MAX_CONSECUTIVE_FAILURES = Number(env.ORGANISM_MAX_CONSECUTIVE_FAILURES) || 3
 
 // ─── Self Health ────────────────────────────────────────────────────
 

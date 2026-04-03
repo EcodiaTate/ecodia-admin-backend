@@ -1,18 +1,37 @@
 require('../config/env')
-const cron = require('node-cron')
 const logger = require('../config/logger')
 const xeroService = require('../services/xeroService')
 const { createNotification } = require('../db/queries/transactions')
 const { recordHeartbeat } = require('./heartbeat')
 
-logger.info('Finance poller worker started')
+// ═══════════════════════════════════════════════════════════════════════
+// FINANCE POLLER — Adaptive loop
+//
+// Transaction sync adapts to activity:
+//   - Active day (new transactions found) → poll every 1 hour
+//   - Quiet period → poll every 4 hours
+//
+// Token heartbeat: every 6 hours (Xero tokens expire after 60 days of
+// non-use; 6-hour keep-alive is safe and responsive).
+// ═══════════════════════════════════════════════════════════════════════
 
-// Poll transactions every 4 hours
-cron.schedule('0 */4 * * *', async () => {
+logger.info('Finance poller worker started — adaptive loop')
+
+let running = true
+let pollTimer = null
+let heartbeatTimer = null
+
+async function poll() {
+  let nextDelayMs = 4 * 60 * 60_000  // default 4 hours
+
   try {
-    await xeroService.pollTransactions()
+    const result = await xeroService.pollTransactions()
     logger.info('Finance poll complete')
     await recordHeartbeat('finance', 'active')
+
+    // If new transactions found, check again in 1 hour
+    const newTx = result?.newTransactions ?? result?.count ?? 0
+    if (newTx > 0) nextDelayMs = 60 * 60_000
   } catch (e) {
     logger.error('Finance poller failed', { error: e.message, stack: e.stack })
     await recordHeartbeat('finance', 'error', e.message)
@@ -22,11 +41,13 @@ cron.schedule('0 */4 * * *', async () => {
       link: '/finance',
       metadata: { error: e.message, worker: 'financePoller' },
     }).catch(notifErr => logger.error('Failed to create finance poller notification', { error: notifErr.message }))
+    nextDelayMs = 2 * 60 * 60_000  // retry in 2h on error
   }
-})
 
-// Daily token heartbeat — Xero refresh tokens expire if unused for 60 days
-cron.schedule('0 9 * * *', async () => {
+  scheduleNext(nextDelayMs)
+}
+
+async function heartbeat() {
   try {
     await xeroService.getValidAccessToken()
     logger.info('Xero token heartbeat OK')
@@ -39,6 +60,23 @@ cron.schedule('0 9 * * *', async () => {
       metadata: { error: e.message },
     }).catch(notifErr => logger.error('Failed to create heartbeat notification', { error: notifErr.message }))
   }
-})
+  if (running) heartbeatTimer = setTimeout(heartbeat, 6 * 60 * 60_000)
+}
 
-module.exports = {}
+function scheduleNext(delayMs) {
+  if (!running) return
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = setTimeout(poll, delayMs)
+}
+
+// Start first poll after 30s boot delay, heartbeat after 1 min
+pollTimer = setTimeout(poll, 30_000)
+heartbeatTimer = setTimeout(heartbeat, 60_000)
+
+module.exports = {
+  stop() {
+    running = false
+    if (pollTimer) clearTimeout(pollTimer)
+    if (heartbeatTimer) clearTimeout(heartbeatTimer)
+  },
+}

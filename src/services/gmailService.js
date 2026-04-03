@@ -8,8 +8,10 @@ const { findClientByEmail } = require('../db/queries/clients')
 const { createTask } = require('../db/queries/tasks')
 const kgHooks = require('./kgIngestionHooks')
 
-const INBOXES = ['code@ecodia.au', 'tate@ecodia.au']
-const MAX_TRIAGE_ATTEMPTS = 5
+const INBOXES = env.GMAIL_INBOXES
+  ? env.GMAIL_INBOXES.split(',').map(s => s.trim()).filter(Boolean)
+  : [env.GOOGLE_PRIMARY_ACCOUNT]
+const MAX_TRIAGE_ATTEMPTS = parseInt(env.GMAIL_MAX_TRIAGE_ATTEMPTS || '0', 10) || Infinity
 
 // ─── Gmail Client ────────────────────────────────────────────────────────────
 
@@ -199,7 +201,7 @@ async function triagePendingEmails() {
         const kgService = require('./knowledgeGraphService')
         const ctx = await kgService.getContext(
           `${thread.from_name || thread.from_email} ${thread.subject}`,
-          { maxSeeds: 3, maxDepth: 3, minSimilarity: 0.6 }
+          { maxSeeds: 15, maxDepth: 5, minSimilarity: 0.4 }
         )
         if (ctx.summary) kgContext = ctx.summary
       } catch { /* KG not available — proceed without */ }
@@ -331,8 +333,8 @@ async function autoAct(thread, triage) {
   const actionQueue = require('./actionQueueService')
 
   try {
-    // ── Safety net: low confidence overrides to surface regardless ──
-    const shouldSurface = triage.surfaceToHuman || confidence < 0.7
+    // LLM decides if human should review — no confidence threshold override
+    const shouldSurface = triage.surfaceToHuman
 
     // ── SURFACE PATH: AI can't handle this, or isn't confident enough ──
     if (shouldSurface) {
@@ -360,7 +362,7 @@ async function autoAct(thread, triage) {
           email: thread.from_email,
           inbox: thread.inbox,
           confidence,
-          surfacedBecause: confidence < 0.7 ? 'low_confidence' : 'ai_requested',
+          surfacedBecause: 'ai_requested',
         },
         priority,
       }).catch(() => {})

@@ -25,10 +25,6 @@ const env = require('../config/env')
 
 const { execFileSync } = require('child_process')
 
-const BASE_AUTO_DEPLOY_THRESHOLD = parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.7')
-const SELF_MOD_THRESHOLD = parseFloat(env.FACTORY_SELF_MODIFY_THRESHOLD || '0.85')
-const CONFIDENCE_ESCALATE_THRESHOLD = parseFloat(env.FACTORY_ESCALATE_THRESHOLD || '0.4')
-
 // ─── Clean working directory after rejected/failed sessions ─────────
 // CC edits files in-place on the VPS. If oversight rejects, those edits
 // sit uncommitted and cause merge conflicts when the repo is pulled.
@@ -41,24 +37,6 @@ function cleanWorkingDir(repoPath) {
   } catch (err) {
     logger.warn(`Failed to clean working directory`, { repoPath, error: err.message })
   }
-}
-
-// ─── Dynamic Threshold Calculation ──────────────────────────────────
-
-function getAutoDeployThreshold(session) {
-  const metabolismBridge = require('./metabolismBridgeService')
-  const pressure = metabolismBridge.getPressure()
-
-  // Self-modification requires higher confidence
-  if (session.self_modification) return SELF_MOD_THRESHOLD
-
-  // Pressure-adjusted: continuous gradient
-  // At pressure=0.0 → threshold=0.6 (experimental freedom)
-  // At pressure=0.5 → threshold=0.7 + 0.075 = 0.775
-  // At pressure=1.0 → threshold=0.7 + 0.15 = 0.85
-  // Clamped to [0.6, 0.9] range
-  if (pressure < 0.2) return Math.max(0.6, BASE_AUTO_DEPLOY_THRESHOLD - 0.1)
-  return Math.min(0.9, BASE_AUTO_DEPLOY_THRESHOLD + (pressure * 0.15))
 }
 
 // ─── Full Pipeline Orchestrator ─────────────────────────────────────
@@ -96,7 +74,6 @@ async function runPostSessionPipeline(sessionId) {
     return
   }
 
-  const threshold = getAutoDeployThreshold(session)
   const isSelfMod = !!session.self_modification
 
   // Mark pipeline as entering oversight review
@@ -111,9 +88,12 @@ async function runPostSessionPipeline(sessionId) {
   const pressure = metabolismBridge.getPressure()
   let review = null
 
-  if (!isSelfMod && pressure > 0.8) {
-    // High pressure: start review async (for KG learning) but don't wait for it
-    logger.info(`Factory oversight: high pressure (${pressure.toFixed(2)}) — running review async, not gating deploy`, { sessionId })
+  const reviewPressureGate = parseFloat(env.FACTORY_REVIEW_PRESSURE_GATE || '0')
+  const asyncReviewEnabled = !isSelfMod && reviewPressureGate > 0 && pressure > reviewPressureGate
+
+  if (asyncReviewEnabled) {
+    // Pressure gate configured: start review async (for KG learning) but don't wait for it
+    logger.info(`Factory oversight: pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate} — running review async, not gating deploy`, { sessionId })
     reviewChanges(session, filesChanged).then(asyncReview => {
       if (asyncReview && session.codebase_id) {
         extractLearningPattern(session, asyncReview.approved ? 'success' : 'rejected', {
@@ -123,7 +103,7 @@ async function runPostSessionPipeline(sessionId) {
         }).catch(() => {})
       }
     }).catch(() => {})
-    review = { approved: true, notes: 'Review deferred (metabolic pressure > 0.8)', confidence: 0, deferred: true }
+    review = { approved: true, notes: `Review deferred (metabolic pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate})`, confidence: 0, deferred: true }
   } else {
     review = await reviewChanges(session, filesChanged)
   }
@@ -164,23 +144,21 @@ async function runPostSessionPipeline(sessionId) {
     return
   }
 
-  // Boost confidence with DeepSeek review score when validation couldn't fully run.
-  // Boost is proportional to (reviewConfidence - 0.7) — only activates when review is
-  // meaningfully confident, and the boost magnitude scales with that confidence.
-  // Capped at 0.20 to prevent review alone from carrying a session over the line.
-  if (reviewApproved && reviewConfidence > 0.7 && confidence < threshold) {
-    const reviewStrength = (reviewConfidence - 0.7) / 0.3  // 0.0–1.0 range
-    const boost = Math.min(0.20, reviewStrength * 0.20)
+  // Blend validation signal with review confidence — let the combined signal speak for itself.
+  // No artificial boosts or floors. If review is strong, it lifts confidence naturally.
+  if (reviewApproved && reviewConfidence > confidence) {
     const before = confidence
-    confidence = Math.min(confidence + boost, 0.95)
-    logger.info(`Factory oversight: boosted confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (DeepSeek review: ${reviewConfidence.toFixed(2)}, boost: ${boost.toFixed(2)})`, { sessionId })
+    confidence = (confidence + reviewConfidence) / 2
+    logger.info(`Factory oversight: blended confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (validation: ${before.toFixed(2)}, review: ${reviewConfidence.toFixed(2)})`, { sessionId })
     await db`UPDATE cc_sessions SET confidence_score = ${confidence} WHERE id = ${sessionId}`
   }
 
-  // Step 3: Deploy decision
-  if (confidence >= threshold && reviewApproved) {
+  // Step 3: Deploy decision — LLM review drives this, not hardcoded thresholds.
+  // reviewApproved = DeepSeek said yes. confidence = validation signal.
+  // Both matter. Neither has a magic number.
+  if (reviewApproved && confidence > 0) {
     // Auto-deploy
-    logger.info(`Factory auto-deploying session ${sessionId} (confidence: ${confidence.toFixed(2)}, threshold: ${threshold.toFixed(2)})`)
+    logger.info(`Factory auto-deploying session ${sessionId} (confidence: ${confidence.toFixed(2)})`)
     try {
       const deploymentService = require('./deploymentService')
       const deployResult = await deploymentService.deploySession(sessionId)
@@ -247,31 +225,10 @@ async function runPostSessionPipeline(sessionId) {
         confidence, error: err.message,
       })
     }
-  } else if (confidence >= CONFIDENCE_ESCALATE_THRESHOLD) {
-    await escalateToHuman(session, confidence, review, filesChanged)
   } else {
-    // Too low confidence — reject
-    logger.warn(`Factory rejecting session ${sessionId} (confidence: ${confidence.toFixed(2)}, threshold: ${threshold.toFixed(2)})`)
-    await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${sessionId}`
-    cleanWorkingDir(session.repo_path)
-
-    await reportToTriggerSource(session, {
-      success: false,
-      stage: 'validation',
-      confidence,
-      error: 'Validation confidence too low for deployment',
-      validationDetails: {
-        testPassed: validation?.testPassed,
-        lintPassed: validation?.lintPassed,
-        typecheckPassed: validation?.typecheckPassed,
-      },
-    })
-
-    await recordOutcome(session, 'rejected', { confidence, reason: 'low_confidence' })
-    await trackValidationOutcome(sessionId, 'failure')
-    await generateFollowUp(session, 'low_confidence', `Confidence ${confidence} below threshold ${threshold}`)
-
-    emitEvent('factory:session_complete', { sessionId, outcome: 'rejected', confidence })
+    // Review said no — escalate to human rather than silently rejecting.
+    // The LLM saw something we shouldn't override with a discard.
+    await escalateToHuman(session, confidence, review, filesChanged)
   }
 }
 
@@ -355,8 +312,8 @@ async function reviewChanges(session, filesChanged) {
     try {
       const learnings = session.codebase_id ? await db`
         SELECT pattern_type, pattern_description FROM factory_learnings
-        WHERE codebase_id = ${session.codebase_id} AND confidence > 0.5
-        ORDER BY confidence DESC LIMIT 5
+        WHERE codebase_id = ${session.codebase_id}
+        ORDER BY confidence DESC LIMIT 10
       ` : []
       if (learnings.length > 0) {
         learningsContext = '\n\nPrevious learnings for this codebase:\n' +
@@ -720,24 +677,13 @@ try {
     _oversightListenerAttached = true
     eventBus.on('kg:pattern_discovered', async (payload) => {
       try {
-        const metabolismBridge = require('./metabolismBridgeService')
-        if (metabolismBridge.getPressure() > 0.8) return // only block at survival pressure
-
         const count = payload.count || 0
         const source = payload.source || 'unknown'
 
-        // Only act on significant pattern batches from creative phases
-        if (count < 2 || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
+        // Act on any pattern batch from creative phases — no count floor, no rate limit
+        if (!count || !['free_association', 'abstraction', 'causal_threading'].includes(source)) return
 
-        logger.info(`Factory oversight: ${count} patterns discovered (${source}) — evaluating for proactive session`)
-
-        // Rate limit: max 2 pattern-reactive sessions per day
-        const [recentPatternSessions] = await db`
-          SELECT count(*)::int AS count
-          FROM cc_sessions
-          WHERE trigger_source = 'kg_insight' AND started_at > now() - interval '24 hours'
-        `
-        if (recentPatternSessions.count >= 2) return
+        logger.info(`Factory oversight: ${count} patterns discovered (${source}) — dispatching proactive session`)
 
         const triggers = require('./factoryTriggerService')
         await triggers.dispatchFromKGInsight({

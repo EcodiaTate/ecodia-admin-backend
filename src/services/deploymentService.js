@@ -1,6 +1,7 @@
 const { execFileSync } = require('child_process')
 const axios = require('axios')
 const db = require('../config/db')
+const env = require('../config/env')
 const logger = require('../config/logger')
 const { broadcastToSession } = require('../websocket/wsManager')
 const kgHooks = require('./kgIngestionHooks')
@@ -12,9 +13,9 @@ const kgHooks = require('./kgIngestionHooks')
 // Full audit trail in KG and notifications table.
 // ═══════════════════════════════════════════════════════════════════════
 
-const HEALTH_CHECK_TIMEOUT = 60_000 // 60s
-const HEALTH_CHECK_RETRIES = 3
-const HEALTH_CHECK_INTERVAL = 10_000 // 10s between retries
+const HEALTH_CHECK_TIMEOUT = Number(env.HEALTH_CHECK_TIMEOUT_MS) || 60_000
+const HEALTH_CHECK_RETRIES = Number(env.HEALTH_CHECK_RETRIES) || 3
+const HEALTH_CHECK_INTERVAL = Number(env.HEALTH_CHECK_INTERVAL_MS) || 10_000
 
 function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }).trim()

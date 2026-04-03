@@ -223,7 +223,7 @@ async function embedStaleNodes(batchSize = 100) {
 
 // ─── Trace-Based Retrieval ───────────────────────────────────────────
 
-async function getContext(query, { maxSeeds = 5, maxDepth = 3, minSimilarity = 0.7 } = {}) {
+async function getContext(query, { maxSeeds = 15, maxDepth = 5, minSimilarity = 0.4 } = {}) {
   if (!env.NEO4J_URI) return { traces: [], summary: '' }
 
   const seedLimit = parseInt(maxSeeds, 10) || 5
