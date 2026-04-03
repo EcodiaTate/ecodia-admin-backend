@@ -4,6 +4,9 @@ const logger = require('../config/logger')
 const db = require('../config/db')
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
+const DEEPSEEK_TIMEOUT_MS = parseInt(env.DEEPSEEK_TIMEOUT_MS || '120000') || 120000
+const DEEPSEEK_MAX_RETRIES = parseInt(env.DEEPSEEK_MAX_RETRIES || '3') || 3
+const DEEPSEEK_RETRY_BASE_MS = parseInt(env.DEEPSEEK_RETRY_BASE_MS || '1000') || 1000
 
 // ─── Budget circuit breaker ───────────────────────────────────────────
 // DEEPSEEK_MONTHLY_BUDGET_AUD in env (0 = unlimited, which is the default).
@@ -11,10 +14,11 @@ const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
 // Cost formula: deepseek-chat prompt=$0.14/1M tokens, completion=$0.28/1M tokens.
 // AUD conversion: ~1.55× USD at time of writing — hardcoded conservatively.
 
-const MONTHLY_BUDGET_AUD = parseFloat(env.DEEPSEEK_MONTHLY_BUDGET_AUD || '0')
-const USD_TO_AUD = parseFloat(env.USD_TO_AUD || '1.55')
+const MONTHLY_BUDGET_AUD = parseFloat(env.DEEPSEEK_MONTHLY_BUDGET_AUD || '0') || 0
+const USD_TO_AUD = parseFloat(env.USD_TO_AUD || '1.55') || 1.55
 
 let _budgetCache = null  // { month: 'YYYY-MM', spentUSD: number, checkedAt: number }
+let _budgetCheckInFlight = null  // dedup concurrent budget checks
 
 async function checkBudget() {
   if (MONTHLY_BUDGET_AUD <= 0) return  // unlimited
