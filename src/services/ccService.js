@@ -25,7 +25,8 @@ const activeSessions = new Map()
 
 const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
 const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = unlimited (flag omitted)
-const SESSION_TIMEOUT_MS = parseInt(env.CC_TIMEOUT_MINUTES || '120', 10) * 60 * 1000
+const _timeoutMinutes = parseInt(env.CC_TIMEOUT_MINUTES || '0', 10)
+const SESSION_TIMEOUT_MS = _timeoutMinutes > 0 ? _timeoutMinutes * 60 * 1000 : 0  // 0 = no timeout
 
 // ─── Context Bundle Builder ─────────────────────────────────────────
 
@@ -284,20 +285,22 @@ async function startSession(session) {
   }, 60_000) // every 60s
   sessionData.heartbeatTimer.unref()
 
-  // Set timeout
-  sessionData.timeout = setTimeout(async () => {
-    logger.warn(`CC session ${session.id} timed out after ${SESSION_TIMEOUT_MS / 60000} min`)
-    try {
-      proc.kill('SIGTERM')
-      setTimeout(() => {
-        if (!proc.killed) proc.kill('SIGKILL')
-      }, 10_000)
-    } catch {}
-    await updateSessionStatus(session.id, 'error', { error_message: 'Session timed out' })
-    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
-    clearInterval(sessionData.heartbeatTimer)
-    activeSessions.delete(session.id)
-  }, SESSION_TIMEOUT_MS)
+  // Set timeout (0 = unlimited — skip entirely)
+  if (SESSION_TIMEOUT_MS > 0) {
+    sessionData.timeout = setTimeout(async () => {
+      logger.warn(`CC session ${session.id} timed out after ${SESSION_TIMEOUT_MS / 60000} min`)
+      try {
+        proc.kill('SIGTERM')
+        setTimeout(() => {
+          if (!proc.killed) proc.kill('SIGKILL')
+        }, 10_000)
+      } catch {}
+      await updateSessionStatus(session.id, 'error', { error_message: 'Session timed out' })
+      await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+      clearInterval(sessionData.heartbeatTimer)
+      activeSessions.delete(session.id)
+    }, SESSION_TIMEOUT_MS)
+  }
 
   // Stream stdout line by line
   const rl = createInterface({ input: proc.stdout })
