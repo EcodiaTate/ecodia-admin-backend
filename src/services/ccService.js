@@ -645,17 +645,21 @@ async function stopAllSessions(reason) {
     const proc = sessionData.process
     // Update DB first — if the main process gets killed before child exits,
     // the session is already marked 'stopped' (not left as 'running' → orphan)
-    await updateSessionStatus(sessionId, 'stopped', { error_message: reason })
-    await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
+    // Parallelize both writes to reduce time spent before killing the child
+    await Promise.all([
+      updateSessionStatus(sessionId, 'stopped', { error_message: reason }),
+      db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`,
+    ])
 
     try { proc.kill('SIGTERM') } catch {}
 
-    // Wait for child to actually exit (up to 8s), then force-kill
+    // Wait for child to actually exit (up to 5s), then force-kill.
+    // Reduced from 8s to fit within the parent's 10s shutdown budget.
     await new Promise((resolve) => {
       const forceKillTimer = setTimeout(() => {
         try { if (!proc.killed) proc.kill('SIGKILL') } catch {}
         resolve()
-      }, 8000)
+      }, 5000)
       forceKillTimer.unref()
       proc.on('close', () => { clearTimeout(forceKillTimer); resolve() })
       // If already exited, resolve immediately
