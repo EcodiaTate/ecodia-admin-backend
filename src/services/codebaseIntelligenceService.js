@@ -115,7 +115,12 @@ async function syncCodebase(codebaseId) {
   }
 
   if (fs.existsSync(codebase.repo_path)) {
-    gitExec(['pull', '--ff-only'], codebase.repo_path)
+    // Stash any in-progress changes (e.g. mid-CC-session files), pull, then restore.
+    // --no-rebase overrides any global pull.rebase=true config.
+    const stashOut = gitExec(['stash', '--include-untracked'], codebase.repo_path)
+    const stashed = stashOut && !stashOut.includes('No local changes')
+    gitExec(['pull', '--no-rebase', '--ff-only'], codebase.repo_path)
+    if (stashed) gitExec(['stash', 'pop'], codebase.repo_path)
   }
 
   await db`UPDATE codebases SET last_synced_at = now() WHERE id = ${codebaseId}`

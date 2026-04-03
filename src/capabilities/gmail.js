@@ -12,14 +12,12 @@ registry.registerMany([
       draft: { type: 'string', required: false, description: 'Override the prepared draft text' },
     },
     handler: async ({ threadId, draft, _sourceRefId }) => {
-      // threadId may be internal DB UUID or gmail_thread_id — resolve to gmail_thread_id
       const db = require('../config/db')
       const gmail = require('../services/gmailService')
 
-      // If it looks like a UUID, look up the gmail_thread_id
+      // sendReply expects gmail_thread_id — resolve from UUID if needed
       const isUUID = /^[0-9a-f-]{36}$/.test(threadId)
       let gmailThreadId = threadId
-
       if (isUUID) {
         const [row] = await db`SELECT gmail_thread_id FROM email_threads WHERE id = ${threadId} LIMIT 1`
         if (!row) throw new Error(`Email thread ${threadId} not found`)
@@ -39,19 +37,8 @@ registry.registerMany([
       threadId: { type: 'string', required: true, description: 'Gmail thread ID or internal UUID' },
     },
     handler: async ({ threadId }) => {
-      const db = require('../config/db')
       const gmail = require('../services/gmailService')
-
-      const isUUID = /^[0-9a-f-]{36}$/.test(threadId)
-      let gmailThreadId = threadId
-
-      if (isUUID) {
-        const [row] = await db`SELECT gmail_thread_id FROM email_threads WHERE id = ${threadId} LIMIT 1`
-        if (!row) throw new Error(`Email thread ${threadId} not found`)
-        gmailThreadId = row.gmail_thread_id
-      }
-
-      await gmail.archiveThread(gmailThreadId)
+      await gmail.archiveThread(threadId)
       return { message: `Thread archived` }
     },
   },
@@ -64,19 +51,8 @@ registry.registerMany([
       threadId: { type: 'string', required: true, description: 'Gmail thread ID or internal UUID' },
     },
     handler: async ({ threadId }) => {
-      const db = require('../config/db')
       const gmail = require('../services/gmailService')
-
-      const isUUID = /^[0-9a-f-]{36}$/.test(threadId)
-      let gmailThreadId = threadId
-
-      if (isUUID) {
-        const [row] = await db`SELECT gmail_thread_id FROM email_threads WHERE id = ${threadId} LIMIT 1`
-        if (!row) throw new Error(`Email thread ${threadId} not found`)
-        gmailThreadId = row.gmail_thread_id
-      }
-
-      await gmail.trashThread(gmailThreadId)
+      await gmail.trashThread(threadId)
       return { message: `Thread moved to trash` }
     },
   },
