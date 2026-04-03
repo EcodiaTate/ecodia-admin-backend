@@ -347,7 +347,8 @@ async function reviewChanges(session, filesChanged) {
     // For new untracked files, read their content directly
     if (!diff && filesChanged.length > 0) {
       const newFileContents = []
-      for (const f of filesChanged.slice(0, 5)) {
+      const reviewMaxFiles = parseInt(env.FACTORY_REVIEW_MAX_FILES || '0', 10)
+    for (const f of (reviewMaxFiles > 0 ? filesChanged.slice(0, reviewMaxFiles) : filesChanged)) {
         try {
           const content = fs.readFileSync(path.join(cwd, f), 'utf-8')
           newFileContents.push(`--- /dev/null\n+++ ${f}\n${content.slice(0, 2000)}`)
@@ -386,7 +387,8 @@ async function reviewChanges(session, filesChanged) {
     // Read full file contents for changed files (not just diff) so the reviewer
     // can see the context around changes — callers, data flow, surrounding logic
     let fullFileContext = ''
-    for (const f of filesChanged.slice(0, 3)) {
+    const contextMaxFiles = parseInt(env.FACTORY_REVIEW_MAX_CONTEXT_FILES || '0', 10)
+    for (const f of (contextMaxFiles > 0 ? filesChanged.slice(0, contextMaxFiles) : filesChanged)) {
       try {
         const content = fs.readFileSync(path.join(cwd, f), 'utf-8')
         if (content.length < 8000) {

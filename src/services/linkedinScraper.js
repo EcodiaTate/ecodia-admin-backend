@@ -69,7 +69,7 @@ async function scrapeDMs({ page, navigate, humanDelay, humanClick }) {
 
   // Scrape conversation list (top 15)
   const conversations = await page.$$eval(SEL.conversationList, (items, sel) => {
-    return items.slice(0, 15).map(item => {
+    return items.map(item => {
       const dataIdEl = item.querySelector(sel.conversationDataId)
       return {
         id: dataIdEl?.getAttribute('data-id') || item.getAttribute('data-id') || null,
@@ -91,7 +91,7 @@ async function scrapeDMs({ page, navigate, humanDelay, humanClick }) {
   // Scrape full messages for unread conversations (plus first few read ones for context)
   const toScrape = [
     ...conversations.filter(c => c.isUnread),
-    ...conversations.filter(c => !c.isUnread).slice(0, 3),
+    ...conversations.filter(c => !c.isUnread),
   ]
 
   const results = []
@@ -212,7 +212,7 @@ async function scrapeConnectionRequests({ page, navigate, humanDelay }) {
   })
 
   const requests = await page.$$eval(SEL.invitationCard, (cards, sel) => {
-    return cards.slice(0, 30).map(card => {
+    return cards.map(card => {
       const profileLink = card.querySelector(sel.invitationProfileLink)
       return {
         name: card.querySelector(sel.invitationName)?.textContent?.trim() || 'Unknown',

@@ -48,12 +48,12 @@ function releaseCodebaseLock(codebaseId, sessionId) {
 // Rate limit tracking — prevents spawning sessions when CLI is rate-limited
 let _lastRateLimitReset = null
 
-// Prompt budget — cap the total assembled prompt to prevent exceeding CC's context window.
-// 200K chars ≈ ~50K tokens, well within Claude's 200K token limit with room for output.
-const PROMPT_BUDGET_CHARS = parseInt(env.CC_PROMPT_BUDGET_CHARS || '200000', 10)
+// Prompt budget — 0 = unlimited (let full context flow to CC).
+// Non-zero: cap total assembled prompt chars to prevent exceeding CC's context window.
+const PROMPT_BUDGET_CHARS = parseInt(env.CC_PROMPT_BUDGET_CHARS || '0', 10)
 
-// Stderr cap — prevent memory accumulation for long-running sessions
-const STDERR_MAX_LINES = 200
+// Stderr cap — 0 = unlimited (capture everything for full observability)
+const STDERR_MAX_LINES = parseInt(env.CC_STDERR_MAX_LINES || '0', 10)
 
 const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
 const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = unlimited (flag omitted)
@@ -568,7 +568,8 @@ function assemblePrompt(session, bundle) {
   let result = parts.join('\n')
 
   // Enforce prompt budget — truncate from the middle (keep task + operating context at end)
-  if (result.length > PROMPT_BUDGET_CHARS) {
+  // 0 = unlimited — let full context flow
+  if (PROMPT_BUDGET_CHARS > 0 && result.length > PROMPT_BUDGET_CHARS) {
     const taskIdx = result.lastIndexOf('## Task')
     if (taskIdx > 0) {
       // Keep first 20% + last section (task + operating context)
@@ -852,17 +853,20 @@ async function startSession(session) {
   // causing streamResult to be null and the real error to be missed.
   const rlClosed = new Promise(resolve => rl.on('close', resolve))
 
-  // Stderr — capped to prevent memory accumulation on long-running sessions
+  // Stderr — 0 = unlimited (full observability). Non-zero keeps last N lines.
   const stderrLines = []
   const stderrRl = createInterface({ input: proc.stderr })
   stderrRl.on('line', (line) => {
-    if (stderrLines.length < STDERR_MAX_LINES) {
+    if (STDERR_MAX_LINES <= 0) {
+      // Unlimited — capture everything
+      stderrLines.push(line)
+    } else if (stderrLines.length < STDERR_MAX_LINES) {
       stderrLines.push(line)
     } else if (stderrLines.length === STDERR_MAX_LINES) {
       stderrLines.push('... (stderr capped)')
     }
-    // Always shift if over cap to keep the LAST N lines
-    if (stderrLines.length > STDERR_MAX_LINES + 1) {
+    // When capped, shift to keep the LAST N lines
+    if (STDERR_MAX_LINES > 0 && stderrLines.length > STDERR_MAX_LINES + 1) {
       stderrLines.shift()
     }
     logger.debug(`CC session ${session.id} stderr: ${line}`)

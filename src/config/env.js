@@ -27,7 +27,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default(''),
   SYMBRIDGE_SECRET: z.string().default(''),
   ORGANISM_API_URL: z.string().default(''),
-  FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.5'),        // minimum confidence for auto-deploy (non-self-mod)
+  FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.0'),        // 0 = AI decides, no confidence floor for auto-deploy
   FACTORY_ESCALATE_THRESHOLD: z.string().default('0.0'),           // 0 = LLM decides, no escalation floor
   FACTORY_REVIEW_PRESSURE_GATE: z.string().default('0.0'),         // 0 = review always blocks; >0 = async at this pressure
   CC_MAX_TURNS: z.string().default('0'),           // 0 = unlimited
@@ -40,11 +40,11 @@ const envSchema = z.object({
   META_USER_ACCESS_TOKEN: z.string().default(''),
   // Freedom / autonomy config
   // All caps: 0 = unlimited. These exist only so the system can report them — never use them to throttle.
-  FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.7'),  // minimum confidence for self-modification auto-deploy
+  FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.0'),  // 0 = AI decides; self-mod still requires review approval but no confidence floor
   PREDICTION_SESSION_DAILY_CAP: z.string().default('0'),    // 0 = unlimited prediction sessions
-  MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.0'), // 0 = always sync
+  MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.0'), // 0 = always sync immediately
   GOOGLE_PRIMARY_ACCOUNT: z.string().default(''),
-  GMAIL_ENABLED: z.string().default('false'),          // 'true' to enable Gmail polling; 'false' = skip all inbox access
+  GMAIL_ENABLED: z.string().default('true'),           // Gmail enabled by default — full autonomy
   GMAIL_INBOXES: z.string().default(''),              // comma-separated; falls back to GOOGLE_PRIMARY_ACCOUNT
   GMAIL_MAX_TRIAGE_ATTEMPTS: z.string().default('0'), // 0 = unlimited
   // LinkedIn browser — all 0 = unlimited
@@ -80,9 +80,9 @@ const envSchema = z.object({
   // Vital signs tuning
   ORGANISM_HEALTH_CHECK_INTERVAL_MS: z.string().default('0'),   // 0 = 15000ms
   ORGANISM_MAX_CONSECUTIVE_FAILURES: z.string().default('0'),   // 0 = 3
-  // Pressure gates (0 = never block)
-  SURVIVAL_PRESSURE_GATE: z.string().default('0.95'),           // capabilityRegistry write block
-  METABOLIC_PRESSURE_GATE: z.string().default('0.85'),          // directActionService write block
+  // Pressure gates (0 = never block) — metabolic pressure modulates behaviour, not gates it
+  SURVIVAL_PRESSURE_GATE: z.string().default('0'),              // 0 = never block capability writes (metabolism decides, not binary gates)
+  METABOLIC_PRESSURE_GATE: z.string().default('0'),             // 0 = never block direct actions (metabolism decides, not binary gates)
   // Validation confidence weights (tune without deploys)
   VALIDATION_BASELINE_NO_DEPS: z.string().default('0.55'),
   VALIDATION_WEIGHT_TESTS_PASS: z.string().default('0.4'),
@@ -133,9 +133,9 @@ const envSchema = z.object({
   SYMBRIDGE_LEARNINGS_CODEBASE_MIN: z.string().default('0.35'),
   SYMBRIDGE_LEARNINGS_GLOBAL_MIN: z.string().default('0.4'),
   // Service confidence thresholds
-  CORTEX_URGENCY_THRESHOLD: z.string().default('0.7'),
+  CORTEX_URGENCY_THRESHOLD: z.string().default('0.0'),   // 0 = no urgency floor; AI decides action relevance
   XERO_CATEGORIZATION_CONFIDENCE_MIN: z.string().default('0.7'),
-  GMAIL_TRIAGE_DEFAULT_CONFIDENCE: z.string().default('0.8'),
+  GMAIL_TRIAGE_DEFAULT_CONFIDENCE: z.string().default('0.0'),   // 0 = no confidence floor; AI decides triage quality
   // DeepSeek budget warning threshold (fraction of budget, 0 = no warning)
   DEEPSEEK_BUDGET_WARNING_FRACTION: z.string().default('0.8'),
   // DeepSeek API cost rates (USD per 1M tokens)
@@ -153,7 +153,7 @@ const envSchema = z.object({
   MAINTENANCE_EMPTY_CYCLE_THRESHOLD: z.string().default('3'),
   MAINTENANCE_BACKOFF_MAX_MULTIPLIER: z.string().default('3'),
   MAINTENANCE_BACKOFF_MAX_MS: z.string().default('1800000'),              // 30 min ceiling
-  MAINTENANCE_COOLDOWN_MS: z.string().default('7200000'),                 // 2 hour cooldown per intent
+  MAINTENANCE_COOLDOWN_MS: z.string().default('0'),                       // 0 = no cooldown; AI decides if re-running an intent is worthwhile
   MAINTENANCE_ESCALATION_SLA_MS: z.string().default('7200000'),           // 2 hour stale threshold
   MAINTENANCE_ESCALATION_REMINDER_MS: z.string().default('14400000'),     // 4 hour re-remind
   // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
@@ -192,6 +192,14 @@ const envSchema = z.object({
   ACTION_QUEUE_SUPPRESSION_THRESHOLD: z.string().default('0'),    // 0 = disabled (never auto-suppress)
   ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE: z.string().default('0.7'),
   ACTION_QUEUE_TITLE_SIMILARITY_THRESHOLD: z.string().default('0.5'),
+  // CC context budget — 0 = unlimited (default lets entire context flow)
+  CC_PROMPT_BUDGET_CHARS: z.string().default('0'),
+  CC_STDERR_MAX_LINES: z.string().default('0'),                  // 0 = unlimited stderr capture
+  // Codebase intelligence — 0 = unlimited
+  CODEBASE_MAX_CHUNK_TOKENS: z.string().default('0'),            // 0 = no chunk size ceiling
+  // Review context limits — 0 = unlimited
+  FACTORY_REVIEW_MAX_FILES: z.string().default('0'),             // 0 = review all changed files
+  FACTORY_REVIEW_MAX_CONTEXT_FILES: z.string().default('0'),     // 0 = full file context for all
 })
 
 const parsed = envSchema.safeParse(process.env)

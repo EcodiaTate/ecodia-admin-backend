@@ -19,7 +19,7 @@ const secretSafety = require('./secretSafetyService')
 // Embeddings: OpenAI text-embedding-3-small (1536 dims).
 // ═══════════════════════════════════════════════════════════════════════
 
-const MAX_CHUNK_TOKENS = 800
+const MAX_CHUNK_TOKENS = parseInt(env.CODEBASE_MAX_CHUNK_TOKENS || '0', 10) || 800  // 0 in env = use sensible default (800)
 const CHARS_PER_TOKEN = 4
 const MAX_CHUNK_CHARS = MAX_CHUNK_TOKENS * CHARS_PER_TOKEN
 
