@@ -460,12 +460,16 @@ async function tryConsolidate({ source, sourceRefId, actionType, title, summary,
   // Use latest prepared data (most recent draft is most relevant)
   const mergedPreparedData = { ...(match.prepared_data || {}), ...preparedData }
 
+  // Refresh expiry on consolidation — merged items get a fresh 48h window
+  const refreshedExpiry = new Date(Date.now() + DEFAULT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString()
+
   const [updated] = await db`
     UPDATE action_queue SET
       summary = ${summary || match.summary},
       prepared_data = ${JSON.stringify(mergedPreparedData)},
       context = ${JSON.stringify(mergedContext)},
       priority = ${effectivePriority},
+      expires_at = ${refreshedExpiry},
       updated_at = now()
     WHERE id = ${match.id}
     RETURNING *
@@ -795,6 +799,12 @@ async function getStats() {
 // ─── Expire stale items ────────────────────────────────────────────────
 
 async function expireStale() {
+  // Safety net: backfill null-expiry items with 48h from creation
+  await db`
+    UPDATE action_queue SET expires_at = created_at + interval '1 hour' * ${DEFAULT_EXPIRY_HOURS}
+    WHERE status = 'pending' AND expires_at IS NULL
+  `.catch(() => {})
+
   const expired = await db`
     UPDATE action_queue SET status = 'expired'
     WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < now()
