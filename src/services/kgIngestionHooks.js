@@ -22,13 +22,16 @@ function isEnabled() {
 async function trySyncImportant(nodeName, labels, properties) {
   try {
     const memBridge = require('./memoryBridgeService')
-    const importance = properties?.importance || 0
+    const rawImportance = properties?.importance || 0
+    const importance = Number.isFinite(rawImportance) ? rawImportance : 0
     if (importance >= 0.9) {
       await memBridge.syncImmediateIfUrgent({ name: nodeName, labels, importance, properties })
     } else if (importance >= 0.7) {
       await memBridge.syncImmediateIfImportant({ name: nodeName, labels, importance, properties })
     }
-  } catch {}
+  } catch (err) {
+    logger.debug('trySyncImportant failed (non-blocking)', { error: err.message, nodeName })
+  }
 }
 
 // ─── Gmail ───────────────────────────────────────────────────────────
@@ -285,7 +288,13 @@ async function onCalendarEventProcessed({ event, calendarEmail }) {
 
   try {
     // Create person nodes for attendees
-    const attendees = typeof event.attendees === 'string' ? JSON.parse(event.attendees) : (event.attendees || [])
+    let attendees
+    try {
+      attendees = typeof event.attendees === 'string' ? JSON.parse(event.attendees) : (event.attendees || [])
+    } catch {
+      attendees = []
+    }
+    if (!Array.isArray(attendees)) attendees = []
     for (const att of attendees) {
       if (att.email && !att.self && att.email !== calendarEmail) {
         await kg.ensureNode({
@@ -757,7 +766,9 @@ async function onFactoryOutcome({ session, outcome, confidence, filesChanged, co
         files_changed: (filesChanged || []).slice(0, 10).join(', '),
       },
     })
-  } catch {}
+  } catch (err) {
+    logger.debug('Factory outcome memory sync failed', { error: err.message })
+  }
 
   // Cognitive broadcast to organism's Atune
   sendCognitiveBroadcast('factory_outcome', confidence || 0.5, {
@@ -788,8 +799,8 @@ async function onSystemEvent({ type, decisions, actioned, pressure }) {
       properties: {
         last_decisions: decisions,
         last_actioned: actioned,
-        last_pressure: pressure,
-        description: `${type}: ${actioned}/${decisions} decisions actioned at pressure ${(pressure || 0).toFixed(2)}`,
+        last_pressure: Number.isFinite(pressure) ? pressure : 0,
+        description: `${type}: ${actioned}/${decisions} decisions actioned at pressure ${(Number.isFinite(pressure) ? pressure : 0).toFixed(2)}`,
       },
       sourceModule: 'system',
     })
@@ -812,8 +823,10 @@ function sendCognitiveBroadcast(perceptType, salience, content) {
       content,
       source: 'ecodiaos',
       timestamp: new Date().toISOString(),
-    }).catch(() => {})
-  } catch {}
+    }).catch(err => logger.debug('Cognitive broadcast send failed', { error: err.message }))
+  } catch (err) {
+    logger.debug('Cognitive broadcast failed', { error: err.message })
+  }
 }
 
 module.exports = {

@@ -232,7 +232,23 @@ function chunkFile(content, language) {
 
 // ─── Indexing ───────────────────────────────────────────────────────
 
+const _indexingInProgress = new Set()
+
 async function indexCodebase(codebaseId) {
+  // Prevent concurrent indexing of the same codebase
+  if (_indexingInProgress.has(codebaseId)) {
+    logger.debug(`Codebase ${codebaseId} already being indexed — skipping`)
+    return { indexed: 0, skipped: 0, reason: 'already_indexing' }
+  }
+  _indexingInProgress.add(codebaseId)
+  try {
+    return await _indexCodebaseInner(codebaseId)
+  } finally {
+    _indexingInProgress.delete(codebaseId)
+  }
+}
+
+async function _indexCodebaseInner(codebaseId) {
   const [codebase] = await db`SELECT * FROM codebases WHERE id = ${codebaseId}`
   if (!codebase) throw new Error(`Codebase ${codebaseId} not found`)
   if (!fs.existsSync(codebase.repo_path)) {
@@ -331,32 +347,43 @@ async function embedStaleChunks(batchSize = 50) {
     return `${prefix}${c.file_path}\n${c.content.slice(0, 8000)}`
   })
 
-  try {
-    const response = await axios.post(
-      'https://api.openai.com/v1/embeddings',
-      { model: 'text-embedding-3-small', input: texts },
-      { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
-    )
+  const EMBED_MAX_RETRIES = 3
+  for (let attempt = 0; attempt < EMBED_MAX_RETRIES; attempt++) {
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/embeddings',
+        { model: 'text-embedding-3-small', input: texts },
+        { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, timeout: 60_000 }
+      )
 
-    const embeddings = response.data.data.map(d => d.embedding)
+      const embeddings = response.data.data.map(d => d.embedding)
 
-    for (let i = 0; i < staleChunks.length; i++) {
-      if (embeddings[i]) {
-        const vecStr = `[${embeddings[i].join(',')}]`
-        await db`
-          UPDATE code_chunks
-          SET embedding = ${vecStr}::vector
-          WHERE id = ${staleChunks[i].id}
-        `
+      for (let i = 0; i < staleChunks.length; i++) {
+        if (embeddings[i]) {
+          const vecStr = `[${embeddings[i].join(',')}]`
+          await db`
+            UPDATE code_chunks
+            SET embedding = ${vecStr}::vector
+            WHERE id = ${staleChunks[i].id}
+          `
+        }
       }
-    }
 
-    logger.info(`Embedded ${staleChunks.length} code chunks`)
-    return staleChunks.length
-  } catch (err) {
-    logger.warn('Code chunk embedding batch failed', { error: err.message })
-    return 0
+      logger.info(`Embedded ${staleChunks.length} code chunks`)
+      return staleChunks.length
+    } catch (err) {
+      const status = err.response?.status
+      const retryable = !status || status === 429 || status >= 500
+      if (!retryable || attempt === EMBED_MAX_RETRIES - 1) {
+        logger.warn('Code chunk embedding batch failed', { error: err.message, attempt })
+        return 0
+      }
+      const delayMs = 1000 * Math.pow(2, attempt) + Math.random() * 500
+      logger.debug(`Embedding retry ${attempt + 1}/${EMBED_MAX_RETRIES} after ${status || 'timeout'}`)
+      await new Promise(r => setTimeout(r, delayMs))
+    }
   }
+  return 0
 }
 
 // ─── Semantic Search ────────────────────────────────────────────────
@@ -369,7 +396,7 @@ async function queryCodebase(codebaseId, query, { limit = 20 } = {}) {
     const response = await axios.post(
       'https://api.openai.com/v1/embeddings',
       { model: 'text-embedding-3-small', input: query },
-      { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+      { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, timeout: 30_000 }
     )
     queryEmbedding = response.data.data[0].embedding
   } catch (err) {
@@ -400,7 +427,7 @@ async function queryAllCodebases(query, { limit = 20 } = {}) {
     const response = await axios.post(
       'https://api.openai.com/v1/embeddings',
       { model: 'text-embedding-3-small', input: query },
-      { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+      { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, timeout: 30_000 }
     )
     queryEmbedding = response.data.data[0].embedding
   } catch (err) {

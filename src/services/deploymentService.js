@@ -111,7 +111,13 @@ async function deploySession(sessionId) {
           logger.info('Self-modification: migrations applied successfully')
         }
       } catch (err) {
-        logger.warn('Self-modification: migration check/execution failed', { error: err.message })
+        logger.error('Self-modification: migration failed', { error: err.message, sessionId })
+        // Escalate migration failures — they can leave the DB in inconsistent state
+        await db`
+          INSERT INTO notifications (type, message, metadata)
+          VALUES ('migration_failed', ${'Migration failed during self-mod deploy: ' + err.message.slice(0, 200)},
+                  ${JSON.stringify({ sessionId, commitSha, error: err.message })})
+        `.catch(notifErr => logger.warn('Migration failure notification failed', { error: notifErr.message }))
         // Don't fail the deploy — migrations might not exist or already applied
       }
     }
@@ -205,7 +211,7 @@ async function deploySession(sessionId) {
               INSERT INTO notifications (type, message, metadata)
               VALUES ('deployment_revert_failed', 'CRITICAL: Self-mod PM2 restart and self-heal both failed — manual intervention needed',
                       ${JSON.stringify({ sessionId, commitSha, deploymentId, error: healErr.message })})
-            `.catch(() => {})
+            `.catch(notifErr => logger.error('CRITICAL: Failed to even record self-heal failure notification', { error: notifErr.message }))
           }
         }
         throw restartErr
@@ -244,7 +250,7 @@ async function deploySession(sessionId) {
       deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'deployed', deploy_target: deployTarget },
       codebaseName: session.codebase_name,
       sessionId,
-    }).catch(() => {})
+    }).catch(err => logger.debug('KG deploy ingestion failed', { error: err.message }))
 
     // Notification
     await db`
@@ -334,7 +340,7 @@ async function revertDeployment(deploymentId, sessionId, repoPath, commitSha, br
       deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'reverted', deploy_target: 'revert', reverted_at: new Date() },
       codebaseName: codebaseName || 'unknown',
       sessionId,
-    }).catch(() => {})
+    }).catch(err => logger.debug('KG revert ingestion failed', { error: err.message }))
 
     logger.info(`Deployment reverted: ${revertSha}`, { sessionId, deploymentId })
   } catch (err) {

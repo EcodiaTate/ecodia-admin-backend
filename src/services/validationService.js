@@ -27,10 +27,12 @@ function runCommand(cmd, args, cwd, timeout) {
     })
     return { passed: true, output: output.slice(-5000), exitCode: 0 }
   } catch (err) {
+    const timedOut = err.killed || /ETIMEDOUT|timed out/i.test(err.message)
     return {
       passed: false,
       output: (err.stdout || err.stderr || err.message || '').slice(-5000),
       exitCode: err.status || 1,
+      timedOut,
     }
   }
 }
@@ -43,7 +45,12 @@ function detectProjectType(repoPath) {
   const hasDeps = hasDir('node_modules') || hasDir('venv') || hasDir('.venv') || hasDir('target')
 
   if (hasFile('package.json')) {
-    const pkg = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf-8'))
+    let pkg
+    try {
+      pkg = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf-8'))
+    } catch {
+      return { runtime: 'node', hasTests: false, hasLint: false, hasTypecheck: false, hasPlaywright: false, depsInstalled: false }
+    }
     const depsReady = hasDir('node_modules')
     return {
       runtime: 'node',
@@ -206,7 +213,7 @@ async function validateChanges(sessionId) {
     logger.debug('Historical confidence lookup failed (using heuristic)', { error: err.message })
   }
 
-  confidence = Math.min(confidence, 1.0)
+  confidence = Number.isFinite(confidence) ? Math.max(0, Math.min(confidence, 1.0)) : heuristic
 
   const durationMs = Date.now() - startTime
 
