@@ -379,8 +379,12 @@ async function startSession(session) {
   const proc = spawn(CC_CLI, args, {
     cwd,
     env: ccEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],  // stdin ignored — prompt passed via -p flag
+    stdio: ['pipe', 'pipe', 'pipe'],  // stdin piped and closed — avoids 'no stdin data received in 3s' warning
   })
+
+  // Close stdin immediately — prompt is passed via -p flag, not stdin.
+  // Ending the pipe gives CC a clean EOF so it doesn't wait 3s for stdin data.
+  proc.stdin.end()
 
   const sessionData = {
     process: proc,
@@ -476,13 +480,24 @@ async function startSession(session) {
     if (!success) {
       if (streamResult?.is_error && streamResult?.result) {
         errorMessage = streamResult.result
-      } else if (stderrLines.length > 0 && stderrLines.some(l => l.trim())) {
-        errorMessage = stderrLines.slice(-5).join('\n')
-      } else if (code === null && signal) {
-        // Process was killed by a signal (SIGTERM, SIGKILL, OOM killer, etc.)
-        errorMessage = `Process killed by ${signal} (exit code null) — likely PM2 restart, OOM, or deployment`
-      } else {
-        errorMessage = `Exit code ${code}`
+      } else if (stderrLines.length > 0) {
+        // Filter CC CLI noise (stdin warnings, debug lines) before using stderr as error
+        const meaningfulStderr = stderrLines.filter(l =>
+          l.trim() && !l.includes('no stdin data received')
+        )
+        if (meaningfulStderr.length > 0) {
+          errorMessage = meaningfulStderr.slice(-5).join('\n')
+        }
+      }
+      // If no meaningful error extracted yet, classify by exit code/signal
+      if (!errorMessage) {
+        if (code === null && signal) {
+          errorMessage = `Process killed by ${signal} (exit code null) — likely PM2 restart, OOM, or deployment`
+        } else if (code === null) {
+          errorMessage = `Process exited abnormally (exit code null, no signal) — likely parent process killed during PM2 restart or OOM`
+        } else {
+          errorMessage = `Exit code ${code}`
+        }
       }
     }
 

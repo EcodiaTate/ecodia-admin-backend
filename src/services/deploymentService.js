@@ -1,4 +1,4 @@
-const { execFileSync } = require('child_process')
+const { execFileSync, spawn } = require('child_process')
 const axios = require('axios')
 const db = require('../config/db')
 const env = require('../config/env')
@@ -140,43 +140,34 @@ async function deploySession(sessionId) {
         }
       }
 
+      if (isSelfMod) {
+        // Self-mod restart: mark deploy as successful BEFORE restarting, then fire-and-forget.
+        // execFileSync('pm2', ['restart', ...]) was failing because PM2 sends SIGTERM to THIS
+        // process mid-exec — the calling process IS the one being restarted. Use a detached
+        // child process so the restart survives the parent's death.
+        if (deploymentId) {
+          await db`UPDATE deployments SET deploy_status = 'deployed', duration_ms = ${Date.now() - startTime} WHERE id = ${deploymentId}`
+        }
+        await db`UPDATE cc_sessions SET deploy_status = 'deployed', pipeline_stage = 'complete' WHERE id = ${sessionId}`
+        logger.info(`Self-modification deploy complete — firing detached PM2 restart for ${pm2Name}`)
+        const restartProc = spawn('pm2', ['restart', pm2Name], {
+          detached: true,
+          stdio: 'ignore',
+        })
+        restartProc.unref()
+        // The process will be killed by PM2 shortly — return immediately.
+        // Health check will run on the NEW process's startup via the orphan cleanup path.
+        return { status: 'deployed_self_restart', commitSha }
+      }
+
       try {
         execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
       } catch (restartErr) {
-        // Self-healing: if PM2 restart fails on self-modification, revert and try again
-        if (isSelfMod) {
-          logger.error(`Self-modification PM2 restart failed — self-healing: reverting and restarting`, { error: restartErr.message })
-          try {
-            git(['revert', '--no-edit', commitSha], repoPath)
-            git(['push', 'origin', branch], repoPath)
-            execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
-            logger.info('Self-healing: reverted git changes and restarted PM2 successfully')
-
-            // Record this as a failed deploy (self-healed)
-            if (deploymentId) {
-              await db`UPDATE deployments SET deploy_status = 'reverted', error_message = ${'Self-healed: PM2 restart failed, auto-reverted'}, reverted_at = now() WHERE id = ${deploymentId}`
-            }
-            await db`UPDATE cc_sessions SET deploy_status = 'reverted', pipeline_stage = 'failed' WHERE id = ${sessionId}`
-            return { status: 'self_healed_revert', commitSha, reason: 'PM2 restart failed, auto-reverted' }
-          } catch (healErr) {
-            logger.error('CRITICAL: Self-healing also failed', { error: healErr.message })
-            await db`
-              INSERT INTO notifications (type, message, metadata)
-              VALUES ('deployment_revert_failed', 'CRITICAL: Self-mod PM2 restart and self-heal both failed — manual intervention needed',
-                      ${JSON.stringify({ sessionId, commitSha, deploymentId, error: healErr.message })})
-            `.catch(() => {})
-          }
-        }
         throw restartErr
       }
 
-      // Grace period before health check:
-      // - Self-modifications: 30s (Node.js restart + potential migration)
-      // - Python codebases: 15s (FastAPI/uvicorn startup time)
-      // - Other: no wait
-      if (isSelfMod) {
-        await new Promise(r => setTimeout(r, 30_000))
-      } else if (session.codebase_language === 'python') {
+      // Grace period before health check (Python codebases need startup time)
+      if (session.codebase_language === 'python') {
         await new Promise(r => setTimeout(r, 15_000))
       }
     }
