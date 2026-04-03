@@ -379,12 +379,8 @@ async function startSession(session) {
   const proc = spawn(CC_CLI, args, {
     cwd,
     env: ccEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],  // stdin piped and closed — avoids 'no stdin data received in 3s' warning
+    stdio: ['ignore', 'pipe', 'pipe'],  // stdin ignored — prompt passed via -p flag, no stdin needed
   })
-
-  // Close stdin immediately — prompt is passed via -p flag, not stdin.
-  // Ending the pipe gives CC a clean EOF so it doesn't wait 3s for stdin data.
-  proc.stdin.end()
 
   const sessionData = {
     process: proc,
@@ -471,14 +467,20 @@ async function startSession(session) {
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
 
-    const success = code === 0 && !(streamResult?.is_error)
+    // Treat stdin-only warnings as non-errors — CC CLI emits is_error for the warning
+    // but the session actually completed fine
+    const isStdinWarningOnly = streamResult?.is_error &&
+      streamResult?.result?.includes('no stdin data received') &&
+      !streamResult?.result?.replace(/.*no stdin data received[^\n]*/, '').trim()
+    const success = code === 0 && (!streamResult?.is_error || isStdinWarningOnly)
     const status = success ? 'complete' : 'error'
 
     // Extract error from stream-json result first (has the real error),
     // fall back to stderr, then exit code/signal
     let errorMessage = null
     if (!success) {
-      if (streamResult?.is_error && streamResult?.result) {
+      if (streamResult?.is_error && streamResult?.result &&
+          !streamResult.result.includes('no stdin data received')) {
         errorMessage = streamResult.result
       } else if (stderrLines.length > 0) {
         // Filter CC CLI noise (stdin warnings, debug lines) before using stderr as error
@@ -609,7 +611,7 @@ async function sendMessage(sessionId, content) {
   if (!sessionData) throw new Error('Session not found or not running')
 
   const proc = sessionData.process
-  if (!proc.stdin.writable) throw new Error('Session stdin is not writable')
+  if (!proc.stdin || !proc.stdin.writable) throw new Error('Session stdin is not writable — sessions use --print mode with -p flag')
 
   proc.stdin.write(content + '\n')
   await appendLog(sessionId, `[USER] ${content}`)
