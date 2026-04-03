@@ -8,6 +8,15 @@ const logger = require('./config/logger')
 const server = createServer(app)
 initWS(app, server)
 
+// Track open connections so we can force-destroy them on shutdown.
+// Without this, server.close() hangs on long-lived WebSocket connections
+// and PM2 SIGKILLs the process before process.exit() fires → orphans.
+const openConnections = new Set()
+server.on('connection', (conn) => {
+  openConnections.add(conn)
+  conn.on('close', () => openConnections.delete(conn))
+})
+
 async function cleanupOrphanedSessions() {
   // Sessions still marked 'running'/'initializing' at startup were NOT
   // caught by the graceful SIGTERM handler — they survived a hard kill
@@ -63,7 +72,21 @@ async function gracefulShutdown(signal) {
     const maintenance = require('./workers/autonomousMaintenanceWorker')
     maintenance.stop()
   } catch {}
+
+  // Force-destroy open connections (especially WebSockets) so server.close()
+  // doesn't hang waiting for them to end. Without this, PM2 SIGKILLs the
+  // process at kill_timeout and sessions that weren't yet marked in DB become orphans.
+  for (const conn of openConnections) {
+    try { conn.destroy() } catch {}
+  }
   server.close(() => process.exit(0))
+
+  // Hard exit fallback — if server.close() still hangs (e.g. connections
+  // that survive destroy()), exit before PM2's 12s kill_timeout SIGKILLs us
+  setTimeout(() => {
+    logger.warn('Graceful shutdown timed out — forcing exit')
+    process.exit(1)
+  }, 11000).unref()
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))

@@ -74,6 +74,14 @@ Task: ${prompt.slice(0, 500)}`,
 async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId }) {
   const ccService = require('./ccService')
 
+  // Reject scheduled/automated dispatches when CLI is rate-limited
+  const rlStatus = ccService.getRateLimitStatus()
+  if (rlStatus.limited && (triggeredBy === 'scheduled' || triggerSource === 'scheduled')) {
+    const resetsIn = Math.ceil((rlStatus.resetsAt - new Date()) / 60000)
+    logger.warn(`Factory dispatch blocked — CLI rate-limited, resets in ${resetsIn}min`, { triggerSource })
+    throw new Error(`CLI rate-limited — resets in ${resetsIn}min`)
+  }
+
   const [session] = await db`
     INSERT INTO cc_sessions (
       codebase_id, initial_prompt, triggered_by, trigger_source,

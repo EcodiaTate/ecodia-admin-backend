@@ -446,6 +446,11 @@ async function startSession(session) {
     }
   })
 
+  // Wait for readline to finish processing all buffered stdout lines.
+  // proc.on('close') can fire before readline emits the last 'line' events,
+  // causing streamResult to be null and the real error to be missed.
+  const rlClosed = new Promise(resolve => rl.on('close', resolve))
+
   // Stderr
   const stderrLines = []
   const stderrRl = createInterface({ input: proc.stderr })
@@ -453,11 +458,11 @@ async function startSession(session) {
     stderrLines.push(line)
     logger.debug(`CC session ${session.id} stderr: ${line}`)
   })
+  const stderrRlClosed = new Promise(resolve => stderrRl.on('close', resolve))
 
-  // Process exit
-  proc.on('close', async (code) => {
-    rl.close()
-    stderrRl.close()
+  // Process exit — wait for readline to drain before reading streamResult
+  proc.on('close', async (code, signal) => {
+    await Promise.all([rlClosed, stderrRlClosed])
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
@@ -466,13 +471,18 @@ async function startSession(session) {
     const status = success ? 'complete' : 'error'
 
     // Extract error from stream-json result first (has the real error),
-    // fall back to stderr, then exit code
+    // fall back to stderr, then exit code/signal
     let errorMessage = null
     if (!success) {
       if (streamResult?.is_error && streamResult?.result) {
         errorMessage = streamResult.result
+      } else if (stderrLines.length > 0 && stderrLines.some(l => l.trim())) {
+        errorMessage = stderrLines.slice(-5).join('\n')
+      } else if (code === null && signal) {
+        // Process was killed by a signal (SIGTERM, SIGKILL, OOM killer, etc.)
+        errorMessage = `Process killed by ${signal} (exit code null) — likely PM2 restart, OOM, or deployment`
       } else {
-        errorMessage = stderrLines.slice(-5).join('\n') || `Exit code ${code}`
+        errorMessage = `Exit code ${code}`
       }
     }
 
@@ -622,14 +632,37 @@ async function stopAllSessions(reason) {
   const ids = [...activeSessions.keys()]
   await Promise.allSettled(ids.map(async (sessionId) => {
     const sessionData = activeSessions.get(sessionId)
-    if (sessionData) {
-      clearTimeout(sessionData.timeout)
-      clearInterval(sessionData.heartbeatTimer)
-      try { sessionData.process.kill('SIGTERM') } catch {}
-      activeSessions.delete(sessionId)
+    if (!sessionData) {
+      // No in-memory data — just update DB
+      await updateSessionStatus(sessionId, 'stopped', { error_message: reason })
+      await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
+      return
     }
+
+    clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
+
+    const proc = sessionData.process
+    // Update DB first — if the main process gets killed before child exits,
+    // the session is already marked 'stopped' (not left as 'running' → orphan)
     await updateSessionStatus(sessionId, 'stopped', { error_message: reason })
     await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
+
+    try { proc.kill('SIGTERM') } catch {}
+
+    // Wait for child to actually exit (up to 8s), then force-kill
+    await new Promise((resolve) => {
+      const forceKillTimer = setTimeout(() => {
+        try { if (!proc.killed) proc.kill('SIGKILL') } catch {}
+        resolve()
+      }, 8000)
+      forceKillTimer.unref()
+      proc.on('close', () => { clearTimeout(forceKillTimer); resolve() })
+      // If already exited, resolve immediately
+      if (proc.exitCode !== null || proc.killed) { clearTimeout(forceKillTimer); resolve() }
+    })
+
+    activeSessions.delete(sessionId)
     logger.info(`CC session ${sessionId} stopped: ${reason}`)
   }))
 }
@@ -696,6 +729,17 @@ function getActiveSessionCount() {
   return activeSessions.size
 }
 
+/**
+ * Check if Claude CLI is currently rate-limited.
+ * Returns { limited: true, resetsAt: Date } if limited, { limited: false } otherwise.
+ */
+function getRateLimitStatus() {
+  if (_lastRateLimitReset && _lastRateLimitReset > new Date()) {
+    return { limited: true, resetsAt: _lastRateLimitReset }
+  }
+  return { limited: false }
+}
+
 module.exports = {
   startSession,
   sendMessage,
@@ -704,5 +748,6 @@ module.exports = {
   stopWatchdog,
   getActiveSessionInfo,
   getActiveSessionCount,
+  getRateLimitStatus,
   buildContextBundle,
 }

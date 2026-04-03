@@ -124,6 +124,22 @@ async function deploySession(sessionId) {
     }
 
     if (deployTarget === 'pm2' && pm2Name) {
+      // Self-mod: stop active CC sessions BEFORE restarting, so they don't become
+      // orphans. The graceful shutdown handler would try, but the 10s race against
+      // PM2's 12s kill_timeout often loses — especially with long-running CC sessions.
+      if (isSelfMod) {
+        try {
+          const ccService = require('./ccService')
+          const activeCount = ccService.getActiveSessionCount()
+          if (activeCount > 0) {
+            logger.info(`Pre-deploy: draining ${activeCount} active CC session(s) before PM2 restart`)
+            await ccService.stopAllSessions('Stopped for self-modification deployment')
+          }
+        } catch (drainErr) {
+          logger.warn('Pre-deploy: session drain failed, proceeding with restart', { error: drainErr.message })
+        }
+      }
+
       try {
         execFileSync('pm2', ['restart', pm2Name], { encoding: 'utf-8' })
       } catch (restartErr) {
