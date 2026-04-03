@@ -45,7 +45,7 @@ CRITICAL RULES:
 - Never create tasks for the human unless they explicitly ask for a task. The human runs the system — you don't assign them work.
 - Never reply to automated notification emails (security alerts, App Store, CI failures) unless the human asks you to. Note them, don't act on them.
 - When a CC session or action completes, do not generate follow-up actions unless something genuinely unexpected happened. "It worked" or "it failed" is not novel — it's expected.
-- Maximum 1-2 action cards per response. If you have 5 things to say, use text. The human is not a task queue.
+- Prefer 1-2 action cards per response — use text for commentary. You can exceed this if genuinely warranted, but the human is not a task queue.
 - When the human tells you to stop, slow down, or be quiet — that overrides everything. Return [] or a single short text acknowledgement.
 
 The human trusts you. They built this system so they have to think less, not more. Surface what matters, propose what should happen, run what can be run without fuss. Don't ask for confirmation on things that are obvious. Don't explain your reasoning unless it genuinely helps. Don't hedge. Don't overwhelm.
@@ -77,7 +77,7 @@ Params in action_card must be primitive values (string, number, boolean) — nev
  * Takes full conversation history, retrieves KG context for the latest message,
  * and returns structured blocks.
  */
-async function chat(messages, { sessionId } = {}) {
+async function chat(messages, { sessionId, ambientEvents } = {}) {
   const userMessage = messages.filter(m => m.role === 'user').pop()
   if (!userMessage) throw new Error('No user message provided')
 
@@ -137,6 +137,8 @@ async function chat(messages, { sessionId } = {}) {
 ${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
 
 ${sessionMemory ? `--- RECENT CONVERSATION MEMORY ---\n${sessionMemory}\n--- END CONVERSATION MEMORY ---` : ''}
+
+${ambientEvents?.length ? `--- SESSION AMBIENT EVENTS ---\nThese things happened in this session (action approvals, dismissals, CC completions, deploys). You were not asked to react — this is awareness context.\n${ambientEvents.map(e => `  [${e.kind}] ${e.summary}`).join('\n')}\n--- END AMBIENT EVENTS ---` : ''}
 
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
@@ -296,6 +298,12 @@ async function autoEnqueueUrgentActions(blocks) {
   if (actionCards.length > 2) {
     logger.info(`Cortex: capping ${actionCards.length} action_cards to 2`)
     actionCards.length = 2
+  }
+
+  // Cap: never auto-launch more than 2 CC sessions per response
+  if (autoStartSessions.length > 2) {
+    logger.info(`Cortex: capping ${autoStartSessions.length} auto-start cc_sessions to 2`)
+    autoStartSessions.length = 2
   }
 
   // Enqueue action cards to dashboard — with priority validation
@@ -768,26 +776,40 @@ function formatDuration(seconds) {
 }
 
 function parseBlocks(raw) {
+  // Helper: validate that a parsed value looks like a blocks array
+  const isBlockArray = (v) => Array.isArray(v) && v.length > 0 && v.every(b => b && typeof b.type === 'string')
+
+  // 1. Direct JSON parse
   try {
     const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) return parsed
-    if (parsed.blocks && Array.isArray(parsed.blocks)) return parsed.blocks
-    return [{ type: 'text', content: raw }]
-  } catch {
-    // Try extracting JSON from markdown code blocks
-    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[1].trim())
-        if (Array.isArray(parsed)) return parsed
-        return [{ type: 'text', content: raw }]
-      } catch {
-        // Fall through
-      }
-    }
-    // Last resort: wrap as text
-    return [{ type: 'text', content: raw }]
+    if (isBlockArray(parsed)) return parsed
+    if (parsed.blocks && isBlockArray(parsed.blocks)) return parsed.blocks
+    // Single block object (not wrapped in array)
+    if (parsed && typeof parsed.type === 'string') return [parsed]
+  } catch { /* not pure JSON — try extraction strategies */ }
+
+  // 2. JSON inside markdown code fences
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fenceMatch) {
+    try {
+      const parsed = JSON.parse(fenceMatch[1].trim())
+      if (isBlockArray(parsed)) return parsed
+      if (parsed && typeof parsed.type === 'string') return [parsed]
+    } catch { /* fall through */ }
   }
+
+  // 3. JSON array embedded in surrounding prose — find the outermost [ ... ]
+  const firstBracket = raw.indexOf('[')
+  const lastBracket = raw.lastIndexOf(']')
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    try {
+      const parsed = JSON.parse(raw.slice(firstBracket, lastBracket + 1))
+      if (isBlockArray(parsed)) return parsed
+    } catch { /* fall through */ }
+  }
+
+  // 4. Last resort: wrap as text
+  return [{ type: 'text', content: raw }]
 }
 
 function extractMentionedNodes(kgContext, query) {

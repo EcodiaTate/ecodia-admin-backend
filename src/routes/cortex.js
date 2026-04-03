@@ -10,7 +10,7 @@ router.use(auth)
 // If sessionId is provided, history is loaded from DB and merged.
 router.post('/chat', async (req, res, next) => {
   try {
-    const { messages, sessionId } = req.body
+    const { messages, sessionId, ambientEvents } = req.body
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' })
@@ -26,7 +26,7 @@ router.post('/chat', async (req, res, next) => {
       }
     }
 
-    const result = await cortexService.chat(messages, { sessionId })
+    const result = await cortexService.chat(messages, { sessionId, ambientEvents })
 
     // Persist the latest exchange to this session's history
     if (sessionId) {
