@@ -213,6 +213,73 @@ function formatTree(tree, indent, maxDepth) {
   return lines.join('\n')
 }
 
+// ─── Organism Ingestion ─────────────────────────────────────────────
+// After every Factory CC session, push the session log lines to the
+// organism's corpus ingestion endpoint so the reasoning becomes part
+// of the organism's memory. Fire-and-forget, never blocks the pipeline.
+
+const ORGANISM_URL = env.ORGANISM_API_URL || 'http://localhost:8000'
+
+async function _ingestSessionToOrganism(session, status) {
+  try {
+    // Read session log lines from DB
+    const rows = await db`
+      SELECT chunk FROM cc_session_logs
+      WHERE session_id = ${session.id}
+      ORDER BY id ASC
+      LIMIT 500
+    `
+    if (!rows || rows.length === 0) return
+
+    // Build session log records — only lines with tool_use or result content
+    const records = rows
+      .map(r => {
+        try {
+          const parsed = JSON.parse(r.chunk)
+          const tool = parsed?.tool_use?.name || parsed?.type || 'output'
+          const inputSummary = JSON.stringify(parsed?.tool_use?.input || parsed?.content || '').slice(0, 500)
+          const outputSummary = JSON.stringify(parsed?.result || parsed?.output || '').slice(0, 300)
+          return {
+            ts: parsed?.timestamp || new Date().toISOString(),
+            tool,
+            input_summary: inputSummary,
+            output_summary: outputSummary,
+            session_id: String(session.id),
+          }
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+
+    if (records.length === 0) return
+
+    const sessionDate = new Date(session.started_at || Date.now()).toISOString().slice(0, 10)
+
+    const response = await fetch(`${ORGANISM_URL}/api/v1/corpus/ingest/session-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        records,
+        session_id: `factory_${session.id}`,
+        session_date: sessionDate,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    })
+
+    if (response.ok) {
+      const result = await response.json()
+      logger.info('cc_session_ingested_to_organism', {
+        sessionId: session.id,
+        ingested: result.ingested,
+        status,
+      })
+    }
+  } catch (err) {
+    logger.debug('organism_ingestion_failed', { sessionId: session.id, error: err.message })
+  }
+}
+
 // ─── Session Lifecycle ──────────────────────────────────────────────
 
 async function startSession(session) {
@@ -399,6 +466,9 @@ async function startSession(session) {
       session: { ...session, status },
       projectName: session.project_name || null,
     }).catch(() => {})
+
+    // Organism corpus ingestion — push session log lines as training episodes
+    _ingestSessionToOrganism(session, status).catch(() => {})
 
     logger.info(`CC session ${session.id} completed`, { code, status })
 
