@@ -104,7 +104,7 @@ async function triagePendingDMs() {
           title: `Reply to ${dm.participant_name}`,
           summary: triage.summary,
           preparedData: { draft: triage.draftReply },
-          context: { participantName: dm.participant_name, company: dm.participant_company, headline: dm.participant_headline, leadScore: triage.leadScore },
+          context: { from: dm.participant_name, email: dm.participant_email || null, participantName: dm.participant_name, company: dm.participant_company, headline: dm.participant_headline, leadScore: triage.leadScore },
           priority: triage.priority === 'spam' ? 'low' : triage.priority,
         }).catch(() => {})
       }
@@ -118,7 +118,7 @@ async function triagePendingDMs() {
           title: `New lead: ${dm.participant_name}${dm.participant_company ? ` (${dm.participant_company})` : ''}`,
           summary: triage.summary,
           preparedData: { name: dm.participant_name, company: dm.participant_company, linkedinUrl: dm.participant_linkedin_url, leadScore: triage.leadScore, notes: triage.summary },
-          context: { leadScore: triage.leadScore, signals: triage.leadSignals },
+          context: { from: dm.participant_name, email: dm.participant_email || null, leadScore: triage.leadScore, signals: triage.leadSignals },
           priority: triage.priority,
         }).catch(() => {})
       }

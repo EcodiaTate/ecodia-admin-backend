@@ -143,6 +143,7 @@ async function syncDeployments(limit = 50) {
             description: `Branch: ${dep.meta?.githubCommitRef || 'unknown'}\nCommit: ${dep.meta?.githubCommitMessage || 'N/A'}\nError: ${dep.errorMessage || 'Check build logs'}\nDeployment: ${dep.uid}`,
           },
           context: { deploymentId: dep.uid, project: dep.name, branch: dep.meta?.githubCommitRef },
+          resourceKey: `vercel:build:${dep.name}`,
           priority: dep.target === 'production' ? 'urgent' : 'high',
         }).catch(() => {})
       }

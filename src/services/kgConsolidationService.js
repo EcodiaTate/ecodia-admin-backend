@@ -28,52 +28,62 @@ const env = require('../config/env')
 async function deduplicateNodes({ dryRun = false } = {}) {
   const merged = []
 
-  // Strategy 1: Exact name match after normalization (case, whitespace, punctuation)
-  const exactDupes = await runQuery(`
-    MATCH (a), (b)
-    WHERE elementId(a) < elementId(b)
-      AND labels(a) = labels(b)
-      AND apoc.text.clean(a.name) = apoc.text.clean(b.name)
-    RETURN elementId(a) AS keepId, a.name AS keepName,
-           elementId(b) AS dupeId, b.name AS dupeName,
-           labels(a) AS labels
-    LIMIT 50
+  // Strategy 1: Exact name match after normalization — partitioned by label to avoid O(n²) cross-join.
+  // First get all labels that have >1 node, then dedup within each label.
+  const labelCounts = await runQuery(`
+    MATCH (n)
+    WITH labels(n) AS lbls
+    UNWIND lbls AS label
+    WITH label, count(*) AS cnt
+    WHERE cnt > 1
+    RETURN label
   `).catch(() => [])
 
-  // Fallback if APOC isn't available — use toLower + trim
-  let dupes = exactDupes
-  if (exactDupes.length === 0) {
-    dupes = await runQuery(`
-      MATCH (a), (b)
+  let dupes = []
+  for (const rec of labelCounts) {
+    const label = rec.get('label')
+    if (!label || label === '__Embedded__') continue
+
+    // APOC first, then fallback to toLower
+    const batch = await runQuery(`
+      MATCH (a:\`${sanitizeLabel(label)}\`), (b:\`${sanitizeLabel(label)}\`)
       WHERE elementId(a) < elementId(b)
-        AND labels(a) = labels(b)
         AND toLower(trim(a.name)) = toLower(trim(b.name))
         AND a.name <> b.name
       RETURN elementId(a) AS keepId, a.name AS keepName,
              elementId(b) AS dupeId, b.name AS dupeName,
              labels(a) AS labels
-      LIMIT 50
-    `)
+      LIMIT 20
+    `).catch(() => [])
+    dupes.push(...batch)
+    if (dupes.length >= 50) break
   }
 
-  // Strategy 2: Embedding similarity for nodes with the same label
-  const embeddingDupes = await runQuery(`
-    MATCH (a), (b)
-    WHERE elementId(a) < elementId(b)
-      AND labels(a) = labels(b)
-      AND a.embedding IS NOT NULL
-      AND b.embedding IS NOT NULL
-      AND a.name <> b.name
-      AND gds.similarity.cosine(a.embedding, b.embedding) > ${parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.95')}
-    WITH a, b
-    OPTIONAL MATCH (a)--(shared)--(b)
-    WITH a, b, count(shared) AS sharedNeighbors
-    WHERE sharedNeighbors > 0
-    RETURN elementId(a) AS keepId, a.name AS keepName,
-           elementId(b) AS dupeId, b.name AS dupeName,
-           labels(a) AS labels, sharedNeighbors
-    LIMIT 30
-  `).catch(() => []) // GDS may not be available on Aura free tier
+  // Strategy 2: Embedding similarity — also partitioned by label
+  const embeddingDupes = []
+  for (const rec of labelCounts) {
+    const label = rec.get('label')
+    if (!label || label === '__Embedded__') continue
+
+    const batch = await runQuery(`
+      MATCH (a:\`${sanitizeLabel(label)}\`), (b:\`${sanitizeLabel(label)}\`)
+      WHERE elementId(a) < elementId(b)
+        AND a.embedding IS NOT NULL
+        AND b.embedding IS NOT NULL
+        AND a.name <> b.name
+        AND gds.similarity.cosine(a.embedding, b.embedding) > ${parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.95')}
+      WITH a, b
+      OPTIONAL MATCH (a)--(shared)--(b)
+      WITH a, b, count(shared) AS sharedNeighbors
+      WHERE sharedNeighbors > 0
+      RETURN elementId(a) AS keepId, a.name AS keepName,
+             elementId(b) AS dupeId, b.name AS dupeName,
+             labels(a) AS labels, sharedNeighbors
+      LIMIT 15
+    `).catch(() => []) // GDS may not be available on Aura free tier
+    embeddingDupes.push(...batch)
+    if (embeddingDupes.length >= 30) break
+  }
 
   const allDupes = [...dupes, ...embeddingDupes]
 
@@ -1943,6 +1953,28 @@ function buildHeuristicPlan(state, pressure) {
   return plan.slice(0, 5)
 }
 
+// ─── Helper Counts (used by workers for adaptive scheduling) ──────────
+
+async function countStaleNodes() {
+  const [result] = await runQuery(
+    `MATCH (n) WHERE n.stale_since IS NOT NULL RETURN count(n) AS cnt`
+  )
+  return result?.get('cnt')?.toInt?.() ?? result?.get('cnt') ?? 0
+}
+
+async function countDedupCandidates() {
+  const [result] = await runQuery(
+    `MATCH (a), (b)
+     WHERE elementId(a) < elementId(b)
+       AND labels(a) = labels(b)
+       AND toLower(trim(a.name)) = toLower(trim(b.name))
+       AND a.name <> b.name
+     RETURN count(*) AS cnt
+     LIMIT 1`
+  ).catch(() => [{ get: () => 0 }])
+  return result?.get('cnt')?.toInt?.() ?? result?.get('cnt') ?? 0
+}
+
 module.exports = {
   // Individual phases (still available for direct/targeted use)
   deduplicateNodes,
@@ -1964,4 +1996,6 @@ module.exports = {
   runFullPipeline: runConsolidationPipeline,
 
   getConsolidationStats,
+  countStaleNodes,
+  countDedupCandidates,
 }

@@ -98,7 +98,7 @@ async function init() {
   // Start adaptive metabolism reporting (first run after 10 min)
   _metabolismTimer = setTimeout(runMetabolismReport, 10 * 60 * 1000)
 
-  // React to significant KG events immediately rather than waiting for next window
+  // React to significant events immediately rather than waiting for next window
   try {
     const eventBus = require('../services/internalEventBusService')
     eventBus.on('kg:high_importance_ingestion', () => {
@@ -108,9 +108,39 @@ async function init() {
       }
     })
     eventBus.on('factory:session_complete', runMetabolismReport)
+
+    // Organism cognitive broadcasts — high-salience percepts should influence behavior,
+    // not just display on the frontend. Health anomalies, critical factory outcomes,
+    // etc. feed back into the maintenance loop and trigger immediate memory sync.
+    eventBus.on('organism:cognitive_broadcast', (percept) => {
+      if (percept.salience >= 0.7) {
+        logger.info(`Symbridge worker: high-salience percept from organism (${percept.percept_type}, salience: ${percept.salience})`)
+        // Immediate memory sync — organism is signaling something important changed
+        if (!_memorySyncInProgress) {
+          if (_memorySyncTimer) clearTimeout(_memorySyncTimer)
+          runMemorySync()
+        }
+        // Trigger immediate metabolism report so organism has fresh cost data
+        runMetabolismReport()
+      }
+    })
+
+    // Pressure shifts — reschedule adaptive timers immediately instead of waiting
+    // for the next scheduled tick. A large pressure delta means the organism's Oikos
+    // just re-evaluated resource availability; our timers should respond in kind.
+    eventBus.on('metabolism:pressure_changed', ({ previous, current, tier, delta }) => {
+      logger.info(`Symbridge worker: pressure shift ${previous.toFixed(2)} → ${current.toFixed(2)} (Δ${delta.toFixed(2)}, tier: ${tier})`)
+      // Reschedule memory sync to match new pressure regime
+      scheduleMemorySync()
+      // Report the new state to organism immediately
+      runMetabolismReport()
+    })
   } catch {}
 
-  logger.info('Symbridge worker initialized (Redis consumer + Neo4j poller + vitals + adaptive memory + adaptive metabolism)')
+  // Start broadcasting metabolic pressure to frontend (1Hz)
+  metabolismBridge.startFrontendBroadcast()
+
+  logger.info('Symbridge worker initialized (Redis consumer + Neo4j poller + vitals + adaptive memory + adaptive metabolism + metabolic broadcast)')
 }
 
 init().catch(err => {

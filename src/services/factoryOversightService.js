@@ -13,12 +13,14 @@ const kgHooks = require('./kgIngestionHooks')
 //
 // FREEDOM UPGRADES:
 // - Pressure-adjusted deploy thresholds (gradient, not binary)
-// - Self-modification gate (0.85 threshold, mandatory review)
+// - Self-modification gate (mandatory review, elevated threshold)
 // - Cross-session learning extraction (patterns to factory_learnings)
 // - Validation outcome tracking (learned confidence signals)
 // - Cognitive broadcasts (outcomes → organism's Atune)
 // - Internal event bus emission (Factory → services discourse)
-// - Learning decay (stale patterns lose confidence)
+// - Calendar-based learning decay (failure patterns exempt)
+// - Bidirectional confidence blending (review drags down, not just up)
+// - Semantic learning matching (relevance, not bulk injection)
 // ═══════════════════════════════════════════════════════════════════════
 
 const env = require('../config/env')
@@ -103,7 +105,9 @@ async function runPostSessionPipeline(sessionId) {
         }).catch(() => {})
       }
     }).catch(() => {})
-    review = { approved: true, notes: `Review deferred (metabolic pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate})`, confidence: 0, deferred: true }
+    // Deferred review: don't inject confidence: 0 which would drag down the blend.
+    // Pass null so the blending logic knows to skip the review signal entirely.
+    review = { approved: true, notes: `Review deferred (metabolic pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate})`, confidence: null, deferred: true }
   } else {
     review = await reviewChanges(session, filesChanged)
   }
@@ -120,7 +124,7 @@ async function runPostSessionPipeline(sessionId) {
 
   let confidence = validation?.confidence || 0
   const reviewApproved = review?.approved !== false
-  const reviewConfidence = review?.confidence || 0
+  const reviewConfidence = review?.confidence ?? null  // null = deferred/unavailable, 0 = explicit zero
 
   // Self-modification: mandatory review approval, no bypass
   if (isSelfMod && !reviewApproved) {
@@ -144,19 +148,29 @@ async function runPostSessionPipeline(sessionId) {
     return
   }
 
-  // Blend validation signal with review confidence — let the combined signal speak for itself.
-  // No artificial boosts or floors. If review is strong, it lifts confidence naturally.
-  if (reviewApproved && reviewConfidence > confidence) {
+  // Bidirectional confidence blending — review signal always participates.
+  // Validation is the hard signal (tests/lint/typecheck). Review is the soft signal (LLM vibes).
+  // Validation anchors at 70% weight; review can lift OR drag confidence.
+  // Deferred reviews (confidence: null) skip blending — validation stands alone.
+  const VALIDATION_WEIGHT = 0.7
+  const REVIEW_WEIGHT = 1.0 - VALIDATION_WEIGHT
+  if (reviewConfidence !== null && (reviewConfidence >= 0 || !reviewApproved)) {
     const before = confidence
-    confidence = (confidence + reviewConfidence) / 2
-    logger.info(`Factory oversight: blended confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (validation: ${before.toFixed(2)}, review: ${reviewConfidence.toFixed(2)})`, { sessionId })
+    const effectiveReviewConf = reviewApproved ? reviewConfidence : Math.min(reviewConfidence, 0.2)
+    confidence = (confidence * VALIDATION_WEIGHT) + (effectiveReviewConf * REVIEW_WEIGHT)
+    logger.info(`Factory oversight: blended confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} (validation: ${before.toFixed(2)} × ${VALIDATION_WEIGHT}, review: ${effectiveReviewConf.toFixed(2)} × ${REVIEW_WEIGHT})`, { sessionId })
     await db`UPDATE cc_sessions SET confidence_score = ${confidence} WHERE id = ${sessionId}`
   }
 
-  // Step 3: Deploy decision — LLM review drives this, not hardcoded thresholds.
-  // reviewApproved = DeepSeek said yes. confidence = validation signal.
-  // Both matter. Neither has a magic number.
-  if (reviewApproved && confidence > 0) {
+  // Step 3: Deploy decision
+  // Minimum thresholds prevent zero-validation auto-deploys.
+  // Self-modifications require higher confidence because the blast radius is the Factory itself.
+  const deployFloor = isSelfMod
+    ? parseFloat(env.FACTORY_SELF_MODIFY_THRESHOLD || '0.7') || 0.7
+    : parseFloat(env.FACTORY_AUTO_DEPLOY_THRESHOLD || '0.5') || 0.5
+  const meetsThreshold = confidence >= deployFloor
+
+  if (reviewApproved && meetsThreshold) {
     // Auto-deploy
     logger.info(`Factory auto-deploying session ${sessionId} (confidence: ${confidence.toFixed(2)})`)
     try {
@@ -178,6 +192,11 @@ async function runPostSessionPipeline(sessionId) {
           confidence,
           commitSha: deployResult.commitSha,
         })
+        // Broadcast pipeline failure (reverted) to frontend
+        broadcastToSession(sessionId, 'cc:pipeline_result', {
+          success: false, confidence, error: reason, reverted: true,
+        })
+
         emitEvent('factory:deploy_failed', {
           sessionId, codebaseName: session.codebase_name,
           confidence, error: reason, reverted: true,
@@ -201,6 +220,11 @@ async function runPostSessionPipeline(sessionId) {
           filesChanged,
         })
 
+        // Broadcast pipeline result to frontend
+        broadcastToSession(sessionId, 'cc:pipeline_result', {
+          success: true, confidence, commitSha: deployResult.commitSha, filesChanged,
+        })
+
         // Emit to event bus
         emitEvent('factory:deploy_success', {
           sessionId, codebaseName: session.codebase_name,
@@ -220,14 +244,22 @@ async function runPostSessionPipeline(sessionId) {
       await trackValidationOutcome(sessionId, 'failure')
       await generateFollowUp(session, 'deploy_failed', err.message)
 
+      // Broadcast pipeline failure to frontend
+      broadcastToSession(sessionId, 'cc:pipeline_result', {
+        success: false, confidence, error: err.message,
+      })
+
       emitEvent('factory:deploy_failed', {
         sessionId, codebaseName: session.codebase_name,
         confidence, error: err.message,
       })
     }
   } else {
-    // Review said no — escalate to human rather than silently rejecting.
-    // The LLM saw something we shouldn't override with a discard.
+    // Escalate: review rejected, or confidence below deploy floor.
+    const reason = !reviewApproved
+      ? `Review rejected (confidence: ${confidence.toFixed(2)})`
+      : `Confidence ${confidence.toFixed(2)} below ${isSelfMod ? 'self-mod' : 'deploy'} floor ${deployFloor}`
+    logger.info(`Factory escalating: ${reason}`, { sessionId })
     await escalateToHuman(session, confidence, review, filesChanged)
   }
 }
@@ -289,10 +321,11 @@ async function reviewChanges(session, filesChanged) {
       }
     }
 
+    const fs = require('fs')
+    const path = require('path')
+
     // For new untracked files, read their content directly
     if (!diff && filesChanged.length > 0) {
-      const fs = require('fs')
-      const path = require('path')
       const newFileContents = []
       for (const f of filesChanged.slice(0, 5)) {
         try {
@@ -321,27 +354,78 @@ async function reviewChanges(session, filesChanged) {
       }
     } catch {}
 
+    // Read full file contents for changed files (not just diff) so the reviewer
+    // can see the context around changes — callers, data flow, surrounding logic
+    let fullFileContext = ''
+    for (const f of filesChanged.slice(0, 3)) {
+      try {
+        const content = fs.readFileSync(path.join(cwd, f), 'utf-8')
+        if (content.length < 8000) {
+          fullFileContext += `\n### Full file: ${f}\n\`\`\`\n${content}\n\`\`\`\n`
+        } else {
+          fullFileContext += `\n### File: ${f} (truncated, ${content.length} chars)\n\`\`\`\n${content.slice(0, 4000)}\n...\n${content.slice(-2000)}\n\`\`\`\n`
+        }
+      } catch {}
+    }
+
+    const selfModWarning = session.self_modification
+      ? `\n⚠️  SELF-MODIFICATION: The Factory is editing its own code. Apply maximum scrutiny.
+Specifically watch for:
+- Changes to oversight logic, confidence scoring, or deploy thresholds (the Factory weakening its own guardrails)
+- Changes to rate limits or caps
+- New external dependencies or network calls
+- Removal of logging, error handling, or safety checks\n`
+      : ''
+
     const response = await callDeepSeek([{
       role: 'user',
-      content: `Review this diff from the Ecodia Factory (autonomous code system).${session.self_modification ? ' This is a self-modification — the Factory editing its own code.' : ''}
+      content: `You are a code reviewer for the Ecodia Factory (autonomous code system). Your review gates auto-deployment — be rigorous.
+${selfModWarning}
+## Task
+${session.initial_prompt}
 
-Task: ${session.initial_prompt}
-Codebase: ${session.codebase_name || 'unknown'}
-Files changed: ${filesChanged.join(', ')}
+## Codebase
+${session.codebase_name || 'unknown'}
+
+## Files Changed
+${filesChanged.join(', ')}
 ${learningsContext}
 
-Diff (truncated to 5000 chars):
-${diff.slice(0, 5000)}
+## Diff
+${diff.slice(0, 8000)}
+${fullFileContext}
 
-Does it accomplish the task? Any bugs, security issues, or regressions? Should it auto-deploy or need human review?
+## Review Checklist
+Evaluate each dimension and explain your reasoning:
 
-Respond as JSON:
+1. **Correctness**: Does the code accomplish the stated task? Are there logic errors, off-by-one errors, race conditions, or missing null/undefined checks?
+2. **Security**: SQL injection, command injection, path traversal, XSS, secrets in code, unsafe deserialization?
+3. **Regression risk**: Could this break existing functionality? Are there callers of modified functions that weren't updated? API contract changes?
+4. **Error handling**: Are new failure modes handled? Could exceptions propagate and crash the process?
+5. **Data integrity**: Database migrations safe? Can this corrupt or lose data? Transaction boundaries correct?
+
+## Concerns
+List ANY concerns even if you're approving overall. A concern is anything that:
+- Could fail under edge cases you can't fully verify from the diff
+- Changes behaviour of functions called by other modules
+- Modifies deploy/oversight/confidence logic (if self-modification)
+- Adds external dependencies or new network calls
+- Removes safety checks, logging, or validation
+
+## Response Format (JSON only)
 {
   "approved": true/false,
   "confidence": 0.0-1.0,
-  "notes": "your assessment",
-  "concerns": [],
-  "accomplishes_task": true/false
+  "notes": "2-3 sentence summary of your assessment",
+  "concerns": ["specific concern 1", "specific concern 2"],
+  "accomplishes_task": true/false,
+  "checklist": {
+    "correctness": "pass/fail/uncertain — brief reason",
+    "security": "pass/fail/uncertain — brief reason",
+    "regression_risk": "low/medium/high — brief reason",
+    "error_handling": "pass/fail/uncertain — brief reason",
+    "data_integrity": "pass/fail/uncertain — brief reason"
+  }
 }`,
     }], {
       module: 'factory_oversight',
@@ -420,8 +504,6 @@ async function checkVercelDeployment(session, deployResult) {
 // ─── Report to Trigger Source ───────────────────────────────────────
 
 async function reportToTriggerSource(session, result) {
-  broadcastToSession(session.id, 'cc:pipeline_result', result)
-
   // Report back to organism for any trigger source that came from the organism
   const organismTriggers = ['simula_proposal', 'thymos_incident', 'kg_insight', 'self_modification']
   if (organismTriggers.includes(session.trigger_source)) {
@@ -553,13 +635,18 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
     // Extract cross-session learning patterns via DeepSeek
     await extractLearningPattern(session, outcome, details)
 
-    // Learning decay: age out old learnings for this codebase
+    // Learning decay: calendar-based, once per day at most.
+    // Failure patterns and "dont_try" learnings are exempt — they encode hard constraints
+    // that don't become less true with time (e.g. "this column is NOT NULL").
+    // Success patterns decay because the codebase evolves and techniques become stale.
     if (session.codebase_id) {
       await db`
         UPDATE factory_learnings
-        SET confidence = GREATEST(0.1, confidence * 0.98), updated_at = now()
+        SET confidence = GREATEST(0.15, confidence * 0.95), updated_at = now()
         WHERE codebase_id = ${session.codebase_id}
-          AND updated_at < now() - interval '30 days'
+          AND created_at < now() - interval '30 days'
+          AND updated_at < now() - interval '1 day'
+          AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
       `.catch(() => {})
     }
 
@@ -579,36 +666,63 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
 
 async function extractLearningPattern(session, outcome, details) {
   try {
-    const prompt = outcome === 'success'
-      ? `Factory CC session succeeded.
+    // Build diff context for the extraction — learnings are only valuable if grounded in actual code
+    let diffSnippet = ''
+    if (session.repo_path) {
+      try {
+        const { execFileSync } = require('child_process')
+        diffSnippet = execFileSync('git', ['diff', '--stat'], { cwd: session.repo_path, encoding: 'utf-8' }).trim()
+        if (diffSnippet) diffSnippet = `\nDiff stat:\n${diffSnippet.slice(0, 1000)}`
+      } catch {}
+    }
 
-Task: ${(session.initial_prompt || '').slice(0, 300)}
+    const reviewNotes = details.reviewNotes ? `\nReview notes: ${details.reviewNotes}` : ''
+
+    const prompt = outcome === 'success'
+      ? `Factory CC session succeeded. Extract a SPECIFIC, ACTIONABLE learning.
+
+Task: ${(session.initial_prompt || '').slice(0, 400)}
 Codebase: ${session.codebase_name || 'unknown'}
 Confidence: ${details.confidence || 'N/A'}
-Files changed: ${(session.files_changed || []).join(', ') || 'none'}
+Files changed: ${(session.files_changed || []).join(', ') || 'none'}${diffSnippet}${reviewNotes}
 
-What's worth remembering for future sessions on this codebase? Any technique, insight, or pattern that made this work?
+Rules for good learnings:
+- MUST reference specific files, functions, patterns, or APIs — not generic advice
+- MUST be something a future session couldn't know from reading the code alone
+- BAD: "Database migrations should be tested" (obvious)
+- GOOD: "The notifications table has a NOT NULL constraint on metadata — always pass {} not null"
+- GOOD: "wsManager.broadcastToSession expects string sessionId, not UUID object"
 
 Respond as JSON:
 {
   "pattern_type": "success_pattern|technique|discovery|codebase_insight",
-  "pattern_description": "one-sentence reusable insight",
+  "pattern_description": "specific, actionable insight referencing files/functions/constraints",
+  "keywords": ["keyword1", "keyword2"],
   "confidence": 0.0-1.0
-}`
-      : `Factory CC session failed (${outcome}).
+}
+If nothing specific is worth remembering, respond: {"pattern_type": "none", "pattern_description": "", "confidence": 0}`
+      : `Factory CC session failed (${outcome}). Extract a SPECIFIC, ACTIONABLE learning.
 
-Task: ${(session.initial_prompt || '').slice(0, 300)}
+Task: ${(session.initial_prompt || '').slice(0, 400)}
 Codebase: ${session.codebase_name || 'unknown'}
 Error: ${details.error || details.reason || 'unknown'}
+Files changed: ${(session.files_changed || []).join(', ') || 'none'}${diffSnippet}${reviewNotes}
 
-What should future sessions know to avoid or approach differently?
+Rules for good failure learnings:
+- MUST explain what specifically went wrong and how to avoid it
+- MUST reference the file, function, or constraint that caused the failure
+- BAD: "Be careful with database migrations" (useless)
+- GOOD: "factoryTriggerService.resolveCodebase returns null when codebase name has trailing spaces — always trim input"
+- GOOD: "deploymentService.deploySession throws if git working dir has staged changes from a previous session"
 
 Respond as JSON:
 {
-  "pattern_type": "failure_pattern|dont_try",
-  "pattern_description": "one-sentence insight for future sessions",
+  "pattern_type": "failure_pattern|dont_try|constraint",
+  "pattern_description": "specific failure cause and avoidance strategy referencing files/functions",
+  "keywords": ["keyword1", "keyword2"],
   "confidence": 0.0-1.0
-}`
+}
+If nothing specific is worth remembering, respond: {"pattern_type": "none", "pattern_description": "", "confidence": 0}`
 
     const response = await callDeepSeek([{ role: 'user', content: prompt }], {
       module: 'factory_learning',
@@ -619,24 +733,31 @@ Respond as JSON:
     const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
     const parsed = JSON.parse(cleaned)
 
-    if (parsed.pattern_description && parsed.pattern_description.length > 10) {
-      await db`
-        INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids)
-        VALUES (${session.codebase_id || null},
-                ${parsed.pattern_type || (outcome === 'success' ? 'success_pattern' : 'failure_pattern')},
-                ${parsed.pattern_description},
-                ${parsed.confidence || 0.5},
-                ${outcome === 'success'},
-                ${[session.id]})
-      `
-      logger.info(`Factory learning extracted: [${parsed.pattern_type}] ${parsed.pattern_description.slice(0, 80)}`)
-
-      emitEvent('factory:learning_recorded', {
-        sessionId: session.id,
-        codebaseName: session.codebase_name,
-        patternType: parsed.pattern_type,
-      })
+    // Skip "none" learnings — the LLM decided nothing specific was worth saving
+    if (parsed.pattern_type === 'none' || !parsed.pattern_description || parsed.pattern_description.length <= 10) {
+      logger.debug('Learning extraction: LLM found nothing specific to remember', { sessionId: session.id })
+      return
     }
+
+    const keywords = Array.isArray(parsed.keywords) ? parsed.keywords.filter(k => typeof k === 'string') : []
+
+    await db`
+      INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence)
+      VALUES (${session.codebase_id || null},
+              ${parsed.pattern_type || (outcome === 'success' ? 'success_pattern' : 'failure_pattern')},
+              ${parsed.pattern_description},
+              ${parsed.confidence || 0.5},
+              ${outcome === 'success'},
+              ${[session.id]},
+              ${JSON.stringify({ keywords, task: (session.initial_prompt || '').slice(0, 200), files: session.files_changed || [] })})
+    `
+    logger.info(`Factory learning extracted: [${parsed.pattern_type}] ${parsed.pattern_description.slice(0, 80)}`)
+
+    emitEvent('factory:learning_recorded', {
+      sessionId: session.id,
+      codebaseName: session.codebase_name,
+      patternType: parsed.pattern_type,
+    })
   } catch (err) {
     logger.debug('Learning pattern extraction failed (non-blocking)', { error: err.message })
   }

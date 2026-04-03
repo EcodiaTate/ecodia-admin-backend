@@ -54,16 +54,6 @@ router.get('/node/:name/neighborhood', async (req, res, next) => {
   }
 })
 
-// POST /api/kg/embed — manually trigger embedding of stale nodes
-router.post('/embed', async (req, res, next) => {
-  try {
-    const count = await kg.embedStaleNodes(50)
-    res.json({ embedded: count })
-  } catch (err) {
-    next(err)
-  }
-})
-
 // GET /api/kg/briefing?q=query — AI-narrated briefing from graph context
 router.get('/briefing', async (req, res, next) => {
   try {
@@ -99,40 +89,6 @@ router.get('/consolidation/stats', async (req, res, next) => {
     const consolidation = require('../services/kgConsolidationService')
     const stats = await consolidation.getConsolidationStats()
     res.json(stats)
-  } catch (err) {
-    next(err)
-  }
-})
-
-// POST /api/kg/consolidation/run — manually trigger consolidation pipeline
-// dryRun=true runs synchronously (fast, no LLM calls)
-// Real runs fire-and-forget (too many DeepSeek calls to wait for)
-router.post('/consolidation/run', async (req, res, next) => {
-  try {
-    const dryRun = req.query.dryRun === 'true'
-    const consolidation = require('../services/kgConsolidationService')
-
-    if (dryRun) {
-      const results = await consolidation.runConsolidationPipeline({ dryRun: true })
-      return res.json(results)
-    }
-
-    // Fire and forget — return immediately, run in background
-    res.json({ status: 'started', message: 'Consolidation pipeline running in background. Check /consolidation/stats for results.' })
-
-    consolidation.runConsolidationPipeline({ dryRun: false }).catch(err => {
-      require('../config/logger').error('Background consolidation failed', { error: err.message })
-    })
-  } catch (err) {
-    next(err)
-  }
-})
-
-// GET /api/kg/health — check Neo4j connection
-router.get('/health', async (req, res, next) => {
-  try {
-    const healthy = await kg.healthCheck()
-    res.json({ neo4j: healthy ? 'connected' : 'disconnected' })
   } catch (err) {
     next(err)
   }

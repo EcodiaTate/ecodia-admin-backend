@@ -40,12 +40,4 @@ router.get('/stats', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// POST /api/vercel/sync — manual sync
-router.post('/sync', async (_req, res, next) => {
-  try {
-    await vercelService.poll()
-    res.json({ ok: true })
-  } catch (err) { next(err) }
-})
-
 module.exports = router

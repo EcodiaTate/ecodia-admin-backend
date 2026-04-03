@@ -88,6 +88,19 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
 
   logger.info(`Factory dispatch: ${triggerSource} → session ${session.id}`, { codebaseId, triggeredBy })
 
+  // Broadcast session creation to all clients
+  const { broadcast } = require('../websocket/wsManager')
+  broadcast('cc:session_created', {
+    data: {
+      id: session.id,
+      prompt: session.initial_prompt?.slice(0, 120),
+      triggered_by: session.triggered_by,
+      codebase_id: session.codebase_id,
+      status: session.status || 'initializing',
+      pipeline_stage: session.pipeline_stage || 'queued',
+    },
+  })
+
   // Start async (fire-and-forget)
   ccService.startSession(session).catch(err => {
     logger.error(`Factory session ${session.id} failed to start`, { error: err.message })
@@ -248,25 +261,43 @@ async function dispatchFromCapabilityRequest(request) {
 
 // ─── Trigger: Self-Modification (Factory modifies itself) ───────────
 
-// Sliding window: track timestamps of recent dispatches, not a daily counter.
-// Prevents boundary gaming (e.g. 3 at 11:59pm + 3 at 12:01am).
-const selfModTimestamps = []
-// 0 = unlimited. Raise this in .env only if you need to slow things down.
-const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '0', 10)
+// Rate limits: DB-persisted sliding window.
+// In-memory timestamps are a cache; DB is authoritative (survives PM2 restarts).
+// Defaults are sane non-zero values. 0 = unlimited (opt-in only).
+const SELF_MOD_DAILY_CAP = parseInt(env.SELF_MOD_DAILY_CAP || '5', 10)
 const SLIDING_WINDOW_MS = 24 * 60 * 60 * 1000
 
-async function dispatchSelfModification(spec) {
-  const now = Date.now()
-  // Evict entries outside the 24h window
-  while (selfModTimestamps.length > 0 && now - selfModTimestamps[0] > SLIDING_WINDOW_MS) {
-    selfModTimestamps.shift()
+async function _getSlidingWindowCount(dispatchType) {
+  try {
+    const [row] = await db`
+      SELECT count(*)::int AS count FROM factory_dispatch_log
+      WHERE dispatch_type = ${dispatchType}
+        AND dispatched_at > now() - interval '24 hours'
+    `
+    return row?.count || 0
+  } catch {
+    return 0
   }
+}
 
-  if (SELF_MOD_DAILY_CAP > 0 && selfModTimestamps.length >= SELF_MOD_DAILY_CAP) {
-    logger.warn(`Factory self-modification sliding-window cap reached (${SELF_MOD_DAILY_CAP} in last 24h)`)
+async function _logDispatch(dispatchType, sessionId, metadata = {}) {
+  try {
+    await db`
+      INSERT INTO factory_dispatch_log (dispatch_type, session_id, metadata)
+      VALUES (${dispatchType}, ${sessionId}, ${JSON.stringify(metadata)})
+    `
+  } catch (err) {
+    logger.debug('Failed to log dispatch', { error: err.message })
+  }
+}
+
+async function dispatchSelfModification(spec) {
+  const windowCount = await _getSlidingWindowCount('self_modification')
+
+  if (SELF_MOD_DAILY_CAP > 0 && windowCount >= SELF_MOD_DAILY_CAP) {
+    logger.warn(`Factory self-modification sliding-window cap reached (${windowCount}/${SELF_MOD_DAILY_CAP} in last 24h)`)
     return null
   }
-  selfModTimestamps.push(now)
 
   // Resolve to Factory's own codebase
   const [factoryCb] = await db`SELECT id, repo_path FROM codebases WHERE name = 'ecodiaos-backend' LIMIT 1`
@@ -311,43 +342,43 @@ Implement the proposed changes.`,
   // Mark as self-modification so oversight applies higher threshold
   if (session) {
     await db`UPDATE cc_sessions SET self_modification = true WHERE id = ${session.id}`.catch(() => {})
+    await _logDispatch('self_modification', session.id, { description: (spec.description || '').slice(0, 200) })
   }
 
-  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${selfModTimestamps.length}/${SELF_MOD_DAILY_CAP} today)`)
+  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${windowCount + 1}/${SELF_MOD_DAILY_CAP} in 24h window)`)
 
   return session
 }
 
 // ─── Trigger: Prediction-Based (KG Phase 6 actionable predictions) ──
 
-const predictionTimestamps = []
-// 0 = unlimited. Raise this in .env only if you need to slow things down.
-const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '0', 10)
+const PREDICTION_DAILY_CAP = parseInt(env.PREDICTION_SESSION_DAILY_CAP || '10', 10)
 
 async function dispatchFromPrediction(prediction) {
-  const now = Date.now()
-  // Sliding 24h window
-  while (predictionTimestamps.length > 0 && now - predictionTimestamps[0] > SLIDING_WINDOW_MS) {
-    predictionTimestamps.shift()
-  }
+  const windowCount = await _getSlidingWindowCount('prediction')
 
-  if (PREDICTION_DAILY_CAP > 0 && predictionTimestamps.length >= PREDICTION_DAILY_CAP) {
-    logger.debug(`Prediction dispatch sliding-window cap reached (${PREDICTION_DAILY_CAP} in last 24h)`)
+  if (PREDICTION_DAILY_CAP > 0 && windowCount >= PREDICTION_DAILY_CAP) {
+    logger.debug(`Prediction dispatch sliding-window cap reached (${windowCount}/${PREDICTION_DAILY_CAP} in last 24h)`)
     return null
   }
-  predictionTimestamps.push(now)
 
   const codebaseId = prediction.codebaseId || await resolveCodebase({ prompt: prediction.description })
 
-  logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${predictionTimestamps.length}/${PREDICTION_DAILY_CAP} today)`)
+  logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${windowCount + 1}/${PREDICTION_DAILY_CAP} in 24h window)`)
 
-  return createAndStartSession({
+  const session = await createAndStartSession({
     codebaseId,
     prompt: `Proactive: KG Prediction\n\nPrediction: ${prediction.description}\nBasis: ${prediction.basis || 'Pattern analysis'}\nConfidence: ${prediction.confidence || 'N/A'}\nTimeframe: ${prediction.timeframe || 'unknown'}\n\nThe Knowledge Graph's prediction engine identified this as likely to happen. Proactively prepare for it or address it now.`,
     triggeredBy: 'kg_prediction',
     triggerSource: 'kg_insight',
     triggerRefId: prediction.id || null,
   })
+
+  if (session) {
+    await _logDispatch('prediction', session.id, { description: (prediction.description || '').slice(0, 200) })
+  }
+
+  return session
 }
 
 // ─── Trigger: Integration Scaffold ──────────────────────────────────

@@ -307,7 +307,7 @@ Respond as JSON:
             conversationId: conv.id,
             participantName: conv.participant_name,
           },
-          context: { platform: conv.platform, pageName: conv.page_name, participantName: conv.participant_name },
+          context: { from: conv.participant_name, email: conv.participant_id ? `${conv.participant_id}@${conv.platform || 'meta'}` : null, platform: conv.platform, pageName: conv.page_name, participantName: conv.participant_name },
           priority: triage.priority === 'spam' ? 'low' : triage.priority,
         }).catch(() => {})
       }

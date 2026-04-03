@@ -11,6 +11,50 @@ const axios = require('axios')
 // semantic retrieval. Trace-based traversal follows causal chains.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Ingestion Throttle Gate ─────────────────────────────────────────
+// Prevents duplicate LLM ingestion of the same sourceId within a time window,
+// and caps total LLM ingestion calls per minute to prevent runaway costs.
+
+const _recentIngestions = new Map() // sourceId → timestamp
+const INGESTION_DEDUP_WINDOW_MS = 10 * 60 * 1000 // 10 min
+const INGESTION_RATE_WINDOW_MS = 60 * 1000 // 1 min
+let _ingestionTimestamps = [] // ring buffer of recent ingestion timestamps
+const MAX_INGESTIONS_PER_MINUTE = parseInt(env.KG_MAX_INGESTIONS_PER_MIN || '20', 10)
+
+function shouldThrottleIngestion(sourceId) {
+  const now = Date.now()
+
+  // Dedup: skip if same sourceId was ingested recently
+  if (sourceId) {
+    const lastIngested = _recentIngestions.get(sourceId)
+    if (lastIngested && now - lastIngested < INGESTION_DEDUP_WINDOW_MS) {
+      return true
+    }
+  }
+
+  // Rate limit: skip if too many ingestions in the last minute
+  _ingestionTimestamps = _ingestionTimestamps.filter(t => now - t < INGESTION_RATE_WINDOW_MS)
+  if (_ingestionTimestamps.length >= MAX_INGESTIONS_PER_MINUTE) {
+    return true
+  }
+
+  return false
+}
+
+function recordIngestion(sourceId) {
+  const now = Date.now()
+  if (sourceId) _recentIngestions.set(sourceId, now)
+  _ingestionTimestamps.push(now)
+
+  // GC the dedup map periodically (keep last 500 entries)
+  if (_recentIngestions.size > 500) {
+    const cutoff = now - INGESTION_DEDUP_WINDOW_MS
+    for (const [key, ts] of _recentIngestions) {
+      if (ts < cutoff) _recentIngestions.delete(key)
+    }
+  }
+}
+
 // ─── Node Operations ─────────────────────────────────────────────────
 
 async function ensureNode({ label, name, properties = {}, sourceModule, sourceId }) {
@@ -68,13 +112,41 @@ async function ingestFromLLM(content, { sourceModule, sourceId, context = '' }) 
     return
   }
 
+  // Throttle: skip duplicate sourceIds and enforce rate limit
+  if (shouldThrottleIngestion(sourceId)) {
+    logger.debug(`KG ingestion throttled for ${sourceModule}/${sourceId}`)
+    return
+  }
+
+  // Fetch existing nodes that might overlap — gives the LLM awareness of what's
+  // already in the graph so it reuses existing entity names instead of creating duplicates.
+  let existingContext = ''
+  try {
+    const words = content.split(/\s+/).filter(w => w.length > 3).slice(0, 4)
+    if (words.length > 0) {
+      const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
+      const params = {}
+      words.forEach((w, i) => { params[`w${i}`] = w })
+      const existing = await runQuery(
+        `MATCH (n) WHERE ${whereClauses}
+         RETURN n.name AS name, labels(n) AS labels
+         LIMIT 10`,
+        params
+      ).catch(() => [])
+      if (existing.length > 0) {
+        existingContext = '\n\nExisting entities already in the graph (reuse these exact names when referring to the same entity — do NOT create duplicates):\n' +
+          existing.map(r => `- ${r.get('name')} [${(r.get('labels') || []).join(', ')}]`).join('\n')
+      }
+    }
+  } catch {}
+
   const prompt = `Extract a knowledge graph from this content.
 
 Source: ${sourceModule}
 ${context ? `Context: ${context}` : ''}
 
 Content:
-${content.slice(0, 3000)}
+${content.slice(0, 3000)}${existingContext}
 
 Pull out every meaningful entity and every relationship between them — people, orgs, projects, concepts, events, decisions, problems, tools. Capture causal chains, temporal sequences, and implicit connections.
 
@@ -125,6 +197,7 @@ Respond as JSON:
       }).catch(err => logger.warn(`KG rel failed: ${rel.rel_type}`, { error: err.message }))
     }
 
+    recordIngestion(sourceId)
     logger.info(`KG ingested ${parsed.nodes?.length || 0} nodes, ${parsed.relationships?.length || 0} relationships from ${sourceModule}`)
     return parsed
   } catch (err) {
@@ -165,7 +238,7 @@ async function embedNode(nodeId) {
 
   await runWrite(
     `MATCH (n) WHERE elementId(n) = $nodeId
-     SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text`,
+     SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text, n:\`__Embedded__\``,
     { nodeId, embedding, text }
   )
 }
@@ -211,7 +284,7 @@ async function embedStaleNodes(batchSize = 100) {
     if (embeddings[i]) {
       await runWrite(
         `MATCH (n) WHERE elementId(n) = $nodeId
-         SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text`,
+         SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text, n:\`__Embedded__\``,
         { nodeId: nodes[i].nodeId, embedding: embeddings[i], text: nodes[i].text }
       ).catch(err => logger.warn(`Failed to store embedding for ${nodes[i].nodeId}`, { error: err.message }))
     }
@@ -229,37 +302,85 @@ async function getContext(query, { maxSeeds = parseInt(env.KG_CONTEXT_MAX_SEEDS 
   const seedLimit = parseInt(maxSeeds, 10) || 5
   const depthInt = parseInt(maxDepth, 10) || 3
 
-  // Step 1: Find seed node names via text search (always works)
-  const words = query.split(/\s+/).filter(w => w.length > 2).slice(0, 5)
-  if (words.length === 0) return { traces: [], summary: '' }
+  // Step 1: Find seed nodes via vector similarity (primary) + keyword fallback
+  let seedRecords = []
 
-  const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
-  const params = {}
-  words.forEach((w, i) => { params[`w${i}`] = w })
+  // Primary: semantic vector search — finds nodes by meaning, not substring
+  if (env.OPENAI_API_KEY) {
+    try {
+      const queryEmbedding = await getEmbedding(query)
+      if (queryEmbedding) {
+        seedRecords = await runQuery(
+          `CALL db.index.vector.queryNodes('node_embeddings', $k, $embedding)
+           YIELD node, score
+           WHERE score >= $minSim
+           RETURN node.name AS name, labels(node) AS labels, score
+           ORDER BY score DESC`,
+          { k: seedLimit, embedding: queryEmbedding, minSim: minSimilarity }
+        ).catch(() => [])
+      }
+    } catch (err) {
+      logger.debug('KG vector search failed, falling back to keyword', { error: err.message })
+    }
+  }
 
-  const seedRecords = await runQuery(
-    `MATCH (n) WHERE ${whereClauses}
-     RETURN n.name AS name, labels(n) AS labels
-     LIMIT ${seedLimit}`,
-    params
-  )
+  // Fallback: keyword search if vector search returned nothing
+  // (covers cases where embeddings aren't available or index doesn't exist yet)
+  if (seedRecords.length === 0) {
+    const words = query.split(/\s+/).filter(w => w.length > 2).slice(0, 5)
+    if (words.length === 0) return { traces: [], summary: '' }
+
+    const whereClauses = words.map((_, i) => `toLower(n.name) CONTAINS toLower($w${i})`).join(' OR ')
+    const params = {}
+    words.forEach((w, i) => { params[`w${i}`] = w })
+
+    seedRecords = await runQuery(
+      `MATCH (n) WHERE ${whereClauses}
+       RETURN n.name AS name, labels(n) AS labels, 0.5 AS score
+       LIMIT ${seedLimit}`,
+      params
+    )
+  }
 
   if (seedRecords.length === 0) return { traces: [], summary: '' }
 
   // Step 2: For each seed, get its neighborhood via direct Cypher
+  // Return rich node properties — importance, description, timestamps — so
+  // the consumer (Cortex) can reason over *what* nodes mean, not just their names.
   const lines = []
 
   for (const seedRec of seedRecords) {
     const seedName = seedRec.get('name')
     const seedLabels = seedRec.get('labels') || []
-    lines.push(`${seedName} [${seedLabels.join(', ')}]`)
+    const score = seedRec.get('score')
+    const pct = typeof score === 'number' ? ` (${(score * 100).toFixed(0)}%)` : ''
+
+    // Fetch seed node's own properties
+    const [seedProps] = await runQuery(
+      `MATCH (n {name: $seedName})
+       RETURN n.description AS description, n.importance AS importance,
+              n.is_synthesized AS synthesized, n.created_at AS created_at`,
+      { seedName }
+    ).catch(() => [])
+
+    let seedLine = `${seedName} [${seedLabels.join(', ')}]${pct}`
+    if (seedProps) {
+      const imp = seedProps.get('importance')
+      if (imp != null) seedLine += ` importance:${imp}`
+      if (seedProps.get('synthesized')) seedLine += ' [synthesized]'
+      const desc = seedProps.get('description')
+      if (desc) seedLine += ` — ${String(desc).slice(0, 200)}`
+    }
+    lines.push(seedLine)
 
     const neighbors = await runQuery(
       `MATCH (n {name: $seedName})-[r*1..${depthInt}]-(m)
        WHERE m.name <> $seedName
        WITH m, [rel IN r | type(rel)] AS types, size(r) AS depth
-       RETURN DISTINCT m.name AS name, labels(m) AS labels, types, depth
-       ORDER BY depth
+       RETURN DISTINCT m.name AS name, labels(m) AS labels, types, depth,
+              m.description AS description, m.importance AS importance,
+              m.is_synthesized AS synthesized
+       ORDER BY depth, m.importance DESC
        LIMIT 20`,
       { seedName }
     )
@@ -275,7 +396,14 @@ async function getContext(query, { maxSeeds = parseInt(env.KG_CONTEXT_MAX_SEEDS 
       const rawDepth = rec.get('depth')
       const d = typeof rawDepth === 'object' && rawDepth?.low !== undefined ? rawDepth.low : rawDepth
       const indent = '  '.repeat(d)
-      lines.push(`${indent}-[${types.join(' → ')}]-> ${name} [${labels.join(', ')}]`)
+
+      let line = `${indent}-[${types.join(' → ')}]-> ${name} [${labels.join(', ')}]`
+      const imp = rec.get('importance')
+      if (imp != null) line += ` importance:${imp}`
+      if (rec.get('synthesized')) line += ' [synthesized]'
+      const desc = rec.get('description')
+      if (desc) line += ` — ${String(desc).slice(0, 150)}`
+      lines.push(line)
     }
   }
 
@@ -362,6 +490,10 @@ async function getGraphStats() {
 
 async function ensureVectorIndex() {
   try {
+    // Drop the old label-scoped index if it exists (was __Embedded__ but nodes never got that label)
+    await runWrite(`DROP INDEX node_embeddings IF EXISTS`).catch(() => {})
+
+    // Create index scoped to __Embedded__ label — embedStaleNodes now adds this label
     await runWrite(`
       CREATE VECTOR INDEX node_embeddings IF NOT EXISTS
       FOR (n:__Embedded__)
@@ -376,6 +508,16 @@ async function ensureVectorIndex() {
     // Index might already exist or Aura version might not support this syntax
     logger.debug('Vector index creation skipped', { error: err.message })
   }
+}
+
+// ─── Stale Node Count (used by embedding worker for adaptive scheduling) ──
+
+async function countStaleNodes() {
+  const [result] = await runQuery(
+    `MATCH (n) WHERE n.embedding_stale = true OR n.embedding IS NULL
+     RETURN count(n) AS cnt`
+  )
+  return result?.get('cnt')?.toInt?.() ?? result?.get('cnt') ?? 0
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -432,6 +574,7 @@ module.exports = {
   ensureRelationship,
   ingestFromLLM,
   embedStaleNodes,
+  countStaleNodes,
   getContext,
   findNode,
   getNodeNeighborhood,

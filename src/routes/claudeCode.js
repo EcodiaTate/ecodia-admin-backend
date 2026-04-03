@@ -66,6 +66,19 @@ router.post('/sessions', validate(createSessionSchema), async (req, res, next) =
       RETURNING *
     `
 
+    // Broadcast session creation so all clients can track it
+    const { broadcast } = require('../websocket/wsManager')
+    broadcast('cc:session_created', {
+      data: {
+        id: session.id,
+        prompt: session.initial_prompt?.slice(0, 120),
+        triggered_by: session.triggered_by,
+        codebase_id: session.codebase_id,
+        status: session.status,
+        pipeline_stage: session.pipeline_stage || 'queued',
+      },
+    })
+
     // Start CC session asynchronously
     const ccService = require('../services/ccService')
     ccService.startSession(session).catch(err => {

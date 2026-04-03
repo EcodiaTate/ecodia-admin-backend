@@ -27,7 +27,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default(''),
   SYMBRIDGE_SECRET: z.string().default(''),
   ORGANISM_API_URL: z.string().default(''),
-  FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.0'),        // 0 = LLM decides, no floor
+  FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.5'),        // minimum confidence for auto-deploy (non-self-mod)
   FACTORY_ESCALATE_THRESHOLD: z.string().default('0.0'),           // 0 = LLM decides, no escalation floor
   FACTORY_REVIEW_PRESSURE_GATE: z.string().default('0.0'),         // 0 = review always blocks; >0 = async at this pressure
   CC_MAX_TURNS: z.string().default('0'),           // 0 = unlimited
@@ -39,8 +39,8 @@ const envSchema = z.object({
   META_USER_ACCESS_TOKEN: z.string().default(''),
   // Freedom / autonomy config
   // All caps: 0 = unlimited. These exist only so the system can report them — never use them to throttle.
-  FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.0'),  // 0 = LLM decides
-  PREDICTION_SESSION_DAILY_CAP: z.string().default('0'),
+  FACTORY_SELF_MODIFY_THRESHOLD: z.string().default('0.7'),  // minimum confidence for self-modification auto-deploy
+  PREDICTION_SESSION_DAILY_CAP: z.string().default('10'),
   MEMORY_SYNC_IMMEDIATE_THRESHOLD: z.string().default('0.0'), // 0 = always sync
   GOOGLE_PRIMARY_ACCOUNT: z.string().default(''),
   GMAIL_INBOXES: z.string().default(''),              // comma-separated; falls back to GOOGLE_PRIMARY_ACCOUNT
@@ -61,7 +61,7 @@ const envSchema = z.object({
   USD_TO_AUD: z.string().default('1.55'),
   DIRECT_ACTION_READ_ENABLED: z.string().default('true'),
   DIRECT_ACTION_WRITE_ENABLED: z.string().default('true'),  // organism writes enabled
-  SELF_MOD_DAILY_CAP: z.string().default('0'),              // 0 = unlimited
+  SELF_MOD_DAILY_CAP: z.string().default('5'),              // max self-modifications per 24h sliding window
   EVENT_BUS_PERSIST_DEFAULT: z.string().default('false'),
   COGNITIVE_BROADCAST_ENABLED: z.string().default('true'),
   // Direct action rate limits (per hour, 0 = unlimited per type)
@@ -118,6 +118,7 @@ const envSchema = z.object({
   KG_CONTEXT_MAX_SEEDS: z.string().default('15'),
   KG_CONTEXT_MAX_DEPTH: z.string().default('5'),
   KG_CONTEXT_MIN_SIMILARITY: z.string().default('0.4'),
+  KG_MAX_INGESTIONS_PER_MIN: z.string().default('20'),
   // Memory bridge query thresholds
   MEMORY_BRIDGE_BULK_IMPORTANCE_MIN: z.string().default('0.5'),
   MEMORY_BRIDGE_PULL_IMPORTANCE_MIN: z.string().default('0.7'),
@@ -135,6 +136,11 @@ const envSchema = z.object({
   // DeepSeek API cost rates (USD per 1M tokens)
   DEEPSEEK_COST_PROMPT_PER_1M: z.string().default('0.14'),
   DEEPSEEK_COST_COMPLETION_PER_1M: z.string().default('0.28'),
+  // Autonomous maintenance worker fallback thresholds
+  MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD: z.string().default('0.7'),
+  MAINTENANCE_FALLBACK_MIN_OCCURRENCES: z.string().default('3'),
+  // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
+  CORTEX_TEMPERATURE: z.string().default(''),
 })
 
 const parsed = envSchema.safeParse(process.env)

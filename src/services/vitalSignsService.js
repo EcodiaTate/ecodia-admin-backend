@@ -138,12 +138,18 @@ async function checkOrganismHealth() {
     if (organismHealthState.consecutiveFailures === MAX_CONSECUTIVE_FAILURES) {
       logger.error('SYMBIONT DOWN: Organism unresponsive after 3 consecutive failures')
 
-      // Notify human
+      // Notify human — DB + WS broadcast
+      const notifPayload = {
+        type: 'symbiont_down',
+        message: 'CRITICAL: Organism is unresponsive',
+        metadata: { failures: organismHealthState.consecutiveFailures, lastError: err.message },
+      }
       await db`
         INSERT INTO notifications (type, message, metadata)
         VALUES ('symbiont_down', 'CRITICAL: Organism is unresponsive',
-                ${JSON.stringify({ failures: organismHealthState.consecutiveFailures, lastError: err.message })})
+                ${JSON.stringify(notifPayload.metadata)})
       `.catch(() => {})
+      try { require('../websocket/wsManager').broadcast('notification', { payload: notifPayload }) } catch {}
 
       // Dispatch Factory investigation — diagnose and fix whatever crashed the organism
       try {

@@ -85,7 +85,40 @@ async function chat(messages, { sessionId } = {}) {
   // 2. Gather system state for proactive awareness
   const systemState = await getSystemState()
 
-  // 3. Build the full prompt with KG context + system state
+  // 3. Load cross-session memory — recent exchanges from prior sessions
+  //    so Cortex has continuity across conversations, not just within them.
+  let sessionMemory = ''
+  try {
+    const recentSessions = await db`
+      SELECT id, updated_at, history
+      FROM cortex_sessions
+      WHERE jsonb_array_length(history) > 0
+        ${sessionId ? db`AND id != ${sessionId}` : db``}
+      ORDER BY updated_at DESC
+      LIMIT 3
+    `
+    if (recentSessions.length > 0) {
+      const memLines = []
+      for (const s of recentSessions) {
+        const history = typeof s.history === 'string' ? JSON.parse(s.history) : (s.history || [])
+        // Take last 3 exchanges from each session — enough for thread continuity
+        const recent = history.slice(-3)
+        for (const ex of recent) {
+          memLines.push(`[${ex.ts}] Human: ${(ex.user || '').slice(0, 200)}`)
+          if (ex.assistant && ex.assistant !== '[structured response]') {
+            memLines.push(`  Cortex: ${ex.assistant.slice(0, 300)}`)
+          }
+        }
+      }
+      if (memLines.length > 0) {
+        sessionMemory = memLines.join('\n')
+      }
+    }
+  } catch (err) {
+    logger.debug('Cortex session memory retrieval failed', { error: err.message })
+  }
+
+  // 4. Build the full prompt with KG context + system state + session memory
   // Prompt is built dynamically — capabilities are live from registry
   const systemMessage = {
     role: 'system',
@@ -93,17 +126,17 @@ async function chat(messages, { sessionId } = {}) {
 
 ${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
 
+${sessionMemory ? `--- RECENT CONVERSATION MEMORY ---\n${sessionMemory}\n--- END CONVERSATION MEMORY ---` : ''}
+
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
---- END SYSTEM STATE ---
-
-Current date/time: ${new Date().toISOString()}`
+--- END SYSTEM STATE ---`
   }
 
-  // 4. Build conversation with system prompt
+  // 5. Build conversation with system prompt
   const fullMessages = [systemMessage, ...messages]
 
-  // 5. Call DeepSeek
+  // 6. Call DeepSeek
   const raw = await deepseekService.callDeepSeek(fullMessages, {
     module: 'cortex',
     skipRetrieval: true,  // We already retrieved KG context
@@ -112,17 +145,17 @@ Current date/time: ${new Date().toISOString()}`
     temperature: process.env.CORTEX_TEMPERATURE ? parseFloat(process.env.CORTEX_TEMPERATURE) : null,
   })
 
-  // 6. Parse structured blocks
+  // 7. Parse structured blocks
   const blocks = parseBlocks(raw)
 
-  // 7. Extract any mentioned entity names for constellation highlighting
+  // 8. Extract any mentioned entity names for constellation highlighting
   const mentionedNodes = extractMentionedNodes(kgContext, query)
 
-  // 8. Auto-enqueue action_card proposals that Cortex flagged with urgency.
+  // 9. Auto-enqueue action_card proposals that Cortex flagged with urgency.
   // Cortex sets urgency — we trust it. If it set urgency, it means: surface this.
   autoEnqueueUrgentActions(blocks).catch(() => {})
 
-  // 9. Persist the exchange to the session history
+  // 10. Persist the exchange to the session history
   if (sessionId) {
     persistExchange(sessionId, messages, blocks).catch(() => {})
   }
@@ -137,11 +170,49 @@ Current date/time: ${new Date().toISOString()}`
 async function getLoadBriefing() {
   const systemState = await getSystemState()
 
+  // Build an interim digest — what happened since the human was last here
+  let interimDigest = ''
+  if (systemState.lastVisit) {
+    const parts = []
+    const ago = formatDuration(systemState.lastVisit.secondsSince)
+    parts.push(`Time since last conversation: ${ago}`)
+
+    // Factory sessions completed in the interim
+    const interimFactory = (systemState.factorySessions || []).filter(s =>
+      s.completed_at && new Date(s.completed_at) > new Date(systemState.lastVisit.at)
+    )
+    if (interimFactory.length > 0) {
+      parts.push(`Factory sessions completed since then: ${interimFactory.length}`)
+      for (const s of interimFactory.slice(0, 5)) {
+        const conf = s.confidence_score != null ? ` (${(s.confidence_score * 100).toFixed(0)}% confidence)` : ''
+        parts.push(`  - [${s.status}] "${(s.initial_prompt || '').slice(0, 80)}"${conf}`)
+      }
+    }
+
+    // Decisions made since last visit
+    const interimDecisions = (systemState.recentDecisions || []).filter(d =>
+      new Date(d.created_at) > new Date(systemState.lastVisit.at)
+    )
+    if (interimDecisions.length > 0) {
+      const approved = interimDecisions.filter(d => d.decision === 'executed').length
+      const dismissed = interimDecisions.filter(d => d.decision === 'dismissed').length
+      parts.push(`Actions decided since then: ${approved} approved, ${dismissed} dismissed`)
+    }
+
+    // Last conversation topic
+    if (systemState.lastVisit.lastTopic) {
+      parts.push(`Last conversation topic: "${systemState.lastVisit.lastTopic.slice(0, 150)}"`)
+    }
+
+    interimDigest = parts.join('\n')
+  }
+
   // Give the system state to the Cortex and let it decide what to surface.
   // No gating, no leading questions, no pre-filtered "nothing to see here".
   // The Cortex reads the full picture and speaks freely.
   const prompt = `${env.OWNER_NAME} opened the interface.
 
+${interimDigest ? `--- SINCE LAST VISIT ---\n${interimDigest}\n--- END ---\n` : ''}
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
 ---`
@@ -211,22 +282,42 @@ async function autoEnqueueUrgentActions(blocks) {
   const actionCards = blocks.filter(b => b.type === 'action_card' && b.urgency && b.action && b.title)
   const autoStartSessions = blocks.filter(b => b.type === 'cc_session' && b.autoStart === true && b.prompt)
 
-  // Enqueue action cards to dashboard
+  // Enqueue action cards to dashboard — with priority validation
+  // Cortex LLM urgency is treated as a suggestion, not gospel.
+  // The action queue's decision memory may override the priority based on
+  // historical approval/dismissal patterns for this action type.
   if (actionCards.length) {
     const actionQueue = require('./actionQueueService')
-    const URGENCY_PRIORITY = { high: 'urgent', medium: 'high', low: 'normal' }
+    const URGENCY_PRIORITY = { high: 'urgent', medium: 'high', low: 'medium' }
+    const VALID_URGENCIES = new Set(['high', 'medium', 'low'])
     for (const card of actionCards) {
       try {
-        await actionQueue.enqueue({
+        // Validate LLM urgency — unknown values get clamped to 'medium'
+        const validatedUrgency = VALID_URGENCIES.has(card.urgency) ? card.urgency : 'medium'
+        if (validatedUrgency !== card.urgency) {
+          logger.info(`Cortex: clamped invalid urgency "${card.urgency}" → "medium" for "${card.title}"`)
+        }
+
+        const result = await actionQueue.enqueue({
           source: 'cortex',
           actionType: card.action,
           title: card.title,
           summary: card.description || null,
           preparedData: card.params || {},
-          context: { proposed_by: 'cortex', urgency: card.urgency },
-          priority: URGENCY_PRIORITY[card.urgency] || 'high',
+          context: {
+            proposed_by: 'cortex',
+            urgency: validatedUrgency,
+            original_urgency: card.urgency,
+            surfacedBecause: 'cortex_action_card',
+          },
+          priority: URGENCY_PRIORITY[validatedUrgency] || 'medium',
         })
-        logger.info(`Cortex: enqueued action_card "${card.title}" (${card.urgency})`)
+
+        if (result) {
+          logger.info(`Cortex: enqueued action_card "${card.title}" (urgency:${validatedUrgency}, effective_priority:${result.priority})`)
+        } else {
+          logger.info(`Cortex: action_card "${card.title}" was suppressed by decision memory`)
+        }
       } catch (err) {
         logger.debug('Cortex enqueue failed', { error: err.message, action: card.action })
       }
@@ -281,7 +372,17 @@ async function getSystemState() {
     vercelStats: null,
     linkedinPending: 0,
     metaUnread: 0,
+    // ─── New context sources ───────────────────────────────────────
+    factorySessions: [],        // Recent CC/Factory session outcomes
+    metabolicState: null,       // Organism pressure, tier, capacity
+    lastVisit: null,            // When the human was last here + what they were doing
+    recentDecisions: [],        // What the human approved/dismissed recently
+    kgDiscoveries: [],          // Recent KG insights, contradictions, synthesized patterns
+    localTime: null,            // Human's local time (AEST)
   }
+
+  // ─── Local time for the human ──────────────────────────────────
+  state.localTime = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
   try {
     const [emailStats] = await db`
@@ -408,11 +509,128 @@ async function getSystemState() {
     logger.debug('Cortex calendar fetch failed', { error: err.message })
   }
 
+  // ─── Factory Session Outcomes (last 24h) ─────────────────────────
+  try {
+    state.factorySessions = await db`
+      SELECT id, status, initial_prompt, confidence_score,
+             started_at, completed_at, triggered_by, trigger_source,
+             EXTRACT(EPOCH FROM (COALESCE(completed_at, now()) - started_at))::int AS duration_seconds
+      FROM cc_sessions
+      WHERE started_at > now() - interval '24 hours'
+      ORDER BY started_at DESC
+      LIMIT 10
+    `
+  } catch (err) {
+    logger.debug('Cortex factory sessions failed', { error: err.message })
+  }
+
+  // ─── Organism Metabolic State ────────────────────────────────────
+  try {
+    const metabolism = require('./metabolismBridgeService')
+    state.metabolicState = metabolism.getState()
+  } catch (err) {
+    logger.debug('Cortex metabolic state failed', { error: err.message })
+  }
+
+  // ─── Last Visit + Time Since ─────────────────────────────────────
+  try {
+    const [lastSession] = await db`
+      SELECT id, updated_at,
+        history->(jsonb_array_length(history)-1)->>'user' AS last_topic,
+        jsonb_array_length(history) AS exchange_count
+      FROM cortex_sessions
+      WHERE jsonb_array_length(history) > 0
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `
+    if (lastSession) {
+      const secondsSince = Math.floor((Date.now() - new Date(lastSession.updated_at).getTime()) / 1000)
+      state.lastVisit = {
+        at: lastSession.updated_at,
+        secondsSince,
+        lastTopic: lastSession.last_topic,
+        exchangeCount: lastSession.exchange_count,
+      }
+    }
+  } catch (err) {
+    logger.debug('Cortex last visit failed', { error: err.message })
+  }
+
+  // ─── Recent Human Decisions (approved/dismissed actions) ─────────
+  try {
+    state.recentDecisions = await db`
+      SELECT action_type, title, decision, priority,
+             created_at, EXTRACT(EPOCH FROM make_interval(secs => time_to_decision_seconds))::int AS decision_seconds
+      FROM action_decisions
+      WHERE created_at > now() - interval '24 hours'
+      ORDER BY created_at DESC
+      LIMIT 10
+    `
+  } catch (err) {
+    logger.debug('Cortex recent decisions failed', { error: err.message })
+  }
+
+  // ─── Recent KG Discoveries (insights, contradictions, patterns) ──
+  try {
+    const { runQuery } = require('../config/neo4j')
+    const discoveries = await runQuery(`
+      MATCH (n)
+      WHERE (n:Insight OR n:Narrative OR n:Prediction OR n.is_synthesized = true)
+        AND n.created_at > datetime() - duration('P1D')
+      RETURN n.name AS name, labels(n) AS labels, n.importance AS importance,
+             n.created_at AS created_at, n.description AS description
+      ORDER BY n.importance DESC
+      LIMIT 8
+    `)
+    state.kgDiscoveries = discoveries.map(r => ({
+      name: r.get('name'),
+      labels: r.get('labels') || [],
+      importance: r.get('importance'),
+      description: r.get('description'),
+      createdAt: r.get('created_at'),
+    }))
+
+    // Also grab recent contradictions — these are high-signal
+    const contradictions = await runQuery(`
+      MATCH (a)-[r:CONTRADICTS]->(b)
+      WHERE r.created_at > datetime() - duration('P1D')
+      RETURN a.name AS from, b.name AS to, r.reason AS reason, r.created_at AS created_at
+      ORDER BY r.created_at DESC
+      LIMIT 5
+    `)
+    if (contradictions.length > 0) {
+      state.kgContradictions = contradictions.map(r => ({
+        from: r.get('from'),
+        to: r.get('to'),
+        reason: r.get('reason'),
+      }))
+    }
+  } catch (err) {
+    logger.debug('Cortex KG discoveries failed', { error: err.message })
+  }
+
   return state
 }
 
 function formatSystemState(state) {
   const lines = []
+
+  // ─── Temporal Context ──────────────────────────────────────────
+  if (state.localTime) {
+    lines.push(`Local time: ${state.localTime}`)
+  }
+
+  if (state.lastVisit) {
+    const lv = state.lastVisit
+    const ago = formatDuration(lv.secondsSince)
+    lines.push(`Last conversation: ${ago} ago${lv.lastTopic ? ` — "${lv.lastTopic.slice(0, 120)}"` : ''} (${lv.exchangeCount} exchanges)`)
+  }
+
+  // ─── Organism State ────────────────────────────────────────────
+  if (state.metabolicState) {
+    const m = state.metabolicState
+    lines.push(`Organism: metabolic pressure ${(m.pressure * 100).toFixed(0)}%, tier: ${m.tier}`)
+  }
 
   lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
   lines.push(`Tasks: ${state.pendingTasks} pending`)
@@ -436,6 +654,22 @@ function formatSystemState(state) {
 
   if (state.metaUnread > 0) {
     lines.push(`Meta DMs: ${state.metaUnread} conversations pending triage`)
+  }
+
+  // ─── Factory Sessions ──────────────────────────────────────────
+  if (state.factorySessions?.length) {
+    const running = state.factorySessions.filter(s => s.status === 'running' || s.status === 'initializing')
+    const completed = state.factorySessions.filter(s => s.status === 'completed')
+    const failed = state.factorySessions.filter(s => s.status === 'failed' || s.status === 'error')
+
+    lines.push(`\nFACTORY (last 24h): ${running.length} running, ${completed.length} completed, ${failed.length} failed`)
+    for (const s of state.factorySessions) {
+      const prompt = (s.initial_prompt || '').slice(0, 100)
+      const confidence = s.confidence_score != null ? ` (confidence: ${(s.confidence_score * 100).toFixed(0)}%)` : ''
+      const duration = s.duration_seconds ? ` [${formatDuration(s.duration_seconds)}]` : ''
+      const source = s.trigger_source ? ` via ${s.trigger_source}` : ''
+      lines.push(`  - [${s.status}] "${prompt}"${confidence}${duration}${source}`)
+    }
   }
 
   if (state.calendarToday.length) {
@@ -462,6 +696,15 @@ function formatSystemState(state) {
     }
   }
 
+  // ─── Human Decisions (what they approved/dismissed) ────────────
+  if (state.recentDecisions?.length) {
+    lines.push('\nRECENT HUMAN DECISIONS (last 24h):')
+    for (const d of state.recentDecisions) {
+      const speed = d.decision_seconds != null ? ` (decided in ${formatDuration(d.decision_seconds)})` : ''
+      lines.push(`  - ${d.decision.toUpperCase()}: ${d.title || d.action_type} [${d.priority}]${speed}`)
+    }
+  }
+
   if (state.recentActivity.length) {
     lines.push('\nRECENT AUTONOMOUS ACTIONS (last 24h):')
     for (const a of state.recentActivity) {
@@ -469,15 +712,43 @@ function formatSystemState(state) {
     }
   }
 
+  // ─── KG Discoveries ────────────────────────────────────────────
+  if (state.kgDiscoveries?.length) {
+    lines.push('\nKNOWLEDGE GRAPH — RECENT DISCOVERIES (last 24h):')
+    for (const d of state.kgDiscoveries) {
+      const labels = d.labels.filter(l => l !== 'Node').join(', ')
+      const imp = d.importance != null ? ` (importance: ${d.importance})` : ''
+      const desc = d.description ? ` — ${d.description.slice(0, 150)}` : ''
+      lines.push(`  - ${d.name} [${labels}]${imp}${desc}`)
+    }
+  }
+
+  if (state.kgContradictions?.length) {
+    lines.push('\nKNOWLEDGE GRAPH — CONTRADICTIONS DETECTED:')
+    for (const c of state.kgContradictions) {
+      lines.push(`  - "${c.from}" CONTRADICTS "${c.to}"${c.reason ? ` — ${c.reason}` : ''}`)
+    }
+  }
+
   if (state.consolidation) {
     const c = state.consolidation
     lines.push(`\nKNOWLEDGE GRAPH HEALTH:`)
     lines.push(`  Synthesized patterns: ${c.synthesizedPatterns}, Inferred relationships: ${c.inferredRelationships}`)
+    lines.push(`  Insights: ${c.insights}, Narratives: ${c.narratives}, Predictions: ${c.predictions}`)
     lines.push(`  Merged duplicates: ${c.totalMerged} nodes consolidated into ${c.mergedNodes}`)
     if (c.staleNodes > 0) lines.push(`  Stale nodes pending decay: ${c.staleNodes}`)
   }
 
   return lines.join('\n')
+}
+
+function formatDuration(seconds) {
+  if (seconds == null || seconds < 0) return 'unknown'
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  return m > 0 ? `${h}h ${m}m` : `${h}h`
 }
 
 function parseBlocks(raw) {

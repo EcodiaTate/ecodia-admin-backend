@@ -81,34 +81,78 @@ async function buildContextBundle(session) {
   }
 
   // Get factory learnings (cross-session knowledge)
+  // Two categories injected:
+  // 1. Hard constraints (failure_pattern, dont_try, constraint) — always injected for this codebase
+  // 2. Relevance-matched learnings — keyword overlap with current task prompt
   bundle.factoryLearnings = { codebase: [], global: [] }
   try {
-    // Exclude learnings that have decayed below threshold or haven't been
-    // applied in 90+ days (stale patterns mislead more than they help).
-    // Rank by recency of last application, then confidence.
-    const codebaseLearnings = session.codebase_id ? await db`
-      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at
+    const promptLower = (session.initial_prompt || '').toLowerCase()
+    const promptWords = new Set(promptLower.split(/\W+/).filter(w => w.length > 3))
+
+    // Hard constraints: always inject — these are "don't do X" learnings that should never be missed
+    const hardConstraints = session.codebase_id ? await db`
+      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
+      FROM factory_learnings
+      WHERE codebase_id = ${session.codebase_id}
+        AND confidence > 0.2
+        AND pattern_type IN ('failure_pattern', 'dont_try', 'constraint')
+      ORDER BY confidence DESC, updated_at DESC LIMIT 8
+    ` : []
+
+    // Soft learnings: fetch candidates then rank by keyword relevance
+    const softCandidates = session.codebase_id ? await db`
+      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
       FROM factory_learnings
       WHERE codebase_id = ${session.codebase_id}
         AND confidence > 0.3
+        AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
         AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
-      ORDER BY last_applied_at DESC NULLS LAST, confidence DESC, updated_at DESC LIMIT 10
+      ORDER BY confidence DESC, updated_at DESC LIMIT 30
     ` : []
 
+    // Score candidates by keyword overlap with task prompt
+    const scoredSoft = softCandidates.map(l => {
+      const keywords = (l.evidence?.keywords || []).map(k => k.toLowerCase())
+      const descWords = (l.pattern_description || '').toLowerCase().split(/\W+/).filter(w => w.length > 3)
+      const allTerms = [...keywords, ...descWords]
+      const overlap = allTerms.filter(t => promptWords.has(t)).length
+      // Also check if any changed files from the learning match files mentioned in prompt
+      const fileOverlap = (l.evidence?.files || []).some(f => promptLower.includes(f.split('/').pop().replace(/\.\w+$/, '')))
+      return { ...l, relevanceScore: overlap + (fileOverlap ? 3 : 0) }
+    })
+
+    // Take top 5 by relevance, but only if they have some relevance signal
+    const relevantSoft = scoredSoft
+      .filter(l => l.relevanceScore > 0)
+      .sort((a, b) => b.relevanceScore - a.relevanceScore)
+      .slice(0, 5)
+
+    // If no keyword matches, fall back to top 3 by confidence (so sessions aren't blind)
+    const fallbackSoft = relevantSoft.length > 0 ? [] : softCandidates.slice(0, 3)
+
+    const codebaseLearnings = [...hardConstraints, ...relevantSoft, ...fallbackSoft]
+    // Deduplicate by ID
+    const seenIds = new Set()
+    const dedupedCodebase = codebaseLearnings.filter(l => {
+      if (seenIds.has(l.id)) return false
+      seenIds.add(l.id)
+      return true
+    })
+
     const globalLearnings = await db`
-      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at
+      SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence
       FROM factory_learnings
       WHERE codebase_id IS NULL
         AND confidence > 0.3
-        AND (last_applied_at IS NULL OR last_applied_at > now() - interval '90 days')
-      ORDER BY last_applied_at DESC NULLS LAST, confidence DESC, updated_at DESC LIMIT 5
+        AND pattern_type IN ('failure_pattern', 'dont_try', 'constraint')
+      ORDER BY confidence DESC, updated_at DESC LIMIT 3
     `
 
-    bundle.factoryLearnings.codebase = codebaseLearnings
+    bundle.factoryLearnings.codebase = dedupedCodebase
     bundle.factoryLearnings.global = globalLearnings
 
     // Track that these learnings were applied
-    const allIds = [...codebaseLearnings, ...globalLearnings].map(l => l.id)
+    const allIds = [...dedupedCodebase, ...globalLearnings].map(l => l.id)
     if (allIds.length > 0) {
       await db`
         UPDATE factory_learnings

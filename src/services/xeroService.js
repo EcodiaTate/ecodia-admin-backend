@@ -155,7 +155,8 @@ async function pollTransactions() {
               title: `Review transaction categorization: ${tx.Reference || tx.Contact?.Name}`,
               description: `Amount: $${Math.abs(tx.Total)} (${tx.Type === 'SPEND' ? 'debit' : 'credit'})\nAuto-category: ${result.category} (${(result.confidence * 100).toFixed(0)}% confidence)\nRationale: ${result.notes}`,
             },
-            context: { transactionId: inserted.id, amount: tx.Total, category: result.category },
+            context: { from: tx.Contact?.Name || null, transactionId: inserted.id, amount: tx.Total, category: result.category },
+            resourceKey: `xero:transaction:${inserted.id}`,
             priority: Math.abs(tx.Total) > 500 ? 'high' : 'medium',
           }).catch(() => {})
         }

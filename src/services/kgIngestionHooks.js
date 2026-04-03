@@ -67,17 +67,23 @@ async function onEmailTriaged({ threadId, subject, fromEmail, triageSummary, tri
   if (!isEnabled()) return
 
   try {
-    const content = `Email triage result:
-Subject: ${subject}
-From: ${fromEmail}
-Priority: ${triagePriority}
-Summary: ${triageSummary}
-Suggested action: ${triageAction}`
-
-    await kg.ingestFromLLM(content, {
+    // Don't re-ingest via LLM — onEmailProcessed already extracted entities from the
+    // full body. Just enrich the sender node with triage metadata as a structured
+    // relationship, so consolidation can track triage patterns.
+    await kg.ensureRelationship({
+      fromLabel: 'Person',
+      fromName: fromEmail,
+      toLabel: 'Event',
+      toName: `Email: ${subject.slice(0, 80)}`,
+      relType: triageAction === 'snooze' ? 'SENT_LOW_PRIORITY'
+             : triagePriority === 'high' ? 'SENT_HIGH_PRIORITY'
+             : 'SENT',
+      properties: {
+        triage_action: triageAction,
+        triage_priority: triagePriority,
+        triage_summary: (triageSummary || '').slice(0, 300),
+      },
       sourceModule: 'gmail_triage',
-      sourceId: threadId,
-      context: 'This is an AI triage result for an email. Extract any new entities, topics, or relationships mentioned in the summary.',
     })
   } catch (err) {
     logger.debug('KG triage ingestion failed (non-blocking)', { error: err.message })
@@ -88,16 +94,23 @@ async function onEmailSnoozed({ threadId, subject, fromEmail, summary }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Repeated email signal snoozed (auto-handled, not surfaced to human):
-Subject: ${subject}
-From: ${fromEmail}
-Summary: ${summary}
-Action: System archived this as a repeated signal about a known topic. No human attention needed.`
-
-    await kg.ingestFromLLM(content, {
+    // Direct structured ingestion — no LLM needed for a snooze event.
+    // Just record the recurring signal as a relationship to the sender.
+    await kg.ensureNode({
+      label: 'Person',
+      name: fromEmail,
+      properties: { email: fromEmail },
       sourceModule: 'gmail_snooze',
-      sourceId: threadId,
-      context: 'This email was a repeat notification about something already acknowledged. Record that this topic continues to generate signals — useful for tracking unresolved recurring items.',
+    })
+
+    await kg.ensureRelationship({
+      fromLabel: 'Person',
+      fromName: fromEmail,
+      toLabel: 'Event',
+      toName: `Recurring signal: ${subject.slice(0, 80)}`,
+      relType: 'SENT_RECURRING_SIGNAL',
+      properties: { summary: (summary || '').slice(0, 300), snoozed_at: new Date().toISOString() },
+      sourceModule: 'gmail_snooze',
     })
   } catch (err) {
     logger.debug('KG snooze ingestion failed (non-blocking)', { error: err.message })
@@ -312,21 +325,38 @@ async function onCCSessionCompleted({ session, projectName }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Claude Code session completed.
-Project: ${projectName || 'Unknown'}
-Prompt: ${session.initial_prompt}
-Status: ${session.status}
-Cost: $${session.cc_cost_usd || 0}`
+    // Direct structured ingestion — CC session metadata is already structured,
+    // no LLM extraction needed. Create session node + link to project.
+    const sessionName = `CC: ${(session.initial_prompt || 'unnamed').slice(0, 80)}`
 
-    await kg.ingestFromLLM(content, {
+    await kg.ensureNode({
+      label: 'CCSession',
+      name: sessionName,
+      properties: {
+        status: session.status,
+        cost_usd: session.cc_cost_usd || 0,
+        prompt: (session.initial_prompt || '').slice(0, 500),
+        project: projectName || null,
+      },
       sourceModule: 'claude_code',
       sourceId: session.id,
-      context: projectName ? `This was work on the ${projectName} project.` : '',
     })
+
+    if (projectName) {
+      await kg.ensureRelationship({
+        fromLabel: 'CCSession',
+        fromName: sessionName,
+        toLabel: 'Project',
+        toName: projectName,
+        relType: session.status === 'error' ? 'FAILED_ON' : 'WORKED_ON',
+        properties: { cost_usd: session.cc_cost_usd || 0 },
+        sourceModule: 'claude_code',
+      })
+    }
 
     // Immediate sync: CC session outcomes are high-value for organism's Evo
     trySyncImportant(
-      `CC Session: ${(session.initial_prompt || '').slice(0, 60)}`,
+      sessionName,
       ['CCSession'],
       { importance: session.status === 'error' ? 0.8 : 0.7, status: session.status, project: projectName },
     )
@@ -359,23 +389,38 @@ async function onDeploymentCompleted({ deployment, codebaseName, sessionId }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Deployment to ${codebaseName}.
-Commit: ${deployment.commit_sha}
-Status: ${deployment.deploy_status}
-Target: ${deployment.deploy_target}
-${deployment.error_message ? `Error: ${deployment.error_message}` : ''}
-${deployment.reverted_at ? 'This deployment was REVERTED due to failure.' : ''}`
+    // Direct structured ingestion — deployment data is fully structured already.
+    const isFailure = deployment.deploy_status === 'failed' || deployment.deploy_status === 'reverted'
+    const deployName = `Deploy: ${codebaseName} — ${deployment.deploy_status} (${(deployment.commit_sha || '').slice(0, 7)})`
 
-    await kg.ingestFromLLM(content, {
+    await kg.ensureNode({
+      label: 'Deployment',
+      name: deployName,
+      properties: {
+        status: deployment.deploy_status,
+        target: deployment.deploy_target,
+        commit_sha: deployment.commit_sha,
+        error_message: deployment.error_message || null,
+        reverted: !!deployment.reverted_at,
+      },
       sourceModule: 'deployment',
       sourceId: deployment.id,
-      context: `Deployment from CC session ${sessionId} to the ${codebaseName} codebase.`,
     })
 
+    if (codebaseName) {
+      await kg.ensureRelationship({
+        fromLabel: 'Deployment',
+        fromName: deployName,
+        toLabel: 'Codebase',
+        toName: codebaseName,
+        relType: isFailure ? 'FAILED_DEPLOY_TO' : 'DEPLOYED_TO',
+        sourceModule: 'deployment',
+      })
+    }
+
     // Deploy failures are urgent — organism's Thymos needs to know immediately
-    const isFailure = deployment.deploy_status === 'failed' || deployment.deploy_status === 'reverted'
     trySyncImportant(
-      `Deploy: ${codebaseName} — ${deployment.deploy_status}`,
+      deployName,
       ['Deployment'],
       { importance: isFailure ? 0.9 : 0.7, status: deployment.deploy_status, codebase: codebaseName },
     )
@@ -435,19 +480,38 @@ async function onVercelDeployment({ deployment, projectName }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Vercel deployment: ${projectName || deployment.name}
-State: ${deployment.state}
-Target: ${deployment.target || 'preview'}
-Branch: ${deployment.meta?.githubCommitRef || 'unknown'}
-Commit: ${deployment.meta?.githubCommitMessage || 'no message'}
-${deployment.state === 'ERROR' ? `Error: ${deployment.errorMessage || 'unknown'}` : ''}
-URL: ${deployment.url ? `https://${deployment.url}` : 'N/A'}`
+    // Direct structured ingestion — Vercel metadata is already machine-structured.
+    const name = projectName || deployment.name
+    const isError = deployment.state === 'ERROR'
+    const deployName = `Vercel: ${name} — ${deployment.state} (${deployment.meta?.githubCommitRef || 'unknown'})`
 
-    await kg.ingestFromLLM(content, {
+    await kg.ensureNode({
+      label: 'Deployment',
+      name: deployName,
+      properties: {
+        platform: 'vercel',
+        state: deployment.state,
+        target: deployment.target || 'preview',
+        branch: deployment.meta?.githubCommitRef || null,
+        commit_message: (deployment.meta?.githubCommitMessage || '').slice(0, 200),
+        error_message: isError ? (deployment.errorMessage || null) : null,
+        url: deployment.url ? `https://${deployment.url}` : null,
+      },
       sourceModule: 'vercel',
       sourceId: deployment.uid,
-      context: `Vercel deployment for the ${projectName || deployment.name} project. Track deployment patterns, failures, and which branches are being deployed.`,
     })
+
+    if (name) {
+      await kg.ensureRelationship({
+        fromLabel: 'Deployment',
+        fromName: deployName,
+        toLabel: 'Project',
+        toName: name,
+        relType: isError ? 'FAILED_DEPLOY_TO' : 'DEPLOYED_TO',
+        properties: { branch: deployment.meta?.githubCommitRef || null },
+        sourceModule: 'vercel',
+      })
+    }
   } catch (err) {
     logger.debug('KG Vercel ingestion failed (non-blocking)', { error: err.message })
   }
@@ -512,44 +576,91 @@ async function onMetaConversationUpdated({ conversation, participantName, platfo
 async function onSymbridgeMessage({ direction, messageType, payload, sourceSystem, correlationId }) {
   if (!isEnabled()) return
 
-  try {
-    const content = `Symbridge message (${direction}):
-Type: ${messageType}
-Source: ${sourceSystem}
-${correlationId ? `Correlation: ${correlationId}` : ''}
-Payload: ${JSON.stringify(payload).slice(0, 1500)}`
+  // Skip high-frequency low-value message types — heartbeats, acks, and routine
+  // health signals would flood the graph with noise nodes.
+  const skipTypes = new Set(['heartbeat', 'ack', 'pong', 'health_check', 'keepalive'])
+  if (skipTypes.has(messageType)) return
 
-    await kg.ingestFromLLM(content, {
+  try {
+    // Direct structured ingestion — symbridge payloads are machine-structured JSON,
+    // not natural language. Parse directly into nodes/rels instead of LLM extraction.
+    const eventName = `Symbridge: ${messageType} (${direction})`
+
+    await kg.ensureNode({
+      label: 'SymbridgeEvent',
+      name: eventName,
+      properties: {
+        direction,
+        message_type: messageType,
+        source_system: sourceSystem,
+        correlation_id: correlationId || null,
+        // Capture meaningful payload fields without dumping raw JSON
+        description: payload?.description || payload?.message || payload?.type || messageType,
+        outcome: payload?.outcome || payload?.status || null,
+        confidence: payload?.confidence || null,
+      },
       sourceModule: 'symbridge',
       sourceId: correlationId || null,
-      context: `This is a ${direction} symbridge message between the organism and EcodiaOS. Track communication patterns, proposals, results, and health signals between the two bodies.`,
     })
+
+    // Only create cross-body relationship for substantive message types
+    const substantive = new Set(['proposal', 'result', 'factory_result', 'hypothesis', 'discovery', 'directive'])
+    if (substantive.has(messageType) && payload?.codebase) {
+      await kg.ensureRelationship({
+        fromLabel: 'SymbridgeEvent',
+        fromName: eventName,
+        toLabel: 'Codebase',
+        toName: payload.codebase,
+        relType: direction === 'outbound' ? 'PROPOSED_FOR' : 'RESULTED_IN',
+        sourceModule: 'symbridge',
+      })
+    }
   } catch (err) {
     logger.debug('KG symbridge ingestion failed (non-blocking)', { error: err.message })
   }
 }
 
-// ─── Action Queue ───────────────────────────────────────────────────
+// ─── Action Queue — Decision Intelligence ────────────────────────────
+// Rich structured signals that feed back into suppression + priority learning.
 
-async function onActionDismissed({ action, reason }) {
+async function onActionDismissed({ action, reason, reasonCategory }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Action dismissed by human:
+    // Structured category is far more useful than free-text for pattern extraction
+    const categoryLabel = reasonCategory || 'unspecified'
+    const consolidatedCount = action.context?.consolidated_count || 1
+    const suppressionNote = action.context?.suppression_evaluation || 'none'
+    const waitTime = action.created_at
+      ? Math.round((Date.now() - new Date(action.created_at).getTime()) / 1000)
+      : 'unknown'
+
+    const content = `Action DISMISSED (correction signal):
 Source: ${action.source}
 Type: ${action.action_type}
 Title: ${action.title}
 Summary: ${action.summary || 'N/A'}
-Priority: ${action.priority}
+Priority when surfaced: ${action.priority}
+Dismiss category: ${categoryLabel}
+Dismiss reason detail: ${reason || 'none given'}
+From: ${action.context?.from || 'unknown'} (${action.context?.email || ''})
 Surfaced because: ${action.context?.surfacedBecause || 'ai_requested'}
 Confidence when surfaced: ${action.context?.confidence ?? 'unknown'}
-Dismiss reason: ${reason || 'no reason given'}
-From: ${action.context?.from || 'unknown'} (${action.context?.email || ''})`
+Consolidated signals: ${consolidatedCount}
+Suppression evaluation at enqueue: ${suppressionNote}
+Time in queue before dismissal: ${waitTime}s
+Resource key: ${action.resource_key || 'none'}`
 
     await kg.ingestFromLLM(content, {
       sourceModule: 'action_queue_dismissed',
       sourceId: action.id,
-      context: 'A human dismissed this action — they chose NOT to act on it. This is a correction signal. Extract: what kind of item was rejected, from whom, why it was probably wrong to surface, and what pattern this represents about Tate\'s preferences.',
+      context: `A human dismissed this action. CORRECTION SIGNAL — extract specific learnable patterns:
+1. The dismiss category "${categoryLabel}" tells you WHY it was wrong to surface.
+2. If category is "wrong_sender", learn to suppress future items from ${action.context?.email || action.context?.from || 'this sender'}.
+3. If category is "wrong_priority", the action was OK but priority was miscalibrated for ${action.source}/${action.action_type}.
+4. If category is "not_relevant", this (source,action_type) combination should be reviewed for suppression.
+5. If category is "already_handled", the system was too slow or duplicated something handled externally.
+6. Track the pattern (source=${action.source}, type=${action.action_type}, sender=${action.context?.email || 'unknown'}) — if this pattern repeats, future items should be auto-suppressed.`,
     })
   } catch (err) {
     logger.debug('KG action dismissed ingestion failed (non-blocking)', { error: err.message })
@@ -560,18 +671,33 @@ async function onActionExecuted({ action, result }) {
   if (!isEnabled()) return
 
   try {
-    const content = `Action executed:
+    const consolidatedCount = action.context?.consolidated_count || 1
+    const suppressionNote = action.context?.suppression_evaluation || 'none'
+    const waitTime = action.created_at
+      ? Math.round((Date.now() - new Date(action.created_at).getTime()) / 1000)
+      : 'unknown'
+
+    const content = `Action APPROVED and executed (positive signal):
 Source: ${action.source}
 Type: ${action.action_type}
 Title: ${action.title}
 Summary: ${action.summary || 'N/A'}
 Priority: ${action.priority}
-Result: ${result?.message || 'completed'}`
+Result: ${result?.message || 'completed'}
+From: ${action.context?.from || 'unknown'} (${action.context?.email || ''})
+Consolidated signals: ${consolidatedCount}
+Suppression evaluation at enqueue: ${suppressionNote}
+Time in queue before approval: ${waitTime}s
+Resource key: ${action.resource_key || 'none'}`
 
     await kg.ingestFromLLM(content, {
       sourceModule: 'action_queue',
       sourceId: action.id,
-      context: 'An action from the unified action queue was approved and executed. Track patterns of what gets approved vs dismissed.',
+      context: `An action was approved and executed — POSITIVE signal. Extract:
+1. This confirms (source=${action.source}, type=${action.action_type}, sender=${action.context?.email || 'unknown'}) is a pattern worth surfacing.
+2. The approval time of ${waitTime}s indicates urgency — fast approvals mean high-value items.
+3. If this sender has been executed before, strengthen the pattern — increase surfacing confidence for them.
+4. Track the result quality to inform future draft generation.`,
     })
 
     // Cognitive broadcast: tell the organism an action was executed
@@ -592,15 +718,19 @@ async function onDirectAction({ actionType, params, result, status, durationMs }
   if (!isEnabled()) return
 
   try {
-    const content = `Direct action executed (no CC session):
-Type: ${actionType}
-Status: ${status}
-Duration: ${durationMs}ms
-Result: ${JSON.stringify(result).slice(0, 500)}`
-
-    await kg.ingestFromLLM(content, {
+    // Direct structured ingestion — action metadata is already structured.
+    // Use a rolling node per action type to track patterns without accumulation.
+    await kg.ensureNode({
+      label: 'DirectAction',
+      name: `DirectAction: ${actionType}`,
+      properties: {
+        action_type: actionType,
+        last_status: status,
+        last_duration_ms: durationMs,
+        last_result: typeof result === 'string' ? result.slice(0, 200) : (result?.message || status),
+        description: `${actionType}: ${status} (${durationMs}ms)`,
+      },
       sourceModule: 'direct_action',
-      context: 'A direct action was executed by the organism through EcodiaOS without a Factory CC session. Track which direct actions are used and their outcomes.',
     })
   } catch (err) {
     logger.debug('KG direct action ingestion failed (non-blocking)', { error: err.message })
@@ -645,14 +775,23 @@ async function onFactoryOutcome({ session, outcome, confidence, filesChanged, co
 async function onSystemEvent({ type, decisions, actioned, pressure }) {
   if (!isEnabled()) return
 
-  try {
-    const content = `System event: ${type}
-${decisions !== undefined ? `Decisions made: ${decisions}, actioned: ${actioned}` : ''}
-${pressure !== undefined ? `Metabolic pressure: ${pressure}` : ''}`
+  // Only record system events when something actually happened (decisions actioned).
+  // Routine idle cycles with 0 decisions are pure noise — skip entirely.
+  if (!actioned || actioned === 0) return
 
-    await kg.ingestFromLLM(content, {
+  try {
+    // Direct structured ingestion — system events are numeric metrics, not prose.
+    // A single rolling node per event type avoids unbounded node accumulation.
+    await kg.ensureNode({
+      label: 'SystemEvent',
+      name: `System: ${type}`,
+      properties: {
+        last_decisions: decisions,
+        last_actioned: actioned,
+        last_pressure: pressure,
+        description: `${type}: ${actioned}/${decisions} decisions actioned at pressure ${(pressure || 0).toFixed(2)}`,
+      },
       sourceModule: 'system',
-      context: 'This is an internal system event from the autonomous maintenance loop. Track system health patterns over time.',
     })
   } catch (err) {
     logger.debug('KG system event ingestion failed (non-blocking)', { error: err.message })

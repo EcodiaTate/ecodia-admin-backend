@@ -297,6 +297,11 @@ async function routeMessage(message) {
       // Organism requests Factory self-modification
       const triggers = require('./factoryTriggerService')
       await triggers.dispatchSelfModification(message.payload)
+      // Broadcast to frontend so UI can show self-modification proposal
+      try {
+        const { broadcast } = require('../websocket/wsManager')
+        broadcast('self_modification', { payload: message.payload })
+      } catch { /* WS may not be ready */ }
       break
     }
     case 'scaffold_integration': {
@@ -315,6 +320,17 @@ async function routeMessage(message) {
         content: message.payload.content,
         source: message.source || 'organism',
       })
+      // Broadcast to frontend so UI can display organism surfacings
+      try {
+        const { broadcast } = require('../websocket/wsManager')
+        broadcast('cognitive_broadcast', {
+          payload: {
+            percept_type: message.payload.percept_type,
+            salience: message.payload.salience,
+            content: message.payload.content,
+          },
+        })
+      } catch { /* WS may not be ready */ }
       logger.debug(`Symbridge: received cognitive broadcast (${message.payload.percept_type}, salience: ${message.payload.salience})`)
       break
     }

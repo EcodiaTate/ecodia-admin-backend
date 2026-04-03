@@ -1,9 +1,6 @@
 const { Router } = require('express')
-const { z } = require('zod')
 const auth = require('../middleware/auth')
-const validate = require('../middleware/validate')
 const db = require('../config/db')
-const logger = require('../config/logger')
 
 const router = Router()
 router.use(auth)
@@ -65,43 +62,6 @@ router.get('/summary', async (req, res, next) => {
       net: parseFloat(summary.income) - parseFloat(summary.expenses),
       categories,
     })
-  } catch (err) {
-    next(err)
-  }
-})
-
-// POST /api/finance/sync — trigger manual Xero poll
-router.post('/sync', async (req, res, next) => {
-  try {
-    // Import dynamically to avoid circular deps with worker
-    const xeroService = require('../services/xeroService')
-    await xeroService.pollTransactions()
-    res.json({ status: 'ok' })
-  } catch (err) {
-    next(err)
-  }
-})
-
-// PATCH /api/finance/transactions/:id/category
-const categorySchema = z.object({
-  category: z.string().min(1),
-  xeroCategory: z.string().optional(),
-})
-
-router.patch('/transactions/:id/category', validate(categorySchema), async (req, res, next) => {
-  try {
-    const [updated] = await db`
-      UPDATE transactions SET
-        category = ${req.body.category},
-        xero_category = ${req.body.xeroCategory || null},
-        status = 'categorized',
-        category_confidence = 1.0,
-        updated_at = now()
-      WHERE id = ${req.params.id}
-      RETURNING *
-    `
-    if (!updated) return res.status(404).json({ error: 'Transaction not found' })
-    res.json(updated)
   } catch (err) {
     next(err)
   }

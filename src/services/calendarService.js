@@ -422,7 +422,7 @@ Respond as JSON:
           title: result.title || `Prep: ${event.summary}`,
           summary: result.summary,
           preparedData: { eventSummary: event.summary, startTime: event.start_time, attendees: people },
-          context: { googleEventId: event.google_event_id, conferenceLink: event.conference_link },
+          context: { googleEventId: event.google_event_id, conferenceLink: event.conference_link, from: people || event.summary, email: attendees.find(a => !a.self)?.email || null },
           priority: result.priority || 'medium',
           expiresInHours: 4,
         })

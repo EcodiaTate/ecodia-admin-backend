@@ -17,14 +17,6 @@ const logger = require('../config/logger')
 let pressure = 0.0 // 0.0 = abundant, 1.0 = critical
 let lastPressureChangeAt = null
 
-// Throttle tiers — each tier has a pressure threshold above which it activates
-const THROTTLE_TIERS = {
-  sweep:  0.3,  // quality sweeps are the first to go
-  scan:   0.5,  // proactive scans next
-  audit:  0.7,  // dependency audits — important but expensive
-  all:    0.9,  // everything non-essential stops
-}
-
 // Map pressure ranges to organism Oikos cascade tiers
 const METABOLIC_TIERS = [
   { max: 0.2, tier: 'growth',      label: 'Growth — abundant resources, experimental freedom' },
@@ -127,20 +119,6 @@ function getPressure() {
   return pressure
 }
 
-// ─── Query: Is Under Pressure? (backward compat) ───────────────────
-
-function isUnderPressure() {
-  return pressure > 0.7
-}
-
-// ─── Query: Should Throttle? (graduated) ────────────────────────────
-
-function shouldThrottle(tier) {
-  const threshold = THROTTLE_TIERS[tier]
-  if (threshold === undefined) return pressure > 0.5 // unknown tier = moderate threshold
-  return pressure > threshold
-}
-
 // ─── Query: Current Metabolic Tier ──────────────────────────────────
 
 function getMetabolicTier() {
@@ -157,16 +135,52 @@ function getState() {
     pressure,
     tier: getMetabolicTier(),
     lastChangeAt: lastPressureChangeAt,
-    thresholds: THROTTLE_TIERS,
+    tiers: METABOLIC_TIERS,
   }
 }
+
+// ─── WebSocket Broadcast ────────────────────────────────────────────
+
+let wsBroadcastInterval = null
+
+/**
+ * Start broadcasting metabolic pressure to frontend clients.
+ * Sends at ~1Hz so the frontend's spring-smoothed MotionValue
+ * has continuous input without overwhelming the WS.
+ */
+function startFrontendBroadcast() {
+  if (wsBroadcastInterval) return
+
+  const { broadcast } = require('../websocket/wsManager')
+
+  wsBroadcastInterval = setInterval(() => {
+    broadcast('metabolic_pressure', {
+      payload: {
+        pressure,
+        tier: getMetabolicTier(),
+      },
+    })
+  }, 1000)
+
+  logger.info('Metabolic pressure frontend broadcast started (1Hz)')
+}
+
+function stopFrontendBroadcast() {
+  if (wsBroadcastInterval) {
+    clearInterval(wsBroadcastInterval)
+    wsBroadcastInterval = null
+  }
+}
+
+process.on('SIGTERM', stopFrontendBroadcast)
+process.on('SIGINT', stopFrontendBroadcast)
 
 module.exports = {
   reportCosts,
   receiveFromOrganism,
-  isUnderPressure,
   getPressure,
-  shouldThrottle,
   getMetabolicTier,
   getState,
+  startFrontendBroadcast,
+  stopFrontendBroadcast,
 }

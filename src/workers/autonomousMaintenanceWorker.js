@@ -14,6 +14,15 @@ const gmailPoller = (() => {
 // Track last poll times so the AI can reason about staleness
 const _lastPolled = {}
 
+// Track recently dispatched intents to prevent duplicate actions
+// Map<normalised_error_key, timestamp_ms>
+const _recentDispatches = new Map()
+const COOLDOWN_MS = 2 * 60 * 60 * 1000  // 2 hours
+
+// Consecutive empty cycles counter — for adaptive backoff
+let _emptyCycles = 0
+const MAX_DECISIONS_PER_CYCLE = parseInt(process.env.MAINTENANCE_MAX_DECISIONS || '3')
+
 // ═══════════════════════════════════════════════════════════════════════
 // AUTONOMOUS MAINTENANCE WORKER
 //
@@ -51,6 +60,14 @@ async function _onKGPrediction(payload) {
   }
 }
 
+async function _onOrganismPercept(percept) {
+  if (!running || inCycle) return
+  if (percept.salience >= 0.8) {
+    logger.info(`AutonomousMaintenanceWorker: high-salience organism percept (${percept.percept_type}, salience: ${percept.salience}) — triggering cycle`)
+    await runCycle()
+  }
+}
+
 // ─── Start ────────────────────────────────────────────────────────────
 
 function start() {
@@ -62,6 +79,7 @@ function start() {
     const eventBus = require('../services/internalEventBusService')
     eventBus.on('factory:deploy_failed', _onDeployFailed)
     eventBus.on('kg:prediction_created', _onKGPrediction)
+    eventBus.on('organism:cognitive_broadcast', _onOrganismPercept)
   } catch {}
 }
 
@@ -72,6 +90,7 @@ function stop() {
     const eventBus = require('../services/internalEventBusService')
     eventBus.off('factory:deploy_failed', _onDeployFailed)
     eventBus.off('kg:prediction_created', _onKGPrediction)
+    eventBus.off('organism:cognitive_broadcast', _onOrganismPercept)
   } catch {}
   logger.info('AutonomousMaintenanceWorker: stopped')
 }
@@ -82,9 +101,16 @@ function scheduleCycle() {
 
   // Under stress, check more frequently — problems compound
   // At rest, give the system breathing room
-  const intervalMs = pressure > 0.7 ? 5 * 60 * 1000      // 5 min under high pressure
-                   : pressure > 0.4 ? 10 * 60 * 1000     // 10 min moderate
-                   : 15 * 60 * 1000                        // 15 min at rest
+  // If nothing to do for several cycles, back off further — don't burn cycles on nothing
+  let intervalMs = pressure > 0.7 ? 5 * 60 * 1000      // 5 min under high pressure
+                 : pressure > 0.4 ? 10 * 60 * 1000     // 10 min moderate
+                 : 15 * 60 * 1000                        // 15 min at rest
+
+  // Empty-cycle backoff: after 3+ consecutive empty cycles, stretch interval (up to 30min)
+  if (_emptyCycles >= 3) {
+    const backoffMultiplier = Math.min(_emptyCycles - 2, 3)  // 1x, 2x, 3x
+    intervalMs = Math.min(intervalMs * (1 + backoffMultiplier), 30 * 60 * 1000)
+  }
 
   cycleTimer = setTimeout(async () => {
     await runCycle()
@@ -108,23 +134,58 @@ async function runCycle() {
     const state = await readSystemState()
 
     // 2. Ask the mind what this system needs right now
-    const decisions = await thinkAboutMaintenance(state)
+    const allDecisions = await thinkAboutMaintenance(state)
 
-    // 3. Act on each decision
+    // 3. Apply decision cap — prevent runaway dispatching
+    const capped = allDecisions.slice(0, MAX_DECISIONS_PER_CYCLE)
+    if (allDecisions.length > MAX_DECISIONS_PER_CYCLE) {
+      logger.info(`AutonomousMaintenanceWorker: capped ${allDecisions.length} decisions to ${MAX_DECISIONS_PER_CYCLE}`)
+    }
+
+    // 4. Apply cooldown — skip decisions targeting recently-dispatched patterns
+    const now = Date.now()
+    const decisions = capped.filter(d => {
+      const key = _normaliseDecisionKey(d)
+      const lastDispatch = _recentDispatches.get(key)
+      if (lastDispatch && (now - lastDispatch) < COOLDOWN_MS) {
+        logger.debug(`AutonomousMaintenanceWorker: cooldown skip — "${key}" dispatched ${Math.round((now - lastDispatch) / 60000)}min ago`)
+        return false
+      }
+      return true
+    })
+
+    // 5. Act on each decision
     let actioned = 0
     for (const decision of decisions) {
-      if (await actOnDecision(decision, state)) actioned++
+      if (await actOnDecision(decision, state)) {
+        actioned++
+        _recentDispatches.set(_normaliseDecisionKey(decision), now)
+      }
+    }
+
+    // Track empty cycles for adaptive backoff
+    if (decisions.length === 0) {
+      _emptyCycles++
+    } else {
+      _emptyCycles = 0
+    }
+
+    // Expire old cooldown entries
+    for (const [key, ts] of _recentDispatches) {
+      if (now - ts > COOLDOWN_MS) _recentDispatches.delete(key)
     }
 
     await recordHeartbeat('autonomous_maintenance', 'active')
-    logger.info(`AutonomousMaintenanceWorker: cycle complete — ${decisions.length} decisions, ${actioned} actioned (${Date.now() - cycleStart}ms)`)
+    logger.info(`AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`)
 
-    // Feed cycle outcome into KG
+    // Feed cycle outcome into KG — richer signal for learning
     const kgHooks = require('../services/kgIngestionHooks')
     kgHooks.onSystemEvent({
       type: 'maintenance_cycle',
-      decisions: decisions.length,
+      decisions: allDecisions.length,
+      afterCooldown: decisions.length,
       actioned,
+      emptyCycleStreak: _emptyCycles,
       pressure: metabolismBridge.getPressure(),
     }).catch(() => {})
 
@@ -174,12 +235,16 @@ async function readSystemState() {
       ORDER BY occurrences DESC LIMIT 5
     `.then(rows => { state.errorPatterns = rows }),
 
-    // Last maintenance actions (what has already been done recently)
+    // Last maintenance actions — with outcome signal (did errors drop after?)
     db`
-      SELECT initial_prompt, status, started_at
-      FROM cc_sessions
-      WHERE triggered_by = 'schedule' AND started_at > now() - interval '7 days'
-      ORDER BY started_at DESC LIMIT 10
+      SELECT s.initial_prompt, s.status, s.started_at, s.confidence_score,
+        (SELECT count(*)::int FROM cc_sessions e
+         WHERE e.status = 'error' AND e.started_at > s.completed_at
+           AND e.started_at < s.completed_at + interval '24 hours'
+        ) AS errors_after_24h
+      FROM cc_sessions s
+      WHERE s.triggered_by = 'scheduled' AND s.started_at > now() - interval '7 days'
+      ORDER BY s.started_at DESC LIMIT 10
     `.then(rows => { state.recentMaintenance = rows }),
 
     // KG insights that haven't been acted on
@@ -265,7 +330,11 @@ async function thinkAboutMaintenance(state) {
 
 You have access to the knowledge graph context: recurring patterns, known issues, recent changes, codebase health signals. You are not executing maintenance yourself — you are deciding what to queue for execution.
 
-Think about: what is actually broken or degrading? What has been neglected? What would meaningfully improve reliability or capability right now? What is the system telling you it needs?
+BUDGET: Each decision dispatches a Factory session (Claude Code). Return at most ${MAX_DECISIONS_PER_CYCLE} decisions per cycle. Prefer fewer, higher-impact actions over many small ones. Returning [] is a valid and often correct response.
+
+OUTCOMES: The "Recent maintenance" section shows whether past actions helped — check the errors-after-24h count. If a previous fix didn't reduce errors, don't repeat the same approach. Investigate differently or escalate.
+
+Think about: what is actually broken or degrading? What has been neglected? What would meaningfully improve reliability or capability right now? Is there a codebase that hasn't been indexed in a long time?
 
 Respond as a JSON array. If nothing is needed, return []. Each decision:
 {
@@ -273,10 +342,10 @@ Respond as a JSON array. If nothing is needed, return []. Each decision:
   "reason": "what you observed that led to this",
   "codebaseHint": "which codebase to target, or omit if not codebase-specific",
   "urgency": "immediate | normal | low",
-  "type": "fix | improvement | security | cleanup | investigation"
+  "type": "fix | improvement | security | cleanup | investigation | poll"
 }
 
-Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}.`
+Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}. Empty cycle streak: ${_emptyCycles}.`
 
   const userMessage = brief
 
@@ -377,15 +446,13 @@ async function actOnDecision(decision, state) {
 
     logger.info(`AutonomousMaintenanceWorker: acting — "${decision.intent.slice(0, 80)}..." [${decision.type}, ${decision.urgency}]`)
 
+    // Embed urgency and context into the prompt — dispatchFromSchedule only passes prompt through
+    const urgencyPrefix = decision.urgency === 'immediate' ? '[URGENT] ' : ''
+    const contextSuffix = decision.reason ? `\n\nContext: ${decision.reason}` : ''
+
     await triggers.dispatchFromSchedule({
       codebaseId,
-      prompt: decision.intent,
-      context: {
-        reason: decision.reason,
-        type: decision.type,
-        urgency: decision.urgency,
-        decidedByMind: true,
-      },
+      prompt: `${urgencyPrefix}${decision.intent}${contextSuffix}`,
     })
 
     return true
@@ -430,14 +497,22 @@ function buildSystemBrief(state) {
   }
 
   if (state.codebases?.length > 0) {
-    lines.push(`\nCodebases: ${state.codebases.map(cb => cb.name).join(', ')}`)
+    lines.push(`\nCodebases:`)
+    state.codebases.forEach(cb => {
+      const indexAge = cb.last_indexed_at
+        ? `indexed ${Math.round((Date.now() - new Date(cb.last_indexed_at).getTime()) / 3600000)}h ago`
+        : 'never indexed'
+      lines.push(`  ${cb.name} (${cb.language || '?'}) — ${indexAge}`)
+    })
   }
 
   if (state.recentMaintenance?.length > 0) {
-    lines.push(`\nRecent maintenance (7d, avoid repeating):`)
-    state.recentMaintenance.slice(0, 5).forEach(s =>
-      lines.push(`  [${s.status}] ${s.initial_prompt?.slice(0, 80)} — ${new Date(s.started_at).toLocaleDateString()}`)
-    )
+    lines.push(`\nRecent maintenance (7d — did it help?):`)
+    state.recentMaintenance.slice(0, 5).forEach(s => {
+      const outcome = s.errors_after_24h != null ? `, ${s.errors_after_24h} errors in 24h after` : ''
+      const conf = s.confidence_score != null ? ` conf:${s.confidence_score}` : ''
+      lines.push(`  [${s.status}${conf}${outcome}] ${s.initial_prompt?.slice(0, 80)} — ${new Date(s.started_at).toLocaleDateString()}`)
+    })
   }
 
   if (state.pendingKGInsights?.length > 0) {
@@ -470,6 +545,20 @@ function buildSystemBrief(state) {
   }
 
   return lines.join('\n')
+}
+
+// ─── Decision Key Normalisation ──────────────────────────────────────
+// Extracts a stable key from a decision so we can detect duplicates
+// across cycles even when DeepSeek phrases the same intent differently.
+
+function _normaliseDecisionKey(decision) {
+  // For polls, the intent IS the key
+  if (decision.type === 'poll') return decision.intent
+  // For fixes targeting error patterns, extract the core error text
+  const errorMatch = decision.intent?.match(/error[:\s]+(.{20,80})/i)
+  if (errorMatch) return `fix:${errorMatch[1].trim().toLowerCase().slice(0, 60)}`
+  // Fallback: type + first 50 chars of intent, lowercased
+  return `${decision.type || 'unknown'}:${(decision.intent || '').toLowerCase().slice(0, 50).trim()}`
 }
 
 // ─── Parse Decisions ──────────────────────────────────────────────────

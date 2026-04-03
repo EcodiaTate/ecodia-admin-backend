@@ -1,5 +1,4 @@
 const { Router } = require('express')
-const { z } = require('zod')
 const auth = require('../middleware/auth')
 const cortexService = require('../services/cortexService')
 const logger = require('../config/logger')
@@ -39,27 +38,6 @@ router.post('/chat', async (req, res, next) => {
     res.json(result)
   } catch (err) {
     logger.error('Cortex chat failed', { error: err.message })
-    next(err)
-  }
-})
-
-// GET /api/cortex/sessions — list recent conversation sessions
-router.get('/sessions', async (req, res, next) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 50)
-    const sessions = await cortexService.listSessions(limit)
-    res.json(sessions)
-  } catch (err) {
-    next(err)
-  }
-})
-
-// GET /api/cortex/sessions/:sessionId/history — get session history
-router.get('/sessions/:sessionId/history', async (req, res, next) => {
-  try {
-    const history = await cortexService.getSessionHistory(req.params.sessionId)
-    res.json(history)
-  } catch (err) {
     next(err)
   }
 })
