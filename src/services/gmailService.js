@@ -217,6 +217,45 @@ async function triagePendingEmails() {
         }
       } catch { /* proceed without */ }
 
+      // Pull active conversations on other channels (Meta Messenger, Instagram, LinkedIn)
+      // so the AI knows if this topic is already being handled elsewhere
+      let activeChannelsContext = null
+      try {
+        const senderName = thread.from_name
+        const senderEmail = thread.from_email
+
+        // Check Meta conversations for this person (by name match)
+        const metaConvs = senderName ? await db`
+          SELECT mc.participant_name, mc.platform, mc.last_message_at, mc.triage_summary,
+            (SELECT message_text FROM meta_messages
+             WHERE conversation_id = mc.id ORDER BY created_time DESC LIMIT 1) AS last_message
+          FROM meta_conversations mc
+          WHERE mc.last_message_at > now() - interval '7 days'
+            AND (mc.participant_name ILIKE ${`%${senderName.split(' ')[0]}%`})
+          ORDER BY mc.last_message_at DESC
+          LIMIT 3
+        ` : []
+
+        // Check LinkedIn DMs for this person
+        const linkedinConvs = senderName ? await db`
+          SELECT ld.participant_name, ld.last_message_at, ld.last_message_preview
+          FROM linkedin_dms ld
+          WHERE ld.last_message_at > now() - interval '7 days'
+            AND (ld.participant_name ILIKE ${`%${senderName.split(' ')[0]}%`})
+          ORDER BY ld.last_message_at DESC
+          LIMIT 2
+        `.catch(() => []) : []
+
+        const allChannels = [
+          ...metaConvs.map(c => `- ${c.platform || 'Messenger'} with ${c.participant_name} (last message: ${c.last_message_at ? new Date(c.last_message_at).toISOString() : 'unknown'}${c.last_message ? `: "${c.last_message.slice(0, 150)}"` : ''}${c.triage_summary ? ` | Summary: ${c.triage_summary}` : ''})`),
+          ...linkedinConvs.map(c => `- LinkedIn DM with ${c.participant_name} (last: ${c.last_message_at ? new Date(c.last_message_at).toISOString() : 'unknown'}${c.last_message_preview ? `: "${c.last_message_preview.slice(0, 150)}"` : ''})`),
+        ]
+
+        if (allChannels.length > 0) {
+          activeChannelsContext = allChannels.join('\n')
+        }
+      } catch { /* proceed without */ }
+
       const triage = await deepseekService.triageEmail({
         subject: thread.subject,
         from: `${thread.from_name || ''} <${thread.from_email}>`,
@@ -226,6 +265,8 @@ async function triagePendingEmails() {
         clientContext: client,
         kgContext,
         pendingActionsContext,
+        activeChannelsContext,
+        receivedAt: thread.received_at,
       })
 
       await db`

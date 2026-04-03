@@ -309,15 +309,21 @@ async function performAction(item) {
 // ─── Dismiss ───────────────────────────────────────────────────────────
 
 async function dismiss(actionId, { reason } = {}) {
-  await db`
+  const [item] = await db`
     UPDATE action_queue
     SET status = 'dismissed', updated_at = now(),
         context = context || ${JSON.stringify({ dismissed_reason: reason || null, dismissed_at: new Date().toISOString() })}
     WHERE id = ${actionId} AND status = 'pending'
+    RETURNING *
   `
   broadcast('action_queue:dismissed', { id: actionId })
   publishRedis('dismissed', { id: actionId })
   emitEvent('action:dismissed', { id: actionId, reason: reason || null })
+
+  if (item) {
+    const kgHooks = require('./kgIngestionHooks')
+    kgHooks.onActionDismissed({ action: item, reason }).catch(() => {})
+  }
 }
 
 // ─── Batch Dismiss (single SQL) ──────────────────────────────────────
@@ -329,12 +335,14 @@ async function batchDismiss(ids, { reason } = {}) {
     SET status = 'dismissed', updated_at = now(),
         context = context || ${JSON.stringify({ dismissed_reason: reason || null, dismissed_at: new Date().toISOString() })}
     WHERE id = ANY(${ids}) AND status = 'pending'
-    RETURNING id
+    RETURNING *
   `
+  const kgHooks = require('./kgIngestionHooks')
   for (const item of dismissed) {
     broadcast('action_queue:dismissed', { id: item.id })
     publishRedis('dismissed', { id: item.id })
     emitEvent('action:dismissed', { id: item.id, reason: reason || null })
+    kgHooks.onActionDismissed({ action: item, reason }).catch(() => {})
   }
   return dismissed.length
 }

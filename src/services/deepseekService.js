@@ -139,7 +139,7 @@ ${kgContext}
 
   const usage = response.data.usage
   const durationMs = Date.now() - start
-  const content = response.data.choices[0].message.content
+  const content = response.data.choices[0].message.content.replace(/\u2014/g, '-')
 
   // Track usage
   await db`
@@ -204,7 +204,7 @@ Respond as JSON:
   }))
 }
 
-async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext }) {
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, receivedAt }) {
   // kgContext may already be provided by gmailService — if so, skip retrieval
   const hasExternalContext = !!kgContext
 
@@ -218,13 +218,28 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
     ? `\n--- ALREADY PENDING IN ACTION QUEUE ---\nThe following items from this sender are ALREADY queued and waiting for Tate's attention:\n${pendingActionsContext}\n\nIMPORTANT: If this email is about the same topic as an already-pending item, do NOT surface it again. Set surfaceToHuman to false and suggestedAction to "archive". The action queue will consolidate the signal automatically. Only surface if this email introduces genuinely NEW information or a different topic.\n--- END PENDING ---\n`
     : ''
 
+  const channelsBlock = activeChannelsContext
+    ? `\n--- ACTIVE CONVERSATIONS ON OTHER CHANNELS ---\nTate is already in contact with this person on other platforms. This conversation may have made this email irrelevant or already resolved:\n${activeChannelsContext}\n--- END CHANNELS ---\n`
+    : ''
+
+  const now = new Date()
+  const emailAge = receivedAt
+    ? (() => {
+        const ageMs = now - new Date(receivedAt)
+        const ageMins = Math.round(ageMs / 60000)
+        if (ageMins < 60) return `${ageMins} minutes ago`
+        if (ageMins < 1440) return `${Math.round(ageMins / 60)} hours ago`
+        return `${Math.round(ageMins / 1440)} days ago`
+      })()
+    : null
+
   const prompt = `You are the autonomous email handler for Ecodia Pty Ltd (Tate Donohoe, 21, software dev, Australia). You handle emails — archive noise, reply when you can, create tasks when something needs doing, surface to Tate only when his personal judgment is genuinely needed.
 
+Now: ${now.toISOString()}
 Inbox: ${inbox || 'code@ecodia.au'}
 From: ${from}
-Subject: ${subject}
-${contextBlock}${pendingBlock}
-
+Subject: ${subject}${emailAge ? `\nReceived: ${emailAge}` : ''}
+${contextBlock}${pendingBlock}${channelsBlock}
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 

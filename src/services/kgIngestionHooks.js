@@ -531,6 +531,31 @@ Payload: ${JSON.stringify(payload).slice(0, 1500)}`
 
 // ─── Action Queue ───────────────────────────────────────────────────
 
+async function onActionDismissed({ action, reason }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Action dismissed by human:
+Source: ${action.source}
+Type: ${action.action_type}
+Title: ${action.title}
+Summary: ${action.summary || 'N/A'}
+Priority: ${action.priority}
+Surfaced because: ${action.context?.surfacedBecause || 'ai_requested'}
+Confidence when surfaced: ${action.context?.confidence ?? 'unknown'}
+Dismiss reason: ${reason || 'no reason given'}
+From: ${action.context?.from || 'unknown'} (${action.context?.email || ''})`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'action_queue_dismissed',
+      sourceId: action.id,
+      context: 'A human dismissed this action — they chose NOT to act on it. This is a correction signal. Extract: what kind of item was rejected, from whom, why it was probably wrong to surface, and what pattern this represents about Tate\'s preferences.',
+    })
+  } catch (err) {
+    logger.debug('KG action dismissed ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 async function onActionExecuted({ action, result }) {
   if (!isEnabled()) return
 
@@ -670,6 +695,7 @@ module.exports = {
   onMetaPostCreated,
   onMetaConversationUpdated,
   onSymbridgeMessage,
+  onActionDismissed,
   onActionExecuted,
   onDirectAction,
   onFactoryOutcome,

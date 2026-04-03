@@ -246,13 +246,25 @@ async function triagePendingConversations() {
       const lastFromCustomer = messages.filter(m => !m.from_page).slice(-1)[0]
       if (!lastFromCustomer) continue // No customer message to triage
 
+      const lastMessageTime = messages[messages.length - 1]?.time
+      const lastMessageAge = lastMessageTime
+        ? (() => {
+            const ageMs = Date.now() - new Date(lastMessageTime)
+            const ageMins = Math.round(ageMs / 60000)
+            if (ageMins < 60) return `${ageMins} minutes ago`
+            if (ageMins < 1440) return `${Math.round(ageMins / 60)} hours ago`
+            return `${Math.round(ageMins / 1440)} days ago`
+          })()
+        : null
+
       const prompt = `Triage this ${conv.platform || 'messenger'} DM for Ecodia (software development company).
 
+Now: ${new Date().toISOString()}
 Page: ${conv.page_name}
-Participant: ${conv.participant_name || 'Unknown'}
+Participant: ${conv.participant_name || 'Unknown'}${lastMessageAge ? `\nLast message: ${lastMessageAge}` : ''}
 
 Recent messages:
-${messages.map(m => `${m.from_page ? 'Page' : conv.participant_name || 'Customer'}: ${m.text || '(no text)'}`).join('\n')}
+${messages.map(m => `[${m.time || '?'}] ${m.from_page ? 'Page' : conv.participant_name || 'Customer'}: ${m.text || '(no text)'}`).join('\n')}
 
 What's happening here and what should we do about it?
 
