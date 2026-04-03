@@ -98,14 +98,25 @@ registry.registerMany([
       const timeout = params.timeout || 30_000
       const cwd = params.cwd || process.env.HOME || '/home/tate'
 
-      const output = execSync(params.command, {
-        cwd,
-        encoding: 'utf-8',
-        timeout,
-        maxBuffer: 5 * 1024 * 1024,
-      })
-
-      return { output: output.slice(0, 10_000), command: params.command, cwd }
+      try {
+        const output = execSync(params.command, {
+          cwd,
+          encoding: 'utf-8',
+          timeout,
+          maxBuffer: 5 * 1024 * 1024,
+        })
+        return { output: output.slice(0, 10_000), exitCode: 0, command: params.command, cwd }
+      } catch (err) {
+        // execSync throws on non-zero exit — return stderr/stdout as data, not an error.
+        // The caller (Cortex, organism) needs to see the output to diagnose, not get a 500.
+        return {
+          output: (err.stdout || '').slice(0, 5_000),
+          stderr: (err.stderr || '').slice(0, 5_000),
+          exitCode: err.status ?? 1,
+          command: params.command,
+          cwd,
+        }
+      }
     },
   },
 
