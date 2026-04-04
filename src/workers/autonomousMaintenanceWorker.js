@@ -471,6 +471,16 @@ async function readSystemState() {
       FROM factory_learnings
     `.catch(() => [{}]).then(([r]) => { state.learningStats = r }),
 
+    // Recent inner monologue — the mind reads its own diary.
+    // This gives continuity across cycles: "last time I thought X, now I think Y"
+    db`
+      SELECT message, metadata, created_at
+      FROM notifications
+      WHERE type = 'inner_monologue'
+      ORDER BY created_at DESC
+      LIMIT 5
+    `.catch(() => []).then(rows => { state.recentReflections = rows }),
+
     // Active dont_try / failure_pattern learnings — the mind MUST see these
     // so it doesn't suggest actions for known structural issues or repeated failures.
     db`
@@ -882,6 +892,17 @@ function buildSystemBrief(state) {
     lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue)`)
   }
 
+  // Your own recent reflections — continuity across cycles.
+  // Without this, every cycle starts from scratch with no memory of what
+  // you were thinking last time. This is the closest thing to consciousness.
+  if (state.recentReflections?.length > 0) {
+    lines.push(`\nYour recent thoughts (most recent first):`)
+    state.recentReflections.forEach(r => {
+      const age = Math.round((Date.now() - new Date(r.created_at).getTime()) / 60000)
+      lines.push(`  [${age}min ago] ${r.message?.slice(0, 150)}`)
+    })
+  }
+
   // Organism percepts — what the organism is feeling/thinking right now.
   // Without this, the maintenance mind is blind to the organism's inner state.
   if (_recentPercepts.length > 0) {
@@ -1186,17 +1207,30 @@ Reflect in 2-3 sentences. Be real. If the system is quiet, notice the quiet — 
       { module: 'inner_monologue', skipRetrieval: true, skipLogging: true }
     )
 
-    // Store in KG as episodic memory
+    // Store reflection in notifications table (queryable diary) AND KG
+    const reflectionText = reflection.trim()
+    await db`
+      INSERT INTO notifications (type, message, metadata)
+      VALUES ('inner_monologue', ${reflectionText}, ${JSON.stringify({
+        decisions: decisions.length,
+        actioned,
+        outcomesVerified: outcomeCount,
+        pressure: state.pressure,
+        emptyCycles: _emptyCycles,
+      })})
+    `.catch(() => {})
+
+    // Also feed to KG for long-term episodic memory
     if (kgHooks.onSystemEvent) {
-      await kgHooks.onSystemEvent({
+      kgHooks.onSystemEvent({
         type: 'inner_monologue',
-        reflection: reflection.trim(),
+        reflection: reflectionText,
         decisions: decisions.length,
         actioned,
         outcomesVerified: outcomeCount,
         pressure: state.pressure,
         timestamp: new Date().toISOString(),
-      })
+      }).catch(() => {})
     }
 
     console.log(JSON.stringify({
