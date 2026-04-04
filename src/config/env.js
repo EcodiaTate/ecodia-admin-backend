@@ -201,6 +201,8 @@ const envSchema = z.object({
   // Review context limits — 0 = unlimited
   FACTORY_REVIEW_MAX_FILES: z.string().default('0'),             // 0 = review all changed files
   FACTORY_REVIEW_MAX_CONTEXT_FILES: z.string().default('0'),     // 0 = full file context for all
+  // Selfhood — introspection, goals, identity
+  INTROSPECTION_CYCLE_INTERVAL: z.string().default('10'),        // run full introspection every N maintenance cycles (0 = disabled)
 })
 
 const parsed = envSchema.safeParse(process.env)

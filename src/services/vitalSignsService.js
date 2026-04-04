@@ -378,12 +378,22 @@ async function receiveOrganismHealth(healthData) {
 
 async function getVitals() {
   const selfHealth = await checkSelfHealth()
+
+  // Cognitive health — how the organism's reasoning and learning are performing
+  let cognitive = null
+  try {
+    const introspection = require('./introspectionService')
+    const brief = await introspection.buildIntrospectionBrief()
+    if (brief) cognitive = { summary: brief }
+  } catch { /* introspection unavailable */ }
+
   return {
     ecodiaos: {
       healthy: selfHealth.db && selfHealth.neo4j,
       ...selfHealth,
     },
     organism: organismHealthState,
+    cognitive,
     timestamp: new Date().toISOString(),
   }
 }
