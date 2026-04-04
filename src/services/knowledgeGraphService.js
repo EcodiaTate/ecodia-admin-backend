@@ -302,26 +302,39 @@ async function embedStaleNodes(batchSize = 100) {
   // Batch embed via OpenAI
   const embeddings = await getBatchEmbeddings(nodes.map(n => n.text))
 
+  // Batch-write all embeddings in one UNWIND query instead of 100 sequential writes
+  const updates = nodes
+    .map((n, i) => embeddings[i] ? { nodeId: n.nodeId, embedding: embeddings[i], text: n.text } : null)
+    .filter(Boolean)
+
+  if (updates.length === 0) return 0
+
   let stored = 0
-  let failed = 0
-  for (let i = 0; i < nodes.length; i++) {
-    if (embeddings[i]) {
+  try {
+    const result = await runWrite(
+      `UNWIND $updates AS u
+       MATCH (n) WHERE elementId(n) = u.nodeId
+       SET n.embedding = u.embedding, n.embedding_stale = false, n.embedding_text = u.text, n:\`__Embedded__\`
+       RETURN count(n) AS cnt`,
+      { updates }
+    )
+    stored = result[0]?.get('cnt')?.toInt?.() ?? result[0]?.get('cnt') ?? updates.length
+  } catch (err) {
+    // Fallback to one-by-one if UNWIND fails (Aura free tier compat)
+    logger.debug('Batch embedding write failed, falling back to sequential', { error: err.message })
+    for (const u of updates) {
       await runWrite(
         `MATCH (n) WHERE elementId(n) = $nodeId
          SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text, n:\`__Embedded__\``,
-        { nodeId: nodes[i].nodeId, embedding: embeddings[i], text: nodes[i].text }
-      ).catch(err => {
-        failed++
-        logger.warn(`Failed to store embedding for ${nodes[i].nodeId}`, { error: err.message })
-      })
+        u
+      ).catch(() => {})
       stored++
-    } else {
-      failed++
     }
   }
 
+  const failed = nodes.length - updates.length
   if (failed > 0) {
-    logger.warn(`KG embedding: ${stored} stored, ${failed} failed out of ${nodes.length} batch`)
+    logger.warn(`KG embedding: ${stored} stored, ${failed} had no embedding out of ${nodes.length} batch`)
   } else {
     logger.info(`Embedded ${stored} stale KG nodes`)
   }

@@ -81,13 +81,69 @@ async function runPostSessionPipeline(sessionId) {
       stage: 'execution',
       message: 'CC completed but made no file changes',
     })
-    // Still record outcome so learnings are extracted — without this,
-    // tasks that CAN'T produce file changes (e.g. investigating external
-    // systems like Google Apps Script) never create failure learnings,
-    // causing the same task to be dispatched in an infinite loop.
-    await recordOutcome(session, 'no_changes', {
-      message: 'Session completed but made no file changes — task may be un-actionable from this codebase',
-    })
+
+    // Check if similar tasks have ALSO produced no changes recently.
+    // If 2+ similar no-change sessions exist in the last 7 days, this is
+    // likely a structural/unsolvable issue — force a dont_try learning
+    // so the system stops wasting sessions on it.
+    const { _extractKeywords } = require('./factoryTriggerService')
+    const taskKeywords = _extractKeywords(session.initial_prompt)
+    let isRepeatNoChange = false
+
+    if (taskKeywords.length >= 2) {
+      const recentNoChange = await db`
+        SELECT id, initial_prompt FROM cc_sessions
+        WHERE id != ${session.id}
+          AND codebase_id = ${session.codebase_id}
+          AND status = 'complete'
+          AND (files_changed IS NULL OR array_length(files_changed, 1) IS NULL)
+          AND started_at > now() - interval '7 days'
+        ORDER BY started_at DESC
+        LIMIT 20
+      `
+      const similarCount = recentNoChange.filter(s => {
+        const sKeywords = _extractKeywords(s.initial_prompt)
+        const overlap = taskKeywords.filter(kw => sKeywords.includes(kw)).length
+        return overlap >= Math.ceil(taskKeywords.length * 0.4)
+      }).length
+
+      isRepeatNoChange = similarCount >= 2
+    }
+
+    if (isRepeatNoChange) {
+      // Force-create a dont_try learning — this task has been attempted 3+ times
+      // with no results. It's structural, not fixable by more CC sessions.
+      logger.info(`Factory oversight: repeat no-change task detected (${sessionId}) — creating dont_try learning`)
+      const taskSnippet = (session.initial_prompt || '').slice(0, 200)
+      const keywords = _extractKeywords(session.initial_prompt)
+
+      // Insert directly — bypass DeepSeek since we KNOW this is a pattern
+      await db`
+        INSERT INTO factory_learnings (
+          id, codebase_id, pattern_type, pattern_description, confidence,
+          success, session_ids, times_applied, evidence
+        ) VALUES (
+          gen_random_uuid(),
+          ${session.codebase_id},
+          'dont_try',
+          ${'Repeated no-change task (3+ attempts, 0 file changes): ' + taskSnippet},
+          ${0.85},
+          false,
+          ARRAY[${session.id}]::uuid[],
+          0,
+          ${JSON.stringify({ keywords, reason: 'auto-detected repeat no-change pattern' })}
+        )
+        ON CONFLICT DO NOTHING
+      `.catch(err => logger.debug('Failed to create dont_try learning', { error: err.message }))
+
+      await recordOutcome(session, 'no_changes', {
+        message: 'Repeat no-change task — dont_try learning created to suppress future dispatches',
+      })
+    } else {
+      await recordOutcome(session, 'no_changes', {
+        message: 'Session completed but made no file changes — task may be un-actionable from this codebase',
+      })
+    }
     return
   }
 
@@ -684,11 +740,23 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
     // Extract cross-session learning patterns via DeepSeek
     await extractLearningPattern(session, outcome, details)
 
-    // Learning decay: calendar-based, once per day at most.
+    // Learning decay: evidence-based, once per day at most.
     // Failure patterns and "dont_try" learnings are exempt — they encode hard constraints
     // that don't become less true with time (e.g. "this column is NOT NULL").
-    // Success patterns decay because the codebase evolves and techniques become stale.
+    // Success patterns decay, but SLOWER if they've been applied many times.
+    // A learning applied 10+ times has proven its value — decay at 2%/day vs 5%/day.
     if (session.codebase_id) {
+      // High-usage learnings (applied 5+ times): very slow decay (2%/day)
+      await db`
+        UPDATE factory_learnings
+        SET confidence = GREATEST(0.15, confidence * 0.98), updated_at = now()
+        WHERE codebase_id = ${session.codebase_id}
+          AND created_at < now() - interval '30 days'
+          AND updated_at < now() - interval '1 day'
+          AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
+          AND times_applied >= 5
+      `.catch(() => {})
+      // Low-usage learnings (applied <5 times): normal decay (5%/day)
       await db`
         UPDATE factory_learnings
         SET confidence = GREATEST(0.15, confidence * 0.95), updated_at = now()
@@ -696,6 +764,7 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
           AND created_at < now() - interval '30 days'
           AND updated_at < now() - interval '1 day'
           AND pattern_type NOT IN ('failure_pattern', 'dont_try', 'constraint')
+          AND times_applied < 5
       `.catch(() => {})
     }
 

@@ -405,13 +405,15 @@ async function readSystemState() {
     `.catch(() => [{}]).then(([r]) => { state.learningStats = r }),
   ])
 
-  // Integration staleness — how long since each service was polled
+  // Integration staleness — how long since each service was polled.
+  // "never" means no poll has happened since boot AND no DB record exists.
+  // The mind must see this as STALE, not "unknown".
   const now = Date.now()
   state.integrationStaleness = {
-    gmail:       _lastPolled.gmail       ? Math.round((now - _lastPolled.gmail)       / 60000) : null,
-    google_drive: _lastPolled.google_drive ? Math.round((now - _lastPolled.google_drive) / 60000) : null,
-    vercel:      _lastPolled.vercel      ? Math.round((now - _lastPolled.vercel)      / 60000) : null,
-    meta:        _lastPolled.meta        ? Math.round((now - _lastPolled.meta)        / 60000) : null,
+    gmail:        _lastPolled.gmail        ? `${Math.round((now - _lastPolled.gmail)       / 60000)} min ago` : 'never (stale)',
+    google_drive: _lastPolled.google_drive ? `${Math.round((now - _lastPolled.google_drive) / 60000)} min ago` : 'never (stale)',
+    vercel:       _lastPolled.vercel       ? `${Math.round((now - _lastPolled.vercel)      / 60000)} min ago` : 'never (stale)',
+    meta:         _lastPolled.meta         ? `${Math.round((now - _lastPolled.meta)        / 60000)} min ago` : 'never (stale)',
   }
 
   // Git activity runs after DB queries — needs state.codebases populated first
@@ -751,8 +753,8 @@ async function _hasRecentSimilarSession(decision, cooldownMs) {
     for (const session of recent) {
       const prompt = (session.initial_prompt || '').toLowerCase()
       const matchCount = keywords.filter(kw => prompt.includes(kw)).length
-      // If >60% of keywords match, consider it a duplicate
-      if (matchCount >= Math.ceil(keywords.length * 0.6)) {
+      // If >40% of stemmed keywords match, consider it a duplicate
+      if (matchCount >= Math.ceil(keywords.length * 0.4)) {
         logger.debug('AutonomousMaintenanceWorker: DB dedup match', {
           newIntent: intent.slice(0, 80),
           existingSession: session.id,
@@ -769,16 +771,11 @@ async function _hasRecentSimilarSession(decision, cooldownMs) {
   }
 }
 
-// Extract meaningful keywords from an intent for fuzzy dedup matching
+// Extract meaningful keywords from an intent for fuzzy dedup matching.
+// Uses the same stemmer + stop words as factoryTriggerService for consistency.
 function _extractDedupKeywords(intent) {
-  const stopWords = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were', 'been',
-    'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'how', 'why', 'which', 'who',
-    'investigate', 'check', 'fix', 'examine', 'look', 'into', 'also', 'any', 'all'])
-  return intent
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !stopWords.has(w))
-    .slice(0, 8)
+  const { _extractKeywords } = require('../services/factoryTriggerService')
+  return _extractKeywords(intent).slice(0, 8)
 }
 
 // ─── Decision Key Normalisation ──────────────────────────────────────
@@ -843,9 +840,9 @@ function fallbackHeuristics(state) {
 
   // Ambient polling — if the mind can't decide, poll stale integrations anyway.
   // Gmail is critical for awareness. 15min staleness = time to poll.
-  const gmailStaleMin = state.integrationStaleness?.gmail
-  if (gmailStaleMin === null || gmailStaleMin > 15) {
-    decisions.push({ intent: 'poll_gmail', type: 'poll', urgency: 'normal', reason: 'Gmail stale or never polled — ambient fallback' })
+  const gmailAge = _lastPolled.gmail ? Math.round((Date.now() - _lastPolled.gmail) / 60000) : Infinity
+  if (gmailAge > 15) {
+    decisions.push({ intent: 'poll_gmail', type: 'poll', urgency: 'normal', reason: `Gmail stale (${gmailAge === Infinity ? 'never polled' : gmailAge + 'min ago'}) — ambient fallback` })
   }
 
   return decisions

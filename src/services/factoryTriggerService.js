@@ -82,20 +82,66 @@ Task: ${prompt.slice(0, 500)}`,
 
 const DISPATCH_COOLDOWN_MS = parseInt(env.DISPATCH_DEDUP_COOLDOWN_MS || '7200000')  // 2h default
 
+// Structural issues are inherent system behaviors (PM2 restarts → orphans,
+// concurrent sessions → lock contention). These need much longer cooldowns
+// because they recur naturally and can't be fixed by CC sessions.
+const STRUCTURAL_COOLDOWN_MS = parseInt(env.DISPATCH_STRUCTURAL_COOLDOWN_MS || '86400000')  // 24h
+const _STRUCTURAL_PATTERNS = [
+  /orphan/i, /codebase.*lock/i, /lock.*codebase/i, /concurrent.*session/i,
+  /session.*stale/i, /heartbeat/i, /process.*kill/i, /graceful.*shutdown/i,
+  /pm2.*restart/i, /restart.*loop/i, /signal.*handling/i,
+]
+
+function _isStructuralIssue(text) {
+  return _STRUCTURAL_PATTERNS.some(p => p.test(text || ''))
+}
+
 const _STOP_WORDS = new Set([
   'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were', 'been',
   'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'how', 'why', 'which',
-  'who', 'investigate', 'check', 'fix', 'examine', 'look', 'into', 'also', 'any', 'all',
-  'the', 'urgent', 'context', 'previous', 'investigation', 'attempts', 'failed',
+  'who', 'into', 'also', 'any', 'all', 'the', 'urgent', 'context', 'previous',
+  'should', 'could', 'would', 'will', 'does', 'there', 'then', 'than', 'just', 'about',
+  'being', 'other', 'some', 'these', 'those', 'such', 'each', 'every', 'more', 'most',
 ])
 
+// Naive English stemmer — strips common suffixes so "orphaned"→"orphan",
+// "sessions"→"session", "investigating"→"investigat", etc.
+// Good enough for dedup without pulling in a dependency.
+function _stem(word) {
+  return word
+    .replace(/ies$/, 'y')
+    .replace(/ied$/, 'y')
+    .replace(/ing$/, '')
+    .replace(/tion$/, 't')
+    .replace(/sion$/, 's')
+    .replace(/ment$/, '')
+    .replace(/ness$/, '')
+    .replace(/able$/, '')
+    .replace(/ible$/, '')
+    .replace(/ated$/, 'at')
+    .replace(/ised$/, 'is')
+    .replace(/ized$/, 'iz')
+    .replace(/ling$/, 'l')
+    .replace(/lled$/, 'l')
+    .replace(/ened$/, 'en')
+    .replace(/ened$/, 'en')
+    .replace(/ed$/, '')
+    .replace(/ly$/, '')
+    .replace(/er$/, '')
+    .replace(/es$/, '')
+    .replace(/s$/, '')
+}
+
 function _extractKeywords(text) {
-  return (text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !_STOP_WORDS.has(w))
-    .slice(0, 12)
+  return [...new Set(
+    (text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 3 && !_STOP_WORDS.has(w))
+      .map(w => _stem(w))
+      .filter(w => w.length > 2)
+  )].slice(0, 12)
 }
 
 async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
@@ -104,7 +150,11 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
     if (keywords.length === 0) return { suppress: false }
 
     // 1. Check recent sessions from ANY trigger source (not just 'scheduled')
-    const cooldownInterval = `${Math.ceil(DISPATCH_COOLDOWN_MS / 60000)} minutes`
+    //    Structural issues (orphans, locks, restarts) use a much longer cooldown
+    //    because they're inherent system behaviors, not actionable bugs.
+    const isStructural = _isStructuralIssue(prompt)
+    const effectiveCooldown = isStructural ? STRUCTURAL_COOLDOWN_MS : DISPATCH_COOLDOWN_MS
+    const cooldownInterval = `${Math.ceil(effectiveCooldown / 60000)} minutes`
     const recentSessions = await db`
       SELECT id, initial_prompt, status, triggered_by, started_at
       FROM cc_sessions
@@ -118,7 +168,7 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
       const sessionWords = _extractKeywords(session.initial_prompt)
       if (sessionWords.length === 0) continue
       const matchCount = keywords.filter(kw => sessionWords.includes(kw)).length
-      if (matchCount >= Math.ceil(keywords.length * 0.6)) {
+      if (matchCount >= Math.ceil(keywords.length * 0.4)) {
         return {
           suppress: true,
           reason: `Similar session ${session.id} (${session.status}) exists from ${Math.round((Date.now() - new Date(session.started_at).getTime()) / 60000)}min ago (${matchCount}/${keywords.length} keyword match)`,
@@ -644,4 +694,6 @@ module.exports = {
   dispatchIntegrationScaffold,
   dispatchSelfDiagnosis,
   dispatchProactiveImprovement,
+  _extractKeywords,  // shared with autonomousMaintenanceWorker for consistent dedup
+  _isStructuralIssue,
 }

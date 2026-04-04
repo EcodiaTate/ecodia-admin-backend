@@ -36,7 +36,7 @@ if (!env.NEO4J_URI) {
         }
       }
 
-      const count = await kg.embedStaleNodes(100)
+      const count = await kg.embedStaleNodes(250)
       if (count > 0) {
         logger.info(`KG embedding worker: embedded ${count} nodes`)
         // Check remaining backlog — use conservative estimate if count fails
@@ -45,7 +45,7 @@ if (!env.NEO4J_URI) {
           remaining = await kg.countStaleNodes?.() ?? count
         } catch {
           // If count query fails, assume worst case: full batch means large backlog
-          remaining = count >= 100 ? 1000 : count * 5
+          remaining = count >= 250 ? 1000 : count * 5
         }
         if (remaining > 500) nextDelayMs = 60 * 1000
         else if (remaining > 100) nextDelayMs = 3 * 60 * 1000
