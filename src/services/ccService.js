@@ -782,6 +782,10 @@ async function startSession(session) {
   if (SESSION_TIMEOUT_MS > 0) {
     sessionData.timeout = setTimeout(async () => {
       logger.warn(`CC session ${session.id} timed out after ${SESSION_TIMEOUT_MS / 60000} min`)
+      // Mark as stopped BEFORE killing — prevents the close handler from
+      // double-processing (overwriting error message, triggering oversight pipeline)
+      sessionData.stopped = true
+      sessionData._killReason = 'timeout'
       try {
         proc.kill('SIGTERM')
         setTimeout(() => {
@@ -876,12 +880,13 @@ async function startSession(session) {
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
 
-    // If stopSession() already handled this session, don't overwrite its status
-    // or trigger the oversight pipeline. The human deliberately cancelled it.
+    // If stopSession() or timeout handler already handled this session, don't
+    // overwrite its status or trigger the oversight pipeline.
     if (sessionData.stopped) {
-      logger.info(`CC session ${session.id} close event after stop — skipping oversight`)
+      const reason = sessionData._killReason || 'stop'
+      logger.info(`CC session ${session.id} close event after ${reason} — skipping oversight`)
       // Still ingest to organism (useful learning even from partial sessions)
-      _ingestSessionToOrganism(session, 'stopped').catch(() => {})
+      _ingestSessionToOrganism(session, reason).catch(() => {})
       return
     }
 
@@ -911,8 +916,12 @@ async function startSession(session) {
       }
       // If no meaningful error extracted yet, classify by exit code/signal
       if (!errorMessage) {
-        if (code === null && signal) {
-          errorMessage = `Process killed by ${signal} (exit code null) — likely PM2 restart, OOM, or deployment`
+        if (code === null && signal === 'SIGKILL') {
+          errorMessage = `Process killed by SIGKILL (exit code null) — OOM killer or force-kill by PM2/system`
+        } else if (code === null && signal === 'SIGTERM') {
+          errorMessage = `Process killed by SIGTERM (exit code null) — PM2 restart, deployment, or graceful shutdown`
+        } else if (code === null && signal) {
+          errorMessage = `Process killed by ${signal} (exit code null)`
         } else if (code === null) {
           errorMessage = `Process exited abnormally (exit code null, no signal) — likely parent process killed during PM2 restart or OOM`
         } else {
@@ -1282,6 +1291,7 @@ async function stopAllSessions(reason) {
     // Mark as stopped before killing — prevents close handler from
     // overwriting status to 'error' and running the oversight pipeline
     sessionData.stopped = true
+    sessionData._killReason = 'shutdown'
 
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
