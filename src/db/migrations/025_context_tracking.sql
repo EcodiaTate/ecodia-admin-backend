@@ -27,8 +27,11 @@ CREATE TABLE IF NOT EXISTS dismissed_items (
 CREATE INDEX IF NOT EXISTS idx_dismissed_items_key ON dismissed_items(item_key);
 CREATE INDEX IF NOT EXISTS idx_dismissed_items_type ON dismissed_items(item_type);
 CREATE INDEX IF NOT EXISTS idx_dismissed_items_source ON dismissed_items(source);
+-- Partial index on active (non-expired) dismissed items.
+-- Can't use now() in index predicate (not IMMUTABLE), so we index all
+-- non-permanent items and filter at query time.
 CREATE INDEX IF NOT EXISTS idx_dismissed_items_active ON dismissed_items(permanent, expires_at)
-  WHERE permanent = true OR expires_at IS NULL OR expires_at > now();
+  WHERE permanent = true OR expires_at IS NULL;
 
 -- ─── RESOLVED ISSUES ────────────────────────────────────────────────────
 -- Tracks problems that were identified and fixed. Prevents the system
