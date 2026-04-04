@@ -147,13 +147,13 @@ const envSchema = z.object({
   MAINTENANCE_FALLBACK_MIN_OCCURRENCES: z.string().default('3'),
   // Autonomous maintenance worker — decision/interval tuning (0 = unlimited where applicable)
   MAINTENANCE_MAX_DECISIONS: z.string().default('0'),             // 0 = AI returns all decisions it deems necessary
-  MAINTENANCE_PERCEPT_SALIENCE_THRESHOLD: z.string().default('0.8'),
-  MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS: z.string().default('300000'),    // 5 min
-  MAINTENANCE_INTERVAL_MED_PRESSURE_MS: z.string().default('600000'),     // 10 min
-  MAINTENANCE_INTERVAL_REST_MS: z.string().default('900000'),             // 15 min
+  MAINTENANCE_PERCEPT_SALIENCE_THRESHOLD: z.string().default('0.5'),
+  MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS: z.string().default('30000'),     // 30s urgent
+  MAINTENANCE_INTERVAL_MED_PRESSURE_MS: z.string().default('60000'),      // 1 min active
+  MAINTENANCE_INTERVAL_REST_MS: z.string().default('120000'),             // 2 min calm
   MAINTENANCE_EMPTY_CYCLE_THRESHOLD: z.string().default('3'),
   MAINTENANCE_BACKOFF_MAX_MULTIPLIER: z.string().default('3'),
-  MAINTENANCE_BACKOFF_MAX_MS: z.string().default('1800000'),              // 30 min ceiling
+  MAINTENANCE_BACKOFF_MAX_MS: z.string().default('600000'),               // 10 min ceiling
   MAINTENANCE_COOLDOWN_MS: z.string().default('0'),                       // 0 = no cooldown; AI decides if re-running an intent is worthwhile
   MAINTENANCE_ESCALATION_SLA_MS: z.string().default('7200000'),           // 2 hour stale threshold
   MAINTENANCE_ESCALATION_REMINDER_MS: z.string().default('14400000'),     // 4 hour re-remind
