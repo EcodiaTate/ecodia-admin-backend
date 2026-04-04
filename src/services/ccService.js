@@ -42,6 +42,30 @@ const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0  // 0 = 
 const _timeoutMinutes = parseInt(env.CC_TIMEOUT_MINUTES || '0', 10)
 const SESSION_TIMEOUT_MS = _timeoutMinutes > 0 ? _timeoutMinutes * 60 * 1000 : 0  // 0 = no timeout
 
+// CC CLI stdin warning pattern — emitted when CLI doesn't see stdin data within 3s.
+// This is harmless noise: the data arrives via pipe, just sometimes after the CLI's
+// internal timer fires. Match broadly to catch wording variations.
+const STDIN_WARNING_RE = /no stdin data received/i
+
+// Write data to a process stdin with backpressure handling. Large prompts (>64KB)
+// can exceed the OS pipe buffer, causing write() to return false. Without waiting
+// for drain, end() can close the pipe before all data is flushed.
+function writeStdinSafe(proc, data) {
+  return new Promise((resolve, reject) => {
+    const ok = proc.stdin.write(data)
+    if (ok) {
+      proc.stdin.end(resolve)
+    } else {
+      proc.stdin.once('drain', () => proc.stdin.end(resolve))
+    }
+    proc.stdin.once('error', reject)
+  })
+}
+
+function isStdinWarning(text) {
+  return STDIN_WARNING_RE.test(text)
+}
+
 // ─── Context Bundle Builder ─────────────────────────────────────────
 
 async function buildContextBundle(session) {
@@ -757,8 +781,11 @@ async function startSession(session) {
   })
 
   // Feed the prompt via stdin and close — CC reads stdin when no -p flag is provided.
-  proc.stdin.write(fullPrompt)
-  proc.stdin.end()
+  // Uses backpressure-aware write to prevent data loss on large context bundles
+  // that exceed the 64KB OS pipe buffer.
+  writeStdinSafe(proc, fullPrompt).catch(err =>
+    logger.debug('stdin write error (non-fatal if process already exited)', { error: err.message })
+  )
 
   const sessionData = {
     process: proc,
@@ -858,7 +885,7 @@ async function startSession(session) {
     if (STDERR_MAX_LINES > 0 && stderrLines.length > STDERR_MAX_LINES + 1) {
       stderrLines.shift()
     }
-    logger.debug(`CC session ${session.id} stderr: ${line}`)
+    if (!isStdinWarning(line)) logger.debug(`CC session ${session.id} stderr: ${line}`)
   })
   const stderrRlClosed = new Promise(resolve => stderrRl.on('close', resolve))
 
@@ -897,10 +924,10 @@ async function startSession(session) {
     }
 
     // Treat stdin-only warnings as non-errors — CC CLI emits is_error for the warning
-    // but the session actually completed fine
-    const isStdinWarningOnly = streamResult?.is_error &&
-      streamResult?.result?.includes('no stdin data received') &&
-      !streamResult?.result?.replace(/.*no stdin data received[^\n]*/, '').trim()
+    // but the session actually completed fine. Uses shared isStdinWarning() helper.
+    const resultText = streamResult?.result || ''
+    const resultLinesNonStdin = resultText.split('\n').filter(l => l.trim() && !isStdinWarning(l))
+    const isStdinWarningOnly = streamResult?.is_error && isStdinWarning(resultText) && resultLinesNonStdin.length === 0
     const success = code === 0 && (!streamResult?.is_error || isStdinWarningOnly)
     const status = success ? 'complete' : 'error'
 
@@ -908,13 +935,15 @@ async function startSession(session) {
     // fall back to stderr, then exit code/signal
     let errorMessage = null
     if (!success) {
-      if (streamResult?.is_error && streamResult?.result &&
-          !streamResult.result.includes('no stdin data received')) {
+      if (streamResult?.is_error && streamResult?.result && !isStdinWarning(streamResult.result)) {
         errorMessage = streamResult.result
+      } else if (streamResult?.is_error && resultLinesNonStdin.length > 0) {
+        // Result has stdin warning mixed with real error — extract real error only
+        errorMessage = resultLinesNonStdin.join('\n')
       } else if (stderrLines.length > 0) {
         // Filter CC CLI noise (stdin warnings, debug lines) before using stderr as error
         const meaningfulStderr = stderrLines.filter(l =>
-          l.trim() && !l.includes('no stdin data received')
+          l.trim() && !isStdinWarning(l)
         )
         if (meaningfulStderr.length > 0) {
           errorMessage = meaningfulStderr.slice(-5).join('\n')
@@ -1151,8 +1180,9 @@ async function resumeSession(sessionId, message) {
     stdio: ['pipe', 'pipe', 'pipe'],
   })
 
-  proc.stdin.write(message)
-  proc.stdin.end()
+  writeStdinSafe(proc, message).catch(err =>
+    logger.debug('stdin write error on resume (non-fatal if process already exited)', { error: err.message })
+  )
 
   const sessionData = {
     process: proc,
@@ -1223,7 +1253,7 @@ async function resumeSession(sessionId, message) {
   stderrRl.on('line', (line) => {
     if (STDERR_MAX_LINES <= 0) { stderrLines.push(line) }
     else if (stderrLines.length < STDERR_MAX_LINES) { stderrLines.push(line) }
-    logger.debug(`CC resumed session ${sessionId} stderr: ${line}`)
+    if (!isStdinWarning(line)) logger.debug(`CC resumed session ${sessionId} stderr: ${line}`)
   })
   const stderrRlClosed = new Promise(resolve => stderrRl.on('close', resolve))
 
@@ -1250,19 +1280,20 @@ async function resumeSession(sessionId, message) {
     }
 
     // Treat stdin-only warnings as non-errors (same logic as startSession)
-    const isStdinWarningOnly = streamResult?.is_error &&
-      streamResult?.result?.includes('no stdin data received') &&
-      !streamResult?.result?.replace(/.*no stdin data received[^\n]*/, '').trim()
+    const resultText = streamResult?.result || ''
+    const resultLinesNonStdin = resultText.split('\n').filter(l => l.trim() && !isStdinWarning(l))
+    const isStdinWarningOnly = streamResult?.is_error && isStdinWarning(resultText) && resultLinesNonStdin.length === 0
     const success = code === 0 && (!streamResult?.is_error || isStdinWarningOnly)
     const status = success ? 'complete' : 'error'
     let errorMessage = null
     if (!success) {
-      if (streamResult?.is_error && streamResult?.result &&
-          !streamResult.result.includes('no stdin data received')) {
+      if (streamResult?.is_error && streamResult?.result && !isStdinWarning(streamResult.result)) {
         errorMessage = streamResult.result
+      } else if (streamResult?.is_error && resultLinesNonStdin.length > 0) {
+        errorMessage = resultLinesNonStdin.join('\n')
       } else if (stderrLines.length > 0) {
         const meaningfulStderr = stderrLines.filter(l =>
-          l.trim() && !l.includes('no stdin data received')
+          l.trim() && !isStdinWarning(l)
         )
         if (meaningfulStderr.length > 0) {
           errorMessage = meaningfulStderr.slice(-5).join('\n')
