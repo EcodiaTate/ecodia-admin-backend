@@ -420,6 +420,8 @@ async function getSystemState() {
     recentErrors: [],           // app_errors from last 6h (grouped)
     workerHeartbeats: [],       // Worker liveness from heartbeat table
     staleEscalations: [],       // Factory escalations awaiting review too long
+    // ─── Organism Cognitive State (deep self-knowledge) ─────────
+    organismCognitive: null,    // Thread narrative, Nova goals, Equor drives, Evo learning, affect, benchmarks
   }
 
   // ─── Local time for the human ──────────────────────────────────
@@ -573,6 +575,83 @@ async function getSystemState() {
     logger.debug('Cortex metabolic state failed', { error: err.message })
   }
 
+  // ─── Organism Cognitive State (Thread, Nova, Equor, Evo, Affect) ──
+  // Fetch rich self-knowledge from the organism's API endpoints.
+  // Each call is independent — graceful degradation if organism is down.
+  if (env.ORGANISM_API_URL) {
+    const axios = require('axios')
+    const orgUrl = env.ORGANISM_API_URL
+    const orgTimeout = { timeout: 5000 }
+
+    const cogState = {}
+
+    // All fetches in parallel — don't let one slow endpoint block others
+    const fetches = await Promise.allSettled([
+      // Thread: narrative identity — the organism's autobiography and life story
+      axios.get(`${orgUrl}/api/v1/memory/self`, orgTimeout).then(r => { cogState.self = r.data }),
+      axios.get(`${orgUrl}/api/v1/memory/episodes`, { ...orgTimeout, params: { limit: 5 } }).then(r => { cogState.recentEpisodes = r.data }),
+
+      // Nova: active goals and deliberation state
+      axios.get(`${orgUrl}/api/v1/nova/goals`, orgTimeout).then(r => { cogState.goals = r.data }),
+      axios.get(`${orgUrl}/api/v1/nova/beliefs`, orgTimeout).then(r => { cogState.beliefs = r.data }),
+
+      // Equor: constitutional drives, drift, autonomy level
+      axios.get(`${orgUrl}/api/v1/equor/health`, orgTimeout).then(r => { cogState.constitution = r.data }),
+
+      // Thymos: immune health, active incidents, drive state
+      axios.get(`${orgUrl}/api/v1/thymos/drive-state`, orgTimeout).then(r => { cogState.driveState = r.data }),
+      axios.get(`${orgUrl}/api/v1/thymos/incidents`, { ...orgTimeout, params: { limit: 3 } }).then(r => { cogState.incidents = r.data }),
+
+      // Voxis: personality, conversation dynamics
+      axios.get(`${orgUrl}/api/v1/voxis/metrics`, orgTimeout).then(r => { cogState.expression = r.data }),
+
+      // Benchmarks: KPIs and learning velocity
+      axios.get(`${orgUrl}/api/v1/benchmarks/latest`, orgTimeout).then(r => { cogState.benchmarks = r.data }),
+
+      // Kairos: causal intelligence, discoveries
+      axios.get(`${orgUrl}/api/v1/kairos/health`, orgTimeout).then(r => { cogState.causalIntel = r.data }),
+
+      // Oikos: economic metabolism, yield, runway
+      axios.get(`${orgUrl}/api/v1/oikos/status`, orgTimeout).then(r => { cogState.economics = r.data }),
+      axios.get(`${orgUrl}/api/v1/oikos/yield-status`, orgTimeout).then(r => { cogState.yield = r.data }),
+
+      // Simula: evolution state, active proposals
+      axios.get(`${orgUrl}/api/v1/simula/status`, orgTimeout).then(r => { cogState.evolution = r.data }),
+
+      // Telos: effective intelligence, drive topology
+      axios.get(`${orgUrl}/api/v1/telos/report`, orgTimeout).then(r => { cogState.effectiveI = r.data }),
+
+      // EIS: threat landscape
+      axios.get(`${orgUrl}/api/v1/eis/stats`, orgTimeout).then(r => { cogState.threats = r.data }),
+
+      // Memory: beliefs
+      axios.get(`${orgUrl}/api/v1/memory/beliefs`, { ...orgTimeout, params: { limit: 10 } }).then(r => { cogState.persistedBeliefs = r.data }),
+
+      // Oneiros: recent sleep/consolidation cycles
+      axios.get(`${orgUrl}/api/v1/memory/consolidation`, orgTimeout).then(r => { cogState.consolidation = r.data }),
+
+      // Thread: narrative identity — autobiography, active chapter, identity schemas
+      axios.get(`${orgUrl}/api/v1/thread/story`, orgTimeout).then(r => { cogState.narrative = r.data }),
+
+      // Thread: commitments — what the organism has committed to and fidelity tracking
+      axios.get(`${orgUrl}/api/v1/thread/commitments`, orgTimeout).then(r => { cogState.commitments = r.data }),
+    ])
+
+    // Log failures but don't block — partial state is still valuable
+    const failures = fetches.filter(f => f.status === 'rejected')
+    if (failures.length > 0) {
+      logger.debug('Cortex: some organism cognitive fetches failed', {
+        failed: failures.length,
+        total: fetches.length,
+        errors: failures.slice(0, 3).map(f => f.reason?.message || 'unknown'),
+      })
+    }
+
+    if (Object.keys(cogState).length > 0) {
+      state.organismCognitive = cogState
+    }
+  }
+
   // ─── Last Visit + Time Since ─────────────────────────────────────
   try {
     const [lastSession] = await db`
@@ -724,7 +803,7 @@ function formatSystemState(state) {
   // ─── Organism State ────────────────────────────────────────────
   if (state.metabolicState) {
     const m = state.metabolicState
-    lines.push(`Organism: metabolic pressure ${(m.pressure * 100).toFixed(0)}%, tier: ${m.tier}`)
+    lines.push(`Organism metabolic state: pressure ${(m.pressure * 100).toFixed(0)}%, tier: ${m.tier}${m.lastChangeAt ? `, last tier change: ${m.lastChangeAt}` : ''}`)
   }
 
   lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
@@ -865,6 +944,229 @@ function formatSystemState(state) {
     }
 
     lines.push(`  Organism: ${org.healthy === true ? 'healthy' : org.healthy === false ? 'UNREACHABLE' : 'unknown'}${org.lastResponseMs ? ` (${org.lastResponseMs}ms)` : ''}${org.consecutiveFailures > 0 ? ` — ${org.consecutiveFailures} consecutive failures` : ''}`)
+  }
+
+  // ─── Organism Cognitive State ────────────────────────────────────
+  if (state.organismCognitive) {
+    const cog = state.organismCognitive
+
+    // Narrative identity — the organism's own story of itself
+    if (cog.narrative) {
+      const n = cog.narrative
+      lines.push(`\nNARRATIVE IDENTITY (Thread):`)
+      if (n.story) lines.push(`  Story: ${n.story}`)
+      if (n.identity_context) lines.push(`  ${n.identity_context}`)
+      if (n.chapter) {
+        const ch = n.chapter
+        lines.push(`  Active chapter: "${ch.title}"${ch.theme ? ` — ${ch.theme}` : ''}${ch.arc_type ? ` (${ch.arc_type})` : ''}`)
+        if (ch.summary) lines.push(`  Chapter summary: ${ch.summary.slice(0, 500)}`)
+      }
+      if (n.life_story?.synthesis) {
+        lines.push(`  Life story: ${n.life_story.synthesis.slice(0, 1000)}`)
+      }
+      if (n.schemas?.length > 0) {
+        lines.push(`  Identity schemas (${n.total_schemas} total):`)
+        for (const s of n.schemas.slice(0, 5)) {
+          lines.push(`    - "${s.statement}" [${s.status}, ${s.confirmations} confirmations]`)
+        }
+      }
+    }
+
+    // Commitments — what the organism has promised
+    if (cog.commitments) {
+      const comms = cog.commitments.commitments || []
+      const violations = cog.commitments.violations || []
+      if (comms.length > 0) {
+        lines.push(`\nACTIVE COMMITMENTS (${comms.length}):`)
+        for (const c of comms.slice(0, 5)) {
+          lines.push(`  - ${c.description || c.content || JSON.stringify(c).slice(0, 200)}`)
+        }
+      }
+      if (violations.length > 0) {
+        lines.push(`  COMMITMENT VIOLATIONS (${violations.length}):`)
+        for (const v of violations.slice(0, 3)) {
+          lines.push(`  - ${v.description || v.content || JSON.stringify(v).slice(0, 200)}`)
+        }
+      }
+    }
+
+    // Self-identity snapshot
+    if (cog.self) {
+      const s = cog.self
+      lines.push(`\nORGANISM SELF:`)
+      if (s.instance_id) lines.push(`  Instance: ${s.instance_id}`)
+      if (s.autonomy_level != null) lines.push(`  Autonomy level: ${s.autonomy_level}`)
+      if (s.cycle_count != null) lines.push(`  Theta cycles lived: ${s.cycle_count}`)
+      if (s.birth_time) lines.push(`  Born: ${s.birth_time}`)
+    }
+
+    // Constitutional drives and affect
+    if (cog.constitution) {
+      const c = cog.constitution
+      lines.push(`\nCONSTITUTIONAL STATE:`)
+      if (c.drives) {
+        const driveStr = Object.entries(c.drives)
+          .map(([k, v]) => `${k}: ${typeof v === 'object' ? (v.score ?? v).toFixed ? (v.score ?? v).toFixed(2) : JSON.stringify(v) : v}`)
+          .join(', ')
+        lines.push(`  Drives: ${driveStr}`)
+      }
+      if (c.autonomy_level != null) lines.push(`  Autonomy: level ${c.autonomy_level}`)
+      if (c.safe_mode) lines.push(`  ⚠ SAFE MODE ACTIVE`)
+      if (c.drift) lines.push(`  Drift: ${JSON.stringify(c.drift)}`)
+    }
+
+    if (cog.driveState) {
+      const ds = cog.driveState
+      lines.push(`\nDRIVE PRESSURE:`)
+      const pressureStr = Object.entries(ds)
+        .filter(([k]) => !k.startsWith('_'))
+        .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toFixed(2) : v}`)
+        .join(', ')
+      if (pressureStr) lines.push(`  ${pressureStr}`)
+    }
+
+    // Active goals
+    if (cog.goals) {
+      const goals = Array.isArray(cog.goals) ? cog.goals : (cog.goals.goals || cog.goals.active || [])
+      if (goals.length > 0) {
+        lines.push(`\nACTIVE GOALS (${goals.length}):`)
+        for (const g of goals.slice(0, 8)) {
+          const desc = g.description || g.goal || g.name || 'unnamed'
+          const status = g.status ? ` [${g.status}]` : ''
+          const priority = g.priority != null ? ` (priority: ${g.priority})` : ''
+          lines.push(`  - ${desc}${status}${priority}`)
+        }
+        if (goals.length > 8) lines.push(`  ... and ${goals.length - 8} more`)
+      }
+    }
+
+    // Beliefs
+    if (cog.beliefs) {
+      const b = cog.beliefs
+      lines.push(`\nBELIEF STATE:`)
+      if (b.free_energy != null) lines.push(`  Free energy: ${typeof b.free_energy === 'number' ? b.free_energy.toFixed(3) : b.free_energy}`)
+      if (b.confidence != null) lines.push(`  Overall confidence: ${typeof b.confidence === 'number' ? b.confidence.toFixed(2) : b.confidence}`)
+    }
+
+    // Persisted beliefs
+    if (cog.persistedBeliefs) {
+      const beliefs = Array.isArray(cog.persistedBeliefs) ? cog.persistedBeliefs : (cog.persistedBeliefs.beliefs || [])
+      if (beliefs.length > 0) {
+        lines.push(`\nPERSISTED BELIEFS:`)
+        for (const b of beliefs.slice(0, 5)) {
+          const domain = b.domain ? ` [${b.domain}]` : ''
+          const precision = b.precision != null ? ` (precision: ${b.precision.toFixed ? b.precision.toFixed(2) : b.precision})` : ''
+          lines.push(`  - ${b.content || b.statement || b.name || JSON.stringify(b).slice(0, 200)}${domain}${precision}`)
+        }
+      }
+    }
+
+    // Recent episodes — what the organism has been experiencing
+    if (cog.recentEpisodes) {
+      const eps = Array.isArray(cog.recentEpisodes) ? cog.recentEpisodes : (cog.recentEpisodes.episodes || [])
+      if (eps.length > 0) {
+        lines.push(`\nRECENT EPISODES (organism experience):`)
+        for (const e of eps.slice(0, 5)) {
+          const summary = e.summary || e.description || e.content || ''
+          const salience = e.salience != null ? ` (salience: ${e.salience.toFixed ? e.salience.toFixed(2) : e.salience})` : ''
+          lines.push(`  - ${summary.slice(0, 300)}${salience}`)
+        }
+      }
+    }
+
+    // Effective intelligence
+    if (cog.effectiveI) {
+      const ei = cog.effectiveI
+      lines.push(`\nEFFECTIVE INTELLIGENCE:`)
+      if (ei.effective_i != null) lines.push(`  I measure: ${typeof ei.effective_i === 'number' ? ei.effective_i.toFixed(3) : ei.effective_i}`)
+      if (ei.drive_alignments) {
+        const alStr = Object.entries(ei.drive_alignments)
+          .map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toFixed(2) : v}`)
+          .join(', ')
+        lines.push(`  Drive alignment: ${alStr}`)
+      }
+    }
+
+    // Benchmarks — learning velocity
+    if (cog.benchmarks) {
+      const bm = cog.benchmarks
+      lines.push(`\nBENCHMARKS (learning velocity):`)
+      const metrics = bm.metrics || bm.snapshot || bm
+      for (const [k, v] of Object.entries(metrics)) {
+        if (typeof v === 'number') {
+          lines.push(`  ${k}: ${v.toFixed(3)}`)
+        } else if (v != null && typeof v !== 'object') {
+          lines.push(`  ${k}: ${v}`)
+        }
+      }
+    }
+
+    // Economic state
+    if (cog.economics) {
+      const ec = cog.economics
+      lines.push(`\nECONOMIC STATE:`)
+      if (ec.net_worth != null) lines.push(`  Net worth: $${ec.net_worth}`)
+      if (ec.runway_days != null) lines.push(`  Runway: ${ec.runway_days} days`)
+      if (ec.bmr != null) lines.push(`  Base metabolic rate: $${ec.bmr}/day`)
+    }
+    if (cog.yield) {
+      const y = cog.yield
+      if (y.self_sustaining != null) lines.push(`  Self-sustaining: ${y.self_sustaining ? 'YES' : 'NO'}`)
+      if (y.daily_yield != null && y.daily_cost != null) {
+        lines.push(`  Daily yield: $${y.daily_yield}, cost: $${y.daily_cost}, surplus: $${(y.daily_yield - y.daily_cost).toFixed(2)}`)
+      }
+    }
+
+    // Causal intelligence
+    if (cog.causalIntel) {
+      const ci = cog.causalIntel
+      lines.push(`\nCAUSAL INTELLIGENCE (Kairos):`)
+      if (ci.invariants_created != null) lines.push(`  Invariants discovered: ${ci.invariants_created}`)
+      if (ci.tier3_discoveries != null) lines.push(`  Substrate-independent invariants: ${ci.tier3_discoveries}`)
+    }
+
+    // Evolution state
+    if (cog.evolution) {
+      const ev = cog.evolution
+      lines.push(`\nEVOLUTION STATE (Simula):`)
+      if (ev.proposals_received != null) lines.push(`  Proposals: ${ev.proposals_received} received, ${ev.proposals_approved || 0} approved, ${ev.proposals_rejected || 0} rejected`)
+      if (ev.active_proposals != null) lines.push(`  Active proposals: ${ev.active_proposals}`)
+    }
+
+    // Threat landscape
+    if (cog.threats) {
+      const t = cog.threats
+      lines.push(`\nTHREAT LANDSCAPE (EIS):`)
+      if (t.screened != null) lines.push(`  Screened: ${t.screened}, passed: ${t.passed || 0}, quarantined: ${t.quarantined || 0}, blocked: ${t.blocked || 0}`)
+      if (t.pass_rate != null) lines.push(`  Pass rate: ${(t.pass_rate * 100).toFixed(1)}%`)
+    }
+
+    // Active incidents
+    if (cog.incidents) {
+      const incs = Array.isArray(cog.incidents) ? cog.incidents : (cog.incidents.incidents || [])
+      if (incs.length > 0) {
+        lines.push(`\nACTIVE INCIDENTS (Thymos):`)
+        for (const inc of incs.slice(0, 3)) {
+          lines.push(`  - [${inc.severity || 'unknown'}] ${inc.description || inc.fingerprint || 'unnamed'} — ${inc.status || 'active'}`)
+        }
+      }
+    }
+
+    // Expression metrics
+    if (cog.expression) {
+      const ex = cog.expression
+      if (ex.total_expressions != null) {
+        lines.push(`\nEXPRESSION (Voxis): ${ex.total_expressions} total, silence rate: ${ex.silence_rate != null ? (ex.silence_rate * 100).toFixed(0) + '%' : '?'}`)
+      }
+    }
+
+    // Sleep/consolidation
+    if (cog.consolidation) {
+      const con = cog.consolidation
+      lines.push(`\nLAST CONSOLIDATION:`)
+      if (con.episodes_compressed != null) lines.push(`  Episodes compressed: ${con.episodes_compressed}`)
+      if (con.level_transitions != null) lines.push(`  Level transitions: ${con.level_transitions}`)
+    }
   }
 
   // ─── Application Errors ────────────────────────────────────────
