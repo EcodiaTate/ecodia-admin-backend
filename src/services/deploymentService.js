@@ -143,6 +143,40 @@ async function deploySession(sessionId) {
     }
 
     if (deployTarget === 'pm2' && pm2Name) {
+      // Check if the changes actually require a PM2 restart.
+      // Config files, docs, specs, and migration-only changes don't need a restart —
+      // restarting PM2 on every deploy kills the maintenance worker's 15s startup
+      // cooldown and prevents it from ever running a cycle.
+      const NO_RESTART_PATTERNS = [
+        /^\.claude\//,
+        /^CLAUDE\.md$/,
+        /^README/i,
+        /^docs?\//,
+        /^\.github\//,
+        /\.md$/,
+      ]
+      const changedFiles = session.files_changed || []
+      const needsRestart = changedFiles.length === 0 || changedFiles.some(f => !NO_RESTART_PATTERNS.some(p => p.test(f)))
+
+      if (!needsRestart) {
+        logger.info(`Deploy: skipping PM2 restart — only non-server files changed: ${changedFiles.join(', ')}`)
+        await db`UPDATE deployments SET deploy_status = 'deployed', duration_ms = ${Date.now() - startTime} WHERE id = ${deploymentId}`
+        await db`UPDATE cc_sessions SET deploy_status = 'deployed', pipeline_stage = 'complete' WHERE id = ${sessionId}`
+        broadcastToSession(sessionId, 'cc:status', { status: 'deployed', commitSha })
+
+        kgHooks.onDeploymentCompleted({
+          deployment: { id: deploymentId, commit_sha: commitSha, deploy_status: 'deployed', deploy_target: deployTarget },
+          codebaseName: session.codebase_name, sessionId,
+        }).catch(() => {})
+
+        await db`INSERT INTO notifications (type, message, link, metadata)
+          VALUES ('deployment', ${'Deployed (no restart): ' + (session.initial_prompt || '').slice(0, 100)},
+                  ${null}, ${JSON.stringify({ sessionId, commitSha, codebaseName: session.codebase_name, skippedRestart: true })})`
+
+        logger.info(`Deployment successful (no restart): ${session.codebase_name} @ ${commitSha}`, { sessionId, deploymentId })
+        return { status: 'deployed', commitSha, deploymentId }
+      }
+
       // Self-mod: stop active CC sessions BEFORE restarting, so they don't become
       // orphans. The graceful shutdown handler would try, but the 10s race against
       // PM2's 12s kill_timeout often loses — especially with long-running CC sessions.

@@ -77,7 +77,7 @@ async function _onOrganismPercept(percept) {
 // worker would see "orphaned session" errors caused by the restart itself,
 // dispatch new sessions to investigate them, those sessions deploy, which
 // triggers another restart, ad infinitum.
-const STARTUP_COOLDOWN_MS = parseInt(env.MAINTENANCE_STARTUP_COOLDOWN_MS || '120000') // 2 min default
+const STARTUP_COOLDOWN_MS = parseInt(env.MAINTENANCE_STARTUP_COOLDOWN_MS || '15000') // 15s default — was 120s but Factory deploys restart PM2 frequently, so the 120s window never completes
 
 function start() {
   if (running) return
