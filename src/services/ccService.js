@@ -995,7 +995,7 @@ async function startSession(session) {
           await db`UPDATE cc_sessions SET files_changed = ${allChanged} WHERE id = ${session.id}`
         }
       } catch (err) {
-        logger.debug('Failed to detect changed files for CC session', { sessionId: session.id, error: err.message })
+        logger.warn('Failed to detect changed files for CC session — oversight pipeline may skip deployment', { sessionId: session.id, error: err.message })
       }
     }
 

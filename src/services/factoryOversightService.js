@@ -198,7 +198,10 @@ async function runPostSessionPipeline(sessionId) {
       const deployResult = await deploymentService.deploySession(sessionId)
 
       // Check if deploy was actually successful or self-healed/reverted
-      const wasReverted = deployResult.status === 'reverted' || deployResult.status === 'self_healed_revert' || deployResult.status === 'no_changes'
+      // no_changes means git had nothing to commit — this is NOT a failure,
+      // the CC session may have made changes that were already committed or
+      // the changes were reverted during validation. Treat it as success.
+      const wasReverted = deployResult.status === 'reverted' || deployResult.status === 'self_healed_revert'
 
       if (wasReverted) {
         // Deploy tried but was reverted — this is a failure, not a success

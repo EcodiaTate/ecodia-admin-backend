@@ -526,10 +526,8 @@ async function getGraphStats() {
 
 async function ensureVectorIndex() {
   try {
-    // Drop the old label-scoped index if it exists (was __Embedded__ but nodes never got that label)
-    await runWrite(`DROP INDEX node_embeddings IF EXISTS`).catch(() => {})
-
-    // Create index scoped to __Embedded__ label — embedStaleNodes now adds this label
+    // DO NOT drop and recreate — that was destroying the index on every PM2 restart,
+    // leaving the system amnesiac while it rebuilt. Just create if not exists.
     await runWrite(`
       CREATE VECTOR INDEX node_embeddings IF NOT EXISTS
       FOR (n:__Embedded__)
@@ -539,9 +537,24 @@ async function ensureVectorIndex() {
         \`vector.similarity_function\`: 'cosine'
       }}
     `)
-    logger.info('Neo4j vector index ensured')
+
+    // Backfill: ensure all nodes that HAVE embeddings also have the __Embedded__ label.
+    // Older nodes were embedded before we started adding this label, so they have
+    // embedding data but the index can't see them. Fix this on every boot.
+    const backfilled = await runWrite(`
+      MATCH (n)
+      WHERE n.embedding IS NOT NULL AND NOT n:__Embedded__
+      SET n:\`__Embedded__\`
+      RETURN count(n) AS cnt
+    `)
+    const cnt = backfilled[0]?.get('cnt')?.toInt?.() ?? backfilled[0]?.get('cnt') ?? 0
+    if (cnt > 0) {
+      logger.info(`Neo4j vector index: backfilled __Embedded__ label on ${cnt} nodes`)
+    }
+
+    logger.info('Neo4j vector index ensured (no drop/recreate)')
   } catch (err) {
-    // Index might already exist or Aura version might not support this syntax
+    // Index might already exist or Neo4j version might not support this syntax
     logger.debug('Vector index creation skipped', { error: err.message })
   }
 }

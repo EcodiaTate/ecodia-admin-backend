@@ -45,13 +45,15 @@ async function checkBudget() {
     if (!_budgetCache) return  // DB failed, don't block
   }
 
+  if (!_budgetCache) return  // DB check failed, don't block
+
   const spentAUD = _budgetCache.spentUSD * USD_TO_AUD
   if (spentAUD >= MONTHLY_BUDGET_AUD) {
     logger.warn(`DeepSeek budget exhausted — ${spentAUD.toFixed(2)} AUD spent of ${MONTHLY_BUDGET_AUD} AUD monthly limit`)
     throw new Error(`DeepSeek monthly budget exhausted (${spentAUD.toFixed(2)} / ${MONTHLY_BUDGET_AUD} AUD). Set DEEPSEEK_MONTHLY_BUDGET_AUD=0 to disable or increase the limit.`)
   }
 
-  const warningFraction = parseFloat(env.DEEPSEEK_BUDGET_WARNING_FRACTION || '0.8')
+  const warningFraction = parseFloat(env.DEEPSEEK_BUDGET_WARNING_FRACTION || '0.8') || 0.8
   if (warningFraction > 0 && spentAUD >= MONTHLY_BUDGET_AUD * warningFraction) {
     logger.warn(`DeepSeek budget warning — ${spentAUD.toFixed(2)} AUD of ${MONTHLY_BUDGET_AUD} AUD used (${Math.round(spentAUD / MONTHLY_BUDGET_AUD * 100)}%)`)
   }
