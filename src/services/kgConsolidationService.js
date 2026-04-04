@@ -1560,14 +1560,28 @@ Respond as JSON:
 // ─── Phase 10: Decay ────────────────────────────────────────────────────
 
 async function decayStaleNodes({ dryRun = false } = {}) {
-  const results = { flagged: 0, pruned: 0 }
+  const results = { flagged: 0, pruned: 0, recovered: 0 }
 
   const staleAfterDays = parseInt(env.KG_DECAY_STALE_AFTER_DAYS || '14', 10)
   const pruneAfterDays = parseInt(env.KG_DECAY_PRUNE_AFTER_DAYS || '30', 10)
   const maxRels = parseInt(env.KG_DECAY_MAX_RELATIONSHIPS || '2', 10)
+  const batchSize = parseInt(env.KG_DECAY_BATCH_SIZE || '500', 10)
+
+  // Un-stale nodes that have gained enough relationships since being flagged (run first — rescue before prune)
+  if (!dryRun) {
+    const recovered = await runWrite(`
+      MATCH (n)
+      WHERE n.stale_since IS NOT NULL
+      OPTIONAL MATCH (n)-[r]-()
+      WITH n, count(r) AS relCount
+      WHERE relCount > ${maxRels}
+      SET n.stale_since = null
+      RETURN count(n) AS cnt
+    `)
+    results.recovered = recovered[0]?.get('cnt')?.toInt?.() ?? recovered[0]?.get('cnt') ?? 0
+  }
 
   // Flag isolated nodes (few relationships, no recent updates, not protected)
-  // Widened from <=1 to configurable maxRels to catch small isolated clusters
   const flagged = await (dryRun ? runQuery : runWrite)(`
     MATCH (n)
     WHERE n.is_synthesized IS NULL
@@ -1583,36 +1597,35 @@ async function decayStaleNodes({ dryRun = false } = {}) {
 
   results.flagged = flagged[0]?.get('cnt')?.toInt?.() ?? flagged[0]?.get('cnt') ?? 0
 
-  // Prune nodes that have been stale for pruneAfterDays+
-  const pruned = await (dryRun ? runQuery : runWrite)(`
-    MATCH (n)
-    WHERE n.stale_since IS NOT NULL
-      AND n.stale_since < datetime() - duration('P${pruneAfterDays}D')
-      AND n.is_synthesized IS NULL
-      AND n.decay_protected IS NULL
-      AND none(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation', 'Project', 'Pattern'])
-    OPTIONAL MATCH (n)-[r]-()
-    WITH n, count(r) AS relCount
-    WHERE relCount <= ${maxRels}
-    ${dryRun ? 'RETURN count(n) AS cnt' : 'DETACH DELETE n RETURN count(n) AS cnt'}
-  `)
-
-  results.pruned = pruned[0]?.get('cnt')?.toInt?.() ?? pruned[0]?.get('cnt') ?? 0
-
-  // Un-stale nodes that have gained enough relationships since being flagged
-  if (!dryRun) {
-    await runWrite(`
+  // Prune nodes that have been stale for pruneAfterDays+ — batched to avoid Neo4j query timeouts
+  let totalPruned = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const pruned = await (dryRun ? runQuery : runWrite)(`
       MATCH (n)
       WHERE n.stale_since IS NOT NULL
+        AND n.stale_since < datetime() - duration('P${pruneAfterDays}D')
+        AND n.is_synthesized IS NULL
+        AND n.decay_protected IS NULL
+        AND none(lbl IN labels(n) WHERE lbl IN ['Person', 'Organisation', 'Project', 'Pattern'])
       OPTIONAL MATCH (n)-[r]-()
       WITH n, count(r) AS relCount
-      WHERE relCount > ${maxRels}
-      SET n.stale_since = null
+      WHERE relCount <= ${maxRels}
+      WITH n LIMIT ${batchSize}
+      ${dryRun ? 'RETURN count(n) AS cnt' : 'DETACH DELETE n RETURN count(n) AS cnt'}
     `)
-  }
 
-  if (results.flagged > 0 || results.pruned > 0) {
-    logger.info(`KG decay: flagged ${results.flagged} stale, pruned ${results.pruned} (threshold: <=${maxRels} rels, stale ${staleAfterDays}d, prune ${pruneAfterDays}d)`)
+    const batchPruned = pruned[0]?.get('cnt')?.toInt?.() ?? pruned[0]?.get('cnt') ?? 0
+    totalPruned += batchPruned
+
+    if (batchPruned < batchSize) break  // last batch — all qualifying nodes processed
+
+    logger.debug(`KG decay: pruned batch of ${batchPruned} (total so far: ${totalPruned})`)
+  }
+  results.pruned = totalPruned
+
+  if (results.flagged > 0 || results.pruned > 0 || results.recovered > 0) {
+    logger.info(`KG decay: flagged ${results.flagged}, pruned ${results.pruned}, recovered ${results.recovered} (threshold: <=${maxRels} rels, stale ${staleAfterDays}d, prune ${pruneAfterDays}d)`)
   }
 
   return results

@@ -124,6 +124,7 @@ const envSchema = z.object({
   KG_DECAY_STALE_AFTER_DAYS: z.string().default('14'),       // days before isolated node is flagged stale
   KG_DECAY_PRUNE_AFTER_DAYS: z.string().default('30'),       // days stale before node is pruned
   KG_DECAY_MAX_RELATIONSHIPS: z.string().default('2'),       // nodes with <= this many rels are decay candidates
+  KG_DECAY_BATCH_SIZE: z.string().default('500'),             // max nodes to prune per batch (avoids Neo4j timeouts)
   // Memory bridge query thresholds
   MEMORY_BRIDGE_BULK_IMPORTANCE_MIN: z.string().default('0.5'),
   MEMORY_BRIDGE_PULL_IMPORTANCE_MIN: z.string().default('0.7'),
