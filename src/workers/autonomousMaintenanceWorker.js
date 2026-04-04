@@ -841,7 +841,47 @@ function fallbackHeuristics(state) {
     }
   }
 
+  // Ambient polling — if the mind can't decide, poll stale integrations anyway.
+  // Gmail is critical for awareness. 15min staleness = time to poll.
+  const gmailStaleMin = state.integrationStaleness?.gmail
+  if (gmailStaleMin === null || gmailStaleMin > 15) {
+    decisions.push({ intent: 'poll_gmail', type: 'poll', urgency: 'normal', reason: 'Gmail stale or never polled — ambient fallback' })
+  }
+
   return decisions
 }
+
+// ─── Persist Last-Poll Times ─────────────────────────────────────────
+// Restore last-poll times from DB on startup so we don't treat everything
+// as "never polled" after every PM2 restart (which was causing gmail to
+// appear stale but never actually get polled by the mind).
+
+async function _restoreLastPolled() {
+  try {
+    const rows = await db`
+      SELECT worker_name, last_run_at FROM worker_heartbeats
+      WHERE worker_name LIKE 'poll_%'
+    `
+    for (const row of rows) {
+      const key = row.worker_name.replace('poll_', '')
+      if (row.last_run_at) _lastPolled[key] = new Date(row.last_run_at).getTime()
+    }
+    if (rows.length > 0) logger.debug('Restored last-poll times from DB', { polls: Object.keys(_lastPolled).filter(k => _lastPolled[k]) })
+  } catch {
+    // worker_heartbeats might not exist yet — non-blocking
+  }
+}
+
+// Wrap poll execution to persist timestamps to DB (survives restarts)
+const _origPollGmail = pollRegistry.get('poll_gmail')
+if (_origPollGmail) {
+  pollRegistry.set('poll_gmail', async () => {
+    await _origPollGmail()
+    recordHeartbeat('poll_gmail', 'active').catch(() => {})
+  })
+}
+
+// Restore on load
+_restoreLastPolled().catch(() => {})
 
 module.exports = { start, stop, runCycle, registerPoll }

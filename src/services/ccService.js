@@ -736,13 +736,14 @@ async function startSession(session) {
   if (!cwd) cwd = process.cwd()
 
   // Spawn Claude CLI — full autonomy, no tool restrictions
+  // Prompt is piped via stdin (not -p flag) to avoid E2BIG when the assembled
+  // context bundle exceeds Linux ARG_MAX (~2MB). stdin has no size limit.
   const args = [
     '--print',
     '--verbose',
     '--output-format', 'stream-json',
     ...(MAX_TURNS > 0 ? ['--max-turns', String(MAX_TURNS)] : []),
     '--dangerously-skip-permissions',
-    '-p', fullPrompt,
   ]
 
   // Strip ANTHROPIC_API_KEY so CC uses console auth (not API key)
@@ -752,12 +753,11 @@ async function startSession(session) {
   const proc = spawn(CC_CLI, args, {
     cwd,
     env: ccEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],  // stdin piped — allows sendMessage() for interactive sessions
+    stdio: ['pipe', 'pipe', 'pipe'],
   })
 
-  // Close stdin immediately — --print mode gets the prompt via -p flag, not stdin.
-  // CC CLI waits 3s for stdin data and emits a warning when none arrives.
-  // sendMessage() already falls back to resumeSession() when stdin is closed.
+  // Feed the prompt via stdin and close — CC reads stdin when no -p flag is provided.
+  proc.stdin.write(fullPrompt)
   proc.stdin.end()
 
   const sessionData = {
@@ -1102,6 +1102,7 @@ async function resumeSession(sessionId, message) {
   if (!cwd) cwd = process.cwd()
 
   // Spawn CC CLI with --resume to continue the existing conversation
+  // Prompt via stdin to avoid E2BIG on large messages
   const args = [
     '--print',
     '--verbose',
@@ -1109,7 +1110,6 @@ async function resumeSession(sessionId, message) {
     '--resume', row.cc_cli_session_id,
     ...(MAX_TURNS > 0 ? ['--max-turns', String(MAX_TURNS)] : []),
     '--dangerously-skip-permissions',
-    '-p', message,
   ]
 
   const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
@@ -1120,6 +1120,9 @@ async function resumeSession(sessionId, message) {
     env: ccEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
+
+  proc.stdin.write(message)
+  proc.stdin.end()
 
   const sessionData = {
     process: proc,
