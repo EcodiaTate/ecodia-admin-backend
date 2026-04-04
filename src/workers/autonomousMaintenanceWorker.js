@@ -152,7 +152,7 @@ function start() {
     logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
     cycleTimer = setTimeout(async () => {
       if (!running) return
-      const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
+      const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '60000')
       try {
         await Promise.race([
           runCycle(),
@@ -213,11 +213,10 @@ function scheduleCycle() {
     intervalMs = Math.min(intervalMs * (1 + backoffMultiplier), maxBackoffMs)
   }
 
+  console.log(JSON.stringify({ level: 'info', message: `NextCycle: scheduling in ${Math.round(intervalMs / 1000)}s`, timestamp: new Date().toISOString() }))
   cycleTimer = setTimeout(async () => {
-    const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
+    const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '60000')
     try {
-      // Race the cycle against a hard timeout — if runCycle hangs
-      // (DeepSeek unresponsive, DB stuck), we still reschedule.
       await Promise.race([
         runCycle(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('cycle hard timeout')), CYCLE_HARD_TIMEOUT)),
@@ -243,7 +242,7 @@ async function runCycle() {
 
   // Hard timeout — if the cycle hangs (DeepSeek unresponsive, DB query stuck),
   // kill it after 3 minutes so the worker doesn't go silent forever.
-  const CYCLE_TIMEOUT_MS = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
+  const CYCLE_TIMEOUT_MS = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '60000')
   let timedOut = false
   const timeoutHandle = setTimeout(() => {
     timedOut = true
