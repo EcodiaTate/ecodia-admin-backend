@@ -9,9 +9,9 @@ const { createTask } = require('../db/queries/tasks')
 const kgHooks = require('./kgIngestionHooks')
 
 const GMAIL_ENABLED = (env.GMAIL_ENABLED || 'false').toLowerCase() === 'true'
-const INBOXES = env.GMAIL_INBOXES
+const INBOXES = (env.GMAIL_INBOXES
   ? env.GMAIL_INBOXES.split(',').map(s => s.trim()).filter(Boolean)
-  : [env.GOOGLE_PRIMARY_ACCOUNT]
+  : [env.GOOGLE_PRIMARY_ACCOUNT]).filter(Boolean)
 const MAX_TRIAGE_ATTEMPTS = parseInt(env.GMAIL_MAX_TRIAGE_ATTEMPTS || '0', 10) || Infinity
 
 // ─── Gmail Client ────────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ async function triagePendingEmails() {
   const pending = await db`
     SELECT * FROM email_threads
     WHERE triage_status IN ('pending', 'pending_retry')
-      AND triage_attempts < ${MAX_TRIAGE_ATTEMPTS}
+      ${MAX_TRIAGE_ATTEMPTS === Infinity ? db`` : db`AND triage_attempts < ${MAX_TRIAGE_ATTEMPTS}`}
     ORDER BY received_at DESC
     LIMIT 10
   `
