@@ -87,9 +87,14 @@ function start() {
   // Delay first cycle to let the system stabilise after restart
   if (STARTUP_COOLDOWN_MS > 0) {
     logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
-    cycleTimer = setTimeout(() => {
+    cycleTimer = setTimeout(async () => {
       if (!running) return
-      runCycle().then(() => scheduleCycle())
+      try {
+        await runCycle()
+      } catch (err) {
+        logger.error('AutonomousMaintenanceWorker: first cycle crashed', { error: err.message })
+      }
+      scheduleCycle()  // ALWAYS schedule next cycle, even if first one crashed
     }, STARTUP_COOLDOWN_MS)
   } else {
     scheduleCycle()
@@ -139,8 +144,12 @@ function scheduleCycle() {
   }
 
   cycleTimer = setTimeout(async () => {
-    await runCycle()
-    scheduleCycle()
+    try {
+      await runCycle()
+    } catch (err) {
+      logger.error('AutonomousMaintenanceWorker: cycle crashed', { error: err.message })
+    }
+    scheduleCycle()  // ALWAYS reschedule, even on crash
   }, intervalMs)
 }
 
@@ -416,25 +425,28 @@ async function readSystemState() {
       LIMIT 15
     `.catch(() => []).then(rows => { state.suppressedPatterns = rows }),
 
-    // Count sessions per error keyword in the last 7 days.
-    // The mind needs to see: "4 sessions already investigated 'orphaned'" → stop.
+    // Count how many investigation sessions ran in the last 7 days.
+    // Done in JS instead of SQL to avoid LATERAL unnest issues with the query driver.
     db`
-      SELECT word, count(DISTINCT s.id)::int AS sessions
-      FROM cc_sessions s,
-        LATERAL unnest(
-          regexp_split_to_array(lower(left(s.initial_prompt, 200)), '[^a-z]+')
-        ) AS word
-      WHERE s.started_at > now() - interval '7 days'
-        AND s.triggered_by IN ('scheduled', 'cortex')
-        AND length(word) > 5
-        AND word NOT IN ('investigate','context','previous','session','sessions','factory','check','error','errors','should','system','ensure')
-      GROUP BY word
-      HAVING count(DISTINCT s.id) >= 3
-      ORDER BY sessions DESC
-      LIMIT 10
+      SELECT id, initial_prompt
+      FROM cc_sessions
+      WHERE started_at > now() - interval '7 days'
+        AND triggered_by IN ('scheduled', 'cortex')
+      ORDER BY started_at DESC
+      LIMIT 50
     `.catch(() => []).then(rows => {
       state.sessionsPerError = {}
-      for (const r of rows) state.sessionsPerError[r.word] = r.sessions
+      const { _extractKeywords } = require('../services/factoryTriggerService')
+      for (const r of rows) {
+        const kws = _extractKeywords(r.initial_prompt)
+        for (const kw of kws) {
+          state.sessionsPerError[kw] = (state.sessionsPerError[kw] || 0) + 1
+        }
+      }
+      // Only keep keywords with 3+ sessions
+      for (const [k, v] of Object.entries(state.sessionsPerError)) {
+        if (v < 3) delete state.sessionsPerError[k]
+      }
     }),
   ])
 
