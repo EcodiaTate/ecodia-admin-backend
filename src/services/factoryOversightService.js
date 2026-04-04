@@ -61,8 +61,35 @@ async function runPostSessionPipeline(sessionId) {
 
   if (!session) return
   if (session.status !== 'complete') {
-    // CC failed — report back to trigger source
-    cleanWorkingDir(session.repo_path)
+    // CC failed — but it may have made GOOD edits before failing (e.g. Neo4j down
+    // mid-session, rate limit, OOM). Check if there are changes worth preserving.
+    const hasChanges = session.repo_path ? (() => {
+      try {
+        return !!execFileSync('git', ['status', '--porcelain'], {
+          cwd: session.repo_path, encoding: 'utf-8', timeout: 10_000,
+        }).trim()
+      } catch { return false }
+    })() : false
+
+    if (hasChanges) {
+      // Stash the changes instead of nuking — they can be reviewed/recovered.
+      // The stash message includes the session ID so it's traceable.
+      try {
+        execFileSync('git', ['stash', 'push', '-m',
+          `Factory session ${session.id} (failed: ${(session.error_message || 'unknown').slice(0, 80)})`
+        ], { cwd: session.repo_path, encoding: 'utf-8', timeout: 15_000 })
+        logger.info(`Stashed changes from failed session ${session.id} (recoverable via git stash list)`, {
+          repoPath: session.repo_path,
+        })
+      } catch (stashErr) {
+        // Stash failed — fall back to nuclear cleanup
+        logger.debug('Stash failed, falling back to clean', { error: stashErr.message })
+        cleanWorkingDir(session.repo_path)
+      }
+    } else {
+      cleanWorkingDir(session.repo_path)
+    }
+
     await reportToTriggerSource(session, {
       success: false,
       stage: 'execution',
