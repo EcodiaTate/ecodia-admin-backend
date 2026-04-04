@@ -815,9 +815,10 @@ async function startSession(session) {
       sessionData._killReason = 'timeout'
       try {
         proc.kill('SIGTERM')
-        setTimeout(() => {
+        const forceKill = setTimeout(() => {
           if (!proc.killed) proc.kill('SIGKILL')
         }, 10_000)
+        forceKill.unref()
       } catch {}
       await updateSessionStatus(session.id, 'error', { error_message: 'Session timed out' })
       await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
@@ -923,6 +924,32 @@ async function startSession(session) {
       return
     }
 
+    // Signal-killed sessions (code === null) — the process was killed externally
+    // (OOM, PM2 restart, deployment, etc.), not a natural exit. If the session
+    // has a CC CLI session ID, mark as 'paused' (resumable) instead of 'error'.
+    // Skip the oversight pipeline since the session didn't complete naturally.
+    const killedBySignal = code === null
+    if (killedBySignal) {
+      const hasCliId = !!sessionData.ccCliSessionId
+      const signalDesc = signal === 'SIGKILL' ? 'OOM killer or force-kill by PM2/system'
+        : signal === 'SIGTERM' ? 'PM2 restart, deployment, or graceful shutdown'
+        : signal ? `signal ${signal}` : 'parent process killed during PM2 restart or OOM'
+      const msg = `Process killed (exit code null, ${signal || 'no signal'}) — ${signalDesc}`
+
+      if (hasCliId) {
+        logger.info(`CC session ${session.id} killed by signal — marking paused (resumable)`, { signal: signal || null })
+        await updateSessionStatus(session.id, 'paused', { error_message: msg }).catch(() => {})
+      } else {
+        logger.warn(`CC session ${session.id} killed by signal — no CLI ID, marking error`, { signal: signal || null })
+        await updateSessionStatus(session.id, 'error', { error_message: msg }).catch(() => {})
+        await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`.catch(() => {})
+      }
+
+      broadcastToSession(session.id, 'cc:status', { status: hasCliId ? 'paused' : 'error', code, signal })
+      _ingestSessionToOrganism(session, hasCliId ? 'paused' : 'error').catch(() => {})
+      return // Skip oversight pipeline — session didn't complete naturally
+    }
+
     // Treat stdin-only warnings as non-errors — CC CLI emits is_error for the warning
     // but the session actually completed fine. Uses shared isStdinWarning() helper.
     const resultText = streamResult?.result || ''
@@ -949,19 +976,8 @@ async function startSession(session) {
           errorMessage = meaningfulStderr.slice(-5).join('\n')
         }
       }
-      // If no meaningful error extracted yet, classify by exit code/signal
       if (!errorMessage) {
-        if (code === null && signal === 'SIGKILL') {
-          errorMessage = `Process killed by SIGKILL (exit code null) — OOM killer or force-kill by PM2/system`
-        } else if (code === null && signal === 'SIGTERM') {
-          errorMessage = `Process killed by SIGTERM (exit code null) — PM2 restart, deployment, or graceful shutdown`
-        } else if (code === null && signal) {
-          errorMessage = `Process killed by ${signal} (exit code null)`
-        } else if (code === null) {
-          errorMessage = `Process exited abnormally (exit code null, no signal) — likely parent process killed during PM2 restart or OOM`
-        } else {
-          errorMessage = `Exit code ${code}`
-        }
+        errorMessage = `Exit code ${code}`
       }
     }
 
@@ -1218,12 +1234,21 @@ async function resumeSession(sessionId, message) {
 
   // Timeout (same as startSession)
   if (SESSION_TIMEOUT_MS > 0) {
-    sessionData.timeout = setTimeout(() => {
-      logger.warn(`CC resumed session ${sessionId} timed out after ${SESSION_TIMEOUT_MS}ms`)
-      proc.kill('SIGTERM')
-      setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL') }, 10_000)
-      updateSessionStatus(sessionId, 'error', { error_message: 'Resumed session timed out' }).catch(() => {})
-      db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
+    sessionData.timeout = setTimeout(async () => {
+      logger.warn(`CC resumed session ${sessionId} timed out after ${SESSION_TIMEOUT_MS / 60000} min`)
+      // Mark as stopped BEFORE killing — prevents the close handler from
+      // double-processing (overwriting error message, generating false "exit code null")
+      sessionData.stopped = true
+      sessionData._killReason = 'timeout'
+      try {
+        proc.kill('SIGTERM')
+        const forceKill = setTimeout(() => {
+          if (!proc.killed) proc.kill('SIGKILL')
+        }, 10_000)
+        forceKill.unref()
+      } catch {}
+      await updateSessionStatus(sessionId, 'error', { error_message: 'Resumed session timed out' }).catch(() => {})
+      await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
       clearInterval(sessionData.heartbeatTimer)
       activeSessions.delete(sessionId)
     }, SESSION_TIMEOUT_MS)
@@ -1275,7 +1300,20 @@ async function resumeSession(sessionId, message) {
     activeSessions.delete(sessionId)
 
     if (sessionData.stopped) {
-      logger.info(`CC resumed session ${sessionId} close after stop — skipping oversight`)
+      logger.info(`CC resumed session ${sessionId} close after stop — skipping`)
+      return
+    }
+
+    // Signal-killed sessions — mark as paused (resumable) since resumed sessions
+    // always have a CC CLI session ID
+    if (code === null) {
+      const signalDesc = signal === 'SIGKILL' ? 'OOM killer or force-kill'
+        : signal === 'SIGTERM' ? 'PM2 restart or graceful shutdown'
+        : signal ? `signal ${signal}` : 'parent process killed'
+      const msg = `Resumed session killed (exit code null, ${signal || 'no signal'}) — ${signalDesc}`
+      logger.info(`CC resumed session ${sessionId} killed by signal — marking paused`, { signal: signal || null })
+      await updateSessionStatus(sessionId, 'paused', { error_message: msg }).catch(() => {})
+      broadcastToSession(sessionId, 'cc:status', { status: 'paused', code, signal, resumed: true })
       return
     }
 
@@ -1299,19 +1337,8 @@ async function resumeSession(sessionId, message) {
           errorMessage = meaningfulStderr.slice(-5).join('\n')
         }
       }
-      // Classify by exit code/signal when no meaningful error extracted
       if (!errorMessage) {
-        if (code === null && signal === 'SIGKILL') {
-          errorMessage = `Process killed by SIGKILL (exit code null) — OOM killer or force-kill by PM2/system`
-        } else if (code === null && signal === 'SIGTERM') {
-          errorMessage = `Process killed by SIGTERM (exit code null) — PM2 restart, deployment, or graceful shutdown`
-        } else if (code === null && signal) {
-          errorMessage = `Process killed by ${signal} (exit code null)`
-        } else if (code === null) {
-          errorMessage = `Process exited abnormally (exit code null, no signal) — likely parent process killed during PM2 restart or OOM`
-        } else {
-          errorMessage = `Exit code ${code}`
-        }
+        errorMessage = `Exit code ${code}`
       }
     }
 
@@ -1350,12 +1377,13 @@ async function stopSession(sessionId) {
     clearInterval(sessionData.heartbeatTimer)
 
     const proc = sessionData.process
-    proc.kill('SIGTERM')
+    try { proc.kill('SIGTERM') } catch {}
 
     // Force kill after 5s if still alive
-    setTimeout(() => {
-      if (!proc.killed) proc.kill('SIGKILL')
+    const forceKillTimer = setTimeout(() => {
+      try { if (!proc.killed) proc.kill('SIGKILL') } catch {}
     }, 5000)
+    forceKillTimer.unref() // Don't keep the process alive just for this timer
 
     // Don't delete from activeSessions here — let the close handler do it
     // after seeing the stopped flag. This prevents a window where the session
