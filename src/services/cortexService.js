@@ -414,6 +414,21 @@ async function autoEnqueueUrgentActions(blocks) {
     const actionQueue = require('./actionQueueService')
     const URGENCY_PRIORITY = { high: 'urgent', medium: 'high', low: 'medium' }
     const VALID_URGENCIES = new Set(['high', 'medium', 'low'])
+
+    // Dedup: skip cards that already exist in action_queue (any status) within the last hour
+    const recentTitles = await db`
+      SELECT title, action_type FROM action_queue
+      WHERE source = 'cortex'
+        AND created_at > now() - interval '1 hour'
+    `.catch(() => [])
+    const recentKeys = new Set(recentTitles.map(r => `${r.action_type}:${r.title}`))
+    const deduped = actionCards.filter(c => !recentKeys.has(`${c.action}:${c.title}`))
+    if (deduped.length < actionCards.length) {
+      logger.info(`Cortex: deduped ${actionCards.length - deduped.length} action_card(s) already in queue within last hour`)
+    }
+    actionCards.length = 0
+    actionCards.push(...deduped)
+
     for (const card of actionCards) {
       try {
         // Validate LLM urgency — unknown values get clamped to 'medium'
