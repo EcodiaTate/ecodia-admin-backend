@@ -755,6 +755,11 @@ async function startSession(session) {
     stdio: ['pipe', 'pipe', 'pipe'],  // stdin piped — allows sendMessage() for interactive sessions
   })
 
+  // Close stdin immediately — --print mode gets the prompt via -p flag, not stdin.
+  // CC CLI waits 3s for stdin data and emits a warning when none arrives.
+  // sendMessage() already falls back to resumeSession() when stdin is closed.
+  proc.stdin.end()
+
   const sessionData = {
     process: proc,
     sessionId: session.id,
