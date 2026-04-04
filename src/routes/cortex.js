@@ -1,6 +1,6 @@
 const { Router } = require('express')
 const auth = require('../middleware/auth')
-const cortexService = require('../services/cortexService')
+const cortexService = require('../services/contextAwareCortexService')
 const logger = require('../config/logger')
 
 const router = Router()
