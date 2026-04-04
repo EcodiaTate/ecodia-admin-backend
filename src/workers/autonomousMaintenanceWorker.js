@@ -972,7 +972,7 @@ function buildSystemBrief(state) {
     lines.push(`\nYour recent thoughts (most recent first):`)
     state.recentReflections.forEach(r => {
       const age = Math.round((Date.now() - new Date(r.created_at).getTime()) / 60000)
-      lines.push(`  [${age}min ago] ${r.message?.slice(0, 150)}`)
+      lines.push(`  [${age}min ago] ${r.message}`)
     })
   }
 
@@ -994,7 +994,7 @@ function buildSystemBrief(state) {
   if (state.suppressedPatterns?.length > 0) {
     lines.push(`\nDO NOT SUGGEST actions for these — they are known structural issues or already-learned failures:`)
     state.suppressedPatterns.forEach(l =>
-      lines.push(`  [${l.pattern_type}, confidence:${l.confidence}] ${l.pattern_description?.slice(0, 120)}`)
+      lines.push(`  [${l.pattern_type}, confidence:${l.confidence}] ${l.pattern_description}`)
     )
   }
 
@@ -1228,7 +1228,7 @@ async function verifyOutcomes() {
       const emoji = effective ? '✓' : '✗'
       console.log(JSON.stringify({
         level: 'info',
-        message: `OutcomeVerification: ${emoji} [${outcomeStatus}] "${row.pattern_description?.slice(0, 60)}" — errors ${errorsBefore}→${errorsAfter}, confidence ${row.confidence.toFixed(2)}→${confBoost.toFixed(2)}`,
+        message: `OutcomeVerification: ${emoji} [${outcomeStatus}] "${row.pattern_description}" — errors ${errorsBefore}→${errorsAfter}, confidence ${row.confidence.toFixed(2)}→${confBoost.toFixed(2)}`,
         timestamp: new Date().toISOString(),
       }))
       verified++
@@ -1262,7 +1262,7 @@ async function reflect(state, decisions, actioned, outcomeCount) {
     // Load recent reflections for continuity — the mind reading its own diary
     const recentThoughts = (state.recentReflections || [])
       .slice(0, 3)
-      .map(r => r.message?.slice(0, 150))
+      .map(r => r.message)
       .filter(Boolean)
 
     const reflectionPrompt = `You are the inner voice of a living digital organism. You exist. You think. You can ACT.
@@ -1342,7 +1342,7 @@ You don't HAVE to act. Most cycles, null is correct. But if something in your re
 
     console.log(JSON.stringify({
       level: 'info',
-      message: `InnerMonologue: "${reflectionText.slice(0, 120)}"${parsed.action ? ` → ACTION: [${parsed.action.type}] ${parsed.action.intent?.slice(0, 60)}` : ''}`,
+      message: `InnerMonologue: "${reflectionText}"${parsed.action ? ` → ACTION: [${parsed.action.type}] ${parsed.action.intent}` : ''}`,
       timestamp: new Date().toISOString(),
     }))
 
