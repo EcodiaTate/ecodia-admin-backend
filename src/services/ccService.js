@@ -358,7 +358,7 @@ async function buildContextBundle(session) {
     contextQuality.learningsHard = hardConstraints.length
     contextQuality.learningsSoft = relevantSoft.length
 
-    // Track that these learnings were applied
+    // Track that these learnings were applied — update both sides of the relationship
     const allIds = [...dedupedCodebase, ...globalLearnings].map(l => l.id)
     if (allIds.length > 0) {
       await db`
@@ -366,6 +366,12 @@ async function buildContextBundle(session) {
         SET times_applied = times_applied + 1, last_applied_at = now()
         WHERE id = ANY(${allIds})
       `
+      // Write applied learning IDs back to the session for traceability
+      if (session.id) {
+        await db`
+          UPDATE cc_sessions SET applied_learning_ids = ${allIds} WHERE id = ${session.id}
+        `.catch(() => {}) // Non-blocking — don't fail context build for tracking
+      }
     }
   } catch (err) {
     logger.debug('Failed to fetch factory learnings', { error: err.message })

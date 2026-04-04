@@ -970,13 +970,21 @@ async function actOnDecision(decision, state) {
     }
   }
 
-  // Factory learning consolidation — dedup, embed, merge, prune
-  if (decision.type === 'consolidate_learnings') {
+  // Factory learning consolidation — dedup, embed, merge, prune + backfill missed sessions
+  if (decision.type === 'consolidate_learnings' || decision.type === 'consolidate_latent_learnings') {
     try {
       logger.info('AutonomousMaintenanceWorker: consolidating factory learnings')
       const oversight = require('../services/factoryOversightService')
+
+      // Backfill learnings from orphaned/missed sessions first
+      const backfillStats = await oversight.backfillMissedLearnings(10)
+      if (backfillStats.extracted > 0) {
+        logger.info('AutonomousMaintenanceWorker: backfilled missed learnings', backfillStats)
+      }
+
+      // Then consolidate (embed, merge, prune)
       const stats = await oversight.consolidateLearnings()
-      logger.info('AutonomousMaintenanceWorker: learning consolidation complete', stats)
+      logger.info('AutonomousMaintenanceWorker: learning consolidation complete', { ...stats, backfill: backfillStats })
       return true
     } catch (err) {
       logger.warn('AutonomousMaintenanceWorker: learning consolidation failed', { error: err.message })

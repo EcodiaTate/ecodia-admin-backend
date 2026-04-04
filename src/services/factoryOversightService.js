@@ -959,7 +959,11 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
         if (similar.length > 0 && Number.isFinite(similar[0].similarity) && similar[0].similarity >= threshold) {
           // Merge: boost confidence, append session, keep the richer description
           const existing = similar[0]
-          const newConfidence = Math.min(1.0, existing.confidence * 1.0 + (parsed.confidence || 0.5) * 0.3)
+          // Diminishing-returns merge: each additional evidence adds less.
+          // Formula: conf + (1 - conf) * increment — converges toward 1.0 but
+          // never gets there from a single merge. Prevents artificial ratchet.
+          const increment = (parsed.confidence || 0.5) * 0.15
+          const newConfidence = Math.min(0.98, existing.confidence + (1 - existing.confidence) * increment)
           const existingSessions = existing.session_ids || []
           const mergedSessions = [...new Set([...existingSessions, session.id])]
           const existingKeywords = existing.evidence?.keywords || []
@@ -1208,7 +1212,9 @@ async function consolidateLearnings() {
         const mergedSessions = [...new Set([...(survivor.session_ids || []), ...(victim.session_ids || [])])]
         const mergedKeywords = [...new Set([...(survivor.evidence?.keywords || []), ...(victim.evidence?.keywords || [])])]
         const mergedFiles = [...new Set([...(survivor.evidence?.files || []), ...(victim.evidence?.files || [])])]
-        const newConfidence = Math.min(1.0, survivor.confidence * 1.0 + victim.confidence * 0.2)
+        // Diminishing-returns merge — same formula as extraction path
+        const increment = victim.confidence * 0.1
+        const newConfidence = Math.min(0.98, survivor.confidence + (1 - survivor.confidence) * increment)
 
         const bestDesc = victim.pattern_description.length > survivor.pattern_description.length
           ? victim.pattern_description : survivor.pattern_description
@@ -1256,6 +1262,64 @@ async function consolidateLearnings() {
   return stats
 }
 
+// ─── Backfill: Extract Learnings from Orphaned/Missed Sessions ─────
+// Sessions that were killed (orphaned) or failed before the oversight
+// pipeline ran never had extractLearningPattern called. This function
+// finds them and processes them in batches.
+
+async function backfillMissedLearnings(batchSize = 10) {
+  const stats = { processed: 0, extracted: 0, skipped: 0 }
+
+  try {
+    // Find error/failed sessions whose IDs don't appear in any learning's session_ids
+    const missed = await db`
+      SELECT s.id, s.codebase_id, s.initial_prompt, s.error_message, s.files_changed,
+             s.working_dir, s.status,
+             c.name AS codebase_name
+      FROM cc_sessions s
+      LEFT JOIN codebases c ON c.id = s.codebase_id
+      WHERE s.status IN ('error', 'failed')
+        AND s.error_message IS NOT NULL
+        AND s.initial_prompt IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM factory_learnings fl
+          WHERE s.id = ANY(fl.session_ids)
+        )
+      ORDER BY s.completed_at DESC NULLS LAST
+      LIMIT ${batchSize}
+    `
+
+    if (missed.length === 0) {
+      logger.debug('No missed sessions to backfill learnings from')
+      return stats
+    }
+
+    for (const session of missed) {
+      stats.processed++
+      try {
+        await extractLearningPattern(session, 'execution_failed', {
+          error: session.error_message,
+        })
+        stats.extracted++
+      } catch (err) {
+        stats.skipped++
+        logger.debug('Backfill learning extraction failed for session', {
+          sessionId: session.id,
+          error: err.message,
+        })
+      }
+    }
+
+    if (stats.extracted > 0) {
+      logger.info(`Backfilled learnings from ${stats.extracted}/${stats.processed} missed sessions`)
+    }
+  } catch (err) {
+    logger.debug('Backfill missed learnings failed', { error: err.message })
+  }
+
+  return stats
+}
+
 module.exports = {
   runPostSessionPipeline,
   reviewChanges,
@@ -1264,4 +1328,5 @@ module.exports = {
   generateFollowUp,
   recordOutcome,
   consolidateLearnings,
+  backfillMissedLearnings,
 }
