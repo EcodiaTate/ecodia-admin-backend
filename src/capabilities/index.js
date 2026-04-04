@@ -15,6 +15,7 @@ require('./social')
 require('./factory')
 require('./finance')
 require('./system')
+require('./context')
 
 const registry = require('../services/capabilityRegistry')
 const logger = require('../config/logger')

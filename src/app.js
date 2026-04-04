@@ -21,6 +21,7 @@ const driveRoutes = require('./routes/drive')
 const vercelRoutes = require('./routes/vercel')
 const metaRoutes = require('./routes/meta')
 const actionQueueRoutes = require('./routes/actionQueue')
+const contextTrackingRoutes = require('./routes/contextTracking')
 
 const app = express()
 
@@ -64,6 +65,7 @@ app.use('/api/drive', driveRoutes)
 app.use('/api/vercel', vercelRoutes)
 app.use('/api/meta', metaRoutes)
 app.use('/api/actions', actionQueueRoutes)
+app.use('/api/context', contextTrackingRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)

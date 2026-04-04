@@ -95,8 +95,17 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
   // 2. Gather system state for proactive awareness
   const systemState = await getSystemState()
 
-  // 3. Load cross-session memory — recent exchanges from prior sessions
-  //    so Cortex has continuity across conversations, not just within them.
+  // 3a. Load persistent context (dismissals, preferences, active topics)
+  let contextSummary = ''
+  try {
+    const contextTracking = require('./contextTrackingService')
+    contextSummary = await contextTracking.getContextSummary()
+  } catch (err) {
+    logger.debug('Cortex context tracking retrieval failed', { error: err.message })
+  }
+
+  // 3b. Load cross-session memory — recent exchanges from prior sessions
+  //     so Cortex has continuity across conversations, not just within them.
   let sessionMemory = ''
   try {
     const recentSessions = await db`
@@ -146,6 +155,8 @@ ${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE 
 ${sessionMemory ? `--- RECENT CONVERSATION MEMORY ---\n${sessionMemory}\n--- END CONVERSATION MEMORY ---` : ''}
 
 ${ambientEvents?.length ? `--- SESSION AMBIENT EVENTS ---\nThese things happened in this session (action approvals, dismissals, CC completions, deploys). You were not asked to react — this is awareness context.\n${ambientEvents.map(e => `  [${e.kind}] ${e.summary}`).join('\n')}\n--- END AMBIENT EVENTS ---` : ''}
+
+${contextSummary ? `--- PERSISTENT CONTEXT ---\n${contextSummary}\n--- END PERSISTENT CONTEXT ---` : ''}
 
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
@@ -230,12 +241,22 @@ async function getLoadBriefing() {
     interimDigest = parts.join('\n')
   }
 
+  // Load persistent context for briefing awareness
+  let briefingContext = ''
+  try {
+    const contextTracking = require('./contextTrackingService')
+    briefingContext = await contextTracking.getContextSummary()
+  } catch (err) {
+    logger.debug('Cortex briefing context retrieval failed', { error: err.message })
+  }
+
   // Give the system state to the Cortex and let it decide what to surface.
   // No gating, no leading questions, no pre-filtered "nothing to see here".
   // The Cortex reads the full picture and speaks freely.
   const prompt = `${env.OWNER_NAME} opened the interface.
 
 ${interimDigest ? `--- SINCE LAST VISIT ---\n${interimDigest}\n--- END ---\n` : ''}
+${briefingContext ? `--- PERSISTENT CONTEXT ---\n${briefingContext}\n--- END PERSISTENT CONTEXT ---\n` : ''}
 --- CURRENT SYSTEM STATE ---
 ${formatSystemState(systemState)}
 ---`
@@ -304,6 +325,23 @@ async function autoEnqueueUrgentActions(blocks) {
 
   const actionCards = blocks.filter(b => b.type === 'action_card' && b.urgency && b.action && b.title)
   const autoStartSessions = blocks.filter(b => b.type === 'cc_session' && b.autoStart === true && b.prompt)
+
+  // Filter out dismissed items before enqueuing
+  try {
+    const contextTracking = require('./contextTrackingService')
+    const filtered = await contextTracking.filterSurfaceable(
+      actionCards.map(c => ({ ...c, itemKey: contextTracking.buildItemKey('cortex', c.action, c.title) }))
+    )
+    const filteredTitles = new Set(filtered.map(f => f.title))
+    const removed = actionCards.filter(c => !filteredTitles.has(c.title))
+    if (removed.length) {
+      logger.info(`Cortex: filtered ${removed.length} action_cards via context tracking (dismissed/resolved)`)
+    }
+    actionCards.length = 0
+    actionCards.push(...filtered)
+  } catch (err) {
+    logger.debug('Context tracking filter failed — proceeding unfiltered', { error: err.message })
+  }
 
   // Cap: never enqueue more than 2 action cards per response
   if (actionCards.length > 2) {

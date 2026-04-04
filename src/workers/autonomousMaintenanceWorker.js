@@ -687,6 +687,65 @@ function buildSystemBrief(state) {
   return lines.join('\n')
 }
 
+// ─── DB-Backed Deduplication ─────────────────────────────────────────
+// Check cc_sessions for recent scheduled sessions with similar prompts.
+// This survives PM2 restarts unlike the in-memory Map.
+
+async function _hasRecentSimilarSession(decision, cooldownMs) {
+  try {
+    const intent = (decision.intent || '').toLowerCase()
+    if (!intent || intent.length < 15) return false
+
+    // Extract key phrases from the intent for matching
+    const keywords = _extractDedupKeywords(intent)
+    if (keywords.length === 0) return false
+
+    const cooldownInterval = `${Math.ceil(cooldownMs / 60000)} minutes`
+
+    // Check for recent scheduled sessions with overlapping keywords
+    const recent = await db`
+      SELECT id, initial_prompt, status, started_at
+      FROM cc_sessions
+      WHERE triggered_by = 'scheduled'
+        AND started_at > now() - ${cooldownInterval}::interval
+        AND status IN ('complete', 'running', 'queued', 'error')
+      ORDER BY started_at DESC
+      LIMIT 20
+    `
+
+    for (const session of recent) {
+      const prompt = (session.initial_prompt || '').toLowerCase()
+      const matchCount = keywords.filter(kw => prompt.includes(kw)).length
+      // If >60% of keywords match, consider it a duplicate
+      if (matchCount >= Math.ceil(keywords.length * 0.6)) {
+        logger.debug('AutonomousMaintenanceWorker: DB dedup match', {
+          newIntent: intent.slice(0, 80),
+          existingSession: session.id,
+          existingStatus: session.status,
+          matchRatio: `${matchCount}/${keywords.length}`,
+        })
+        return true
+      }
+    }
+    return false
+  } catch (err) {
+    logger.debug('DB dedup check failed, allowing dispatch', { error: err.message })
+    return false
+  }
+}
+
+// Extract meaningful keywords from an intent for fuzzy dedup matching
+function _extractDedupKeywords(intent) {
+  const stopWords = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were', 'been',
+    'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'how', 'why', 'which', 'who',
+    'investigate', 'check', 'fix', 'examine', 'look', 'into', 'also', 'any', 'all'])
+  return intent
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !stopWords.has(w))
+    .slice(0, 8)
+}
+
 // ─── Decision Key Normalisation ──────────────────────────────────────
 // Extracts a stable key from a decision so we can detect duplicates
 // across cycles even when DeepSeek phrases the same intent differently.

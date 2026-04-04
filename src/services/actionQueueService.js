@@ -646,6 +646,19 @@ async function dismiss(actionId, { reason, reasonCategory, reasonDetail } = {}) 
 
     const kgHooks = require('./kgIngestionHooks')
     kgHooks.onActionDismissed({ action: item, reason: reason || reasonDetail, reasonCategory }).catch(() => {})
+
+    // Feed into context tracking — prevents re-surfacing dismissed items
+    try {
+      const contextTracking = require('./contextTrackingService')
+      contextTracking.dismiss({
+        source: item.source,
+        actionType: item.action_type,
+        identifier: item.source_ref_id || item.id,
+        title: item.title,
+        reason: reason || reasonDetail || reasonCategory,
+        metadata: { actionQueueId: item.id, context: item.context },
+      }).catch(() => {})
+    } catch { /* contextTracking not loaded yet */ }
   }
 }
 

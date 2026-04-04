@@ -31,6 +31,12 @@ let organismHealthState = {
 const HEALTH_CHECK_INTERVAL = Number(env.ORGANISM_HEALTH_CHECK_INTERVAL_MS) || 15_000
 const MAX_CONSECUTIVE_FAILURES = Number(env.ORGANISM_MAX_CONSECUTIVE_FAILURES) || 3
 
+// Cooldown for Thymos incident dispatch — prevents feedback loop where
+// Factory session restarts organism → brief health fail → new incident → repeat.
+// Default 10 minutes between dispatches.
+const THYMOS_DISPATCH_COOLDOWN_MS = Number(env.THYMOS_DISPATCH_COOLDOWN_MS) || 10 * 60 * 1000
+let _lastThymosDispatchAt = 0
+
 // ─── CPU Tracking (rolling average over last N samples) ────────────
 let _prevCpuTimes = null
 function getCpuUsagePercent() {
@@ -313,22 +319,33 @@ async function checkOrganismHealth() {
       `.catch(() => {})
       try { require('../websocket/wsManager').broadcast('notification', { payload: notifPayload }) } catch {}
 
-      // Dispatch Factory investigation — diagnose and fix whatever crashed the organism
-      try {
-        const factoryTrigger = require('./factoryTriggerService')
-        factoryTrigger.dispatchFromThymos({
-          severity: 'critical',
-          affected_system: 'organism',
-          codebase_name: 'organism-backend',
-          error_message: `Organism unresponsive after ${MAX_CONSECUTIVE_FAILURES} consecutive health check failures. Last error: ${err.message}`,
-          description: 'Organism process is down or not responding to health checks on port 8000. Investigate via pm2 logs, check for runtime errors (uncaught exceptions, missing awaits on coroutines, import failures), and restart or fix as needed.',
-          stack_trace: '',
-          id: `symbiont_down_${Date.now()}`,
-        }).catch(dispatchErr => {
-          logger.warn('Failed to dispatch Factory investigation for SYMBIONT DOWN', { error: dispatchErr.message })
+      // Dispatch Factory investigation — diagnose and fix whatever crashed the organism.
+      // Cooldown prevents feedback loop: session restarts organism → brief health fail → new incident → repeat.
+      const now = Date.now()
+      const timeSinceLastDispatch = now - _lastThymosDispatchAt
+      if (timeSinceLastDispatch < THYMOS_DISPATCH_COOLDOWN_MS) {
+        logger.warn('Thymos dispatch skipped — cooldown active', {
+          cooldownRemainingMs: THYMOS_DISPATCH_COOLDOWN_MS - timeSinceLastDispatch,
+          lastDispatchAt: new Date(_lastThymosDispatchAt).toISOString(),
         })
-      } catch (triggerErr) {
-        logger.warn('Factory trigger not available for SYMBIONT DOWN', { error: triggerErr.message })
+      } else {
+        _lastThymosDispatchAt = now
+        try {
+          const factoryTrigger = require('./factoryTriggerService')
+          factoryTrigger.dispatchFromThymos({
+            severity: 'critical',
+            affected_system: 'organism',
+            codebase_name: 'organism-backend',
+            error_message: `Organism unresponsive after ${MAX_CONSECUTIVE_FAILURES} consecutive health check failures. Last error: ${err.message}`,
+            description: 'Organism process is down or not responding to health checks on port 8000. Investigate via pm2 logs, check for runtime errors (uncaught exceptions, missing awaits on coroutines, import failures), and restart or fix as needed.',
+            stack_trace: '',
+            id: `symbiont_down_${Date.now()}`,
+          }).catch(dispatchErr => {
+            logger.warn('Failed to dispatch Factory investigation for SYMBIONT DOWN', { error: dispatchErr.message })
+          })
+        } catch (triggerErr) {
+          logger.warn('Factory trigger not available for SYMBIONT DOWN', { error: triggerErr.message })
+        }
       }
     }
 
