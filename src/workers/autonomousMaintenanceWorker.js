@@ -88,12 +88,9 @@ function start() {
   if (STARTUP_COOLDOWN_MS > 0) {
     logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
     cycleTimer = setTimeout(() => {
-      console.log('[MAINTENANCE] setTimeout fired — running first cycle')
-      if (!running) { console.log('[MAINTENANCE] not running, aborting'); return }
+      if (!running) return
       runCycle()
-        .then(() => { console.log('[MAINTENANCE] first cycle done OK') })
         .catch(err => {
-          console.error('[MAINTENANCE] first cycle crashed:', err.message, err.stack)
           logger.error('AutonomousMaintenanceWorker: first cycle crashed', { error: err.message })
         })
         .finally(() => { scheduleCycle() })
@@ -250,7 +247,10 @@ async function runCycle() {
     await checkStaleEscalations()
 
     await recordHeartbeat('autonomous_maintenance', 'active')
-    logger.info(`AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`)
+    const cycleSummary = `AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`
+    logger.info(cycleSummary)
+    // Also console.log — winston transport may not flush in all PM2 restart scenarios
+    console.log(JSON.stringify({ level: 'info', message: cycleSummary, timestamp: new Date().toISOString() }))
 
     // Feed cycle outcome into KG — richer signal for learning
     const kgHooks = require('../services/kgIngestionHooks')
