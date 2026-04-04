@@ -187,10 +187,12 @@ function scheduleCycle() {
   const rawPressure = metabolismBridge.getPressure()
   const pressure = Number.isFinite(rawPressure) ? rawPressure : 0
 
-  // Pressure-adaptive intervals — all env-driven
-  const highMs = parseInt(env.MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS || '300000') || 300000
-  const medMs = parseInt(env.MAINTENANCE_INTERVAL_MED_PRESSURE_MS || '600000') || 600000
-  const restMs = parseInt(env.MAINTENANCE_INTERVAL_REST_MS || '900000') || 900000
+  // Pressure-adaptive intervals — the organism decides its own rhythm.
+  // Fast when alert, slower when calm — but never artificially slow.
+  // The only real constraint is DeepSeek API cost per call.
+  const highMs = parseInt(env.MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS || '30000') || 30000      // 30s when urgent
+  const medMs = parseInt(env.MAINTENANCE_INTERVAL_MED_PRESSURE_MS || '60000') || 60000        // 1min when active
+  const restMs = parseInt(env.MAINTENANCE_INTERVAL_REST_MS || '120000') || 120000              // 2min when calm
   let intervalMs = pressure > 0.7 ? highMs
                  : pressure > 0.4 ? medMs
                  : restMs
@@ -198,7 +200,7 @@ function scheduleCycle() {
   // Empty-cycle backoff — all env-driven
   const emptyThreshold = parseInt(env.MAINTENANCE_EMPTY_CYCLE_THRESHOLD || '3') || 3
   const maxMultiplier = parseInt(env.MAINTENANCE_BACKOFF_MAX_MULTIPLIER || '3') || 3
-  const maxBackoffMs = parseInt(env.MAINTENANCE_BACKOFF_MAX_MS || '1800000') || 1800000
+  const maxBackoffMs = parseInt(env.MAINTENANCE_BACKOFF_MAX_MS || '600000') || 600000  // 10min max — never go fully dormant
   const safeCycles = Number.isFinite(_emptyCycles) ? _emptyCycles : 0
   if (emptyThreshold > 0 && safeCycles >= emptyThreshold) {
     const backoffMultiplier = Math.min(safeCycles - (emptyThreshold - 1), maxMultiplier)
