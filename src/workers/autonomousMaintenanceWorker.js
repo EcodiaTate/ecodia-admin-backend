@@ -403,6 +403,39 @@ async function readSystemState() {
         count(*) FILTER (WHERE absorbed_into IS NOT NULL)::int AS absorbed
       FROM factory_learnings
     `.catch(() => [{}]).then(([r]) => { state.learningStats = r }),
+
+    // Active dont_try / failure_pattern learnings — the mind MUST see these
+    // so it doesn't suggest actions for known structural issues or repeated failures.
+    db`
+      SELECT pattern_type, pattern_description, confidence
+      FROM factory_learnings
+      WHERE absorbed_into IS NULL
+        AND pattern_type IN ('dont_try', 'failure_pattern', 'constraint')
+        AND confidence >= 0.3
+      ORDER BY confidence DESC
+      LIMIT 15
+    `.catch(() => []).then(rows => { state.suppressedPatterns = rows }),
+
+    // Count sessions per error keyword in the last 7 days.
+    // The mind needs to see: "4 sessions already investigated 'orphaned'" → stop.
+    db`
+      SELECT word, count(DISTINCT s.id)::int AS sessions
+      FROM cc_sessions s,
+        LATERAL unnest(
+          regexp_split_to_array(lower(left(s.initial_prompt, 200)), '[^a-z]+')
+        ) AS word
+      WHERE s.started_at > now() - interval '7 days'
+        AND s.triggered_by IN ('scheduled', 'cortex')
+        AND length(word) > 5
+        AND word NOT IN ('investigate','context','previous','session','sessions','factory','check','error','errors','should','system','ensure')
+      GROUP BY word
+      HAVING count(DISTINCT s.id) >= 3
+      ORDER BY sessions DESC
+      LIMIT 10
+    `.catch(() => []).then(rows => {
+      state.sessionsPerError = {}
+      for (const r of rows) state.sessionsPerError[r.word] = r.sessions
+    }),
   ])
 
   // Integration staleness — how long since each service was polled.
@@ -646,10 +679,18 @@ function buildSystemBrief(state) {
   }
 
   if (state.errorPatterns?.length > 0) {
+    // Annotate errors with (a) structural tags and (b) how many sessions already
+    // investigated them — so the mind can see "we tried 4 times, stop"
+    const { _isStructuralIssue } = require('../services/factoryTriggerService')
     lines.push(`\nRecurring errors (7d):`)
-    state.errorPatterns.forEach(e =>
-      lines.push(`  ${e.occurrences}x: ${e.error_message?.slice(0, 100)}`)
-    )
+    state.errorPatterns.forEach(e => {
+      const structural = _isStructuralIssue(e.error_message) ? ' [STRUCTURAL — inherent, do NOT investigate]' : ''
+      // Check if any keyword from this error has been investigated 3+ times
+      const errorWords = (e.error_message || '').toLowerCase().split(/[^a-z]+/).filter(w => w.length > 5)
+      const maxAttempts = errorWords.reduce((max, w) => Math.max(max, state.sessionsPerError?.[w] || 0), 0)
+      const exhausted = maxAttempts >= 3 ? ` [ALREADY INVESTIGATED ${maxAttempts}x — do NOT repeat]` : ''
+      lines.push(`  ${e.occurrences}x: ${e.error_message?.slice(0, 100)}${structural}${exhausted}`)
+    })
   }
 
   if (state.gitActivity?.length > 0) {
@@ -718,6 +759,17 @@ function buildSystemBrief(state) {
       .join(', ')
     lines.push(`\nIntegration staleness: ${stale}`)
     lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue)`)
+  }
+
+  // CRITICAL: Show active dont_try and failure_pattern learnings so the mind
+  // knows what NOT to suggest. Without this, it sees errors in the state brief
+  // and keeps suggesting investigations for things already marked as structural
+  // or unfixable — the #1 cause of repeat task generation.
+  if (state.suppressedPatterns?.length > 0) {
+    lines.push(`\nDO NOT SUGGEST actions for these — they are known structural issues or already-learned failures:`)
+    state.suppressedPatterns.forEach(l =>
+      lines.push(`  [${l.pattern_type}, confidence:${l.confidence}] ${l.pattern_description?.slice(0, 120)}`)
+    )
   }
 
   return lines.join('\n')
