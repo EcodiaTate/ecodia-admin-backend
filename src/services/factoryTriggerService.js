@@ -71,6 +71,130 @@ Task: ${prompt.slice(0, 500)}`,
   return null
 }
 
+// ─── Dispatch Dedup & Failure Memory Gate ──────────────────────────
+//
+// Before creating ANY session, check two things:
+//   1. Has a similar session already run recently? (keyword overlap)
+//   2. Do factory_learnings contain a dont_try/failure_pattern for this task?
+//
+// This prevents the system from endlessly retrying the same failing task.
+// The cooldown window is configurable; failure learnings persist forever.
+
+const DISPATCH_COOLDOWN_MS = parseInt(env.DISPATCH_DEDUP_COOLDOWN_MS || '7200000')  // 2h default
+
+const _STOP_WORDS = new Set([
+  'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were', 'been',
+  'have', 'has', 'had', 'not', 'but', 'what', 'when', 'where', 'how', 'why', 'which',
+  'who', 'investigate', 'check', 'fix', 'examine', 'look', 'into', 'also', 'any', 'all',
+  'the', 'urgent', 'context', 'previous', 'investigation', 'attempts', 'failed',
+])
+
+function _extractKeywords(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !_STOP_WORDS.has(w))
+    .slice(0, 12)
+}
+
+async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
+  try {
+    const keywords = _extractKeywords(prompt)
+    if (keywords.length === 0) return { suppress: false }
+
+    // 1. Check recent sessions from ANY trigger source (not just 'scheduled')
+    const cooldownInterval = `${Math.ceil(DISPATCH_COOLDOWN_MS / 60000)} minutes`
+    const recentSessions = await db`
+      SELECT id, initial_prompt, status, triggered_by, started_at
+      FROM cc_sessions
+      WHERE started_at > now() - ${cooldownInterval}::interval
+        AND status IN ('complete', 'running', 'queued', 'error', 'initializing')
+      ORDER BY started_at DESC
+      LIMIT 30
+    `
+
+    for (const session of recentSessions) {
+      const sessionWords = _extractKeywords(session.initial_prompt)
+      if (sessionWords.length === 0) continue
+      const matchCount = keywords.filter(kw => sessionWords.includes(kw)).length
+      if (matchCount >= Math.ceil(keywords.length * 0.6)) {
+        return {
+          suppress: true,
+          reason: `Similar session ${session.id} (${session.status}) exists from ${Math.round((Date.now() - new Date(session.started_at).getTime()) / 60000)}min ago (${matchCount}/${keywords.length} keyword match)`,
+        }
+      }
+    }
+
+    // 2. Check factory_learnings for dont_try / failure_pattern matching this task
+    //    Only check if we have a codebase — learnings are codebase-scoped
+    if (codebaseId) {
+      const failureLearnings = await db`
+        SELECT id, pattern_type, pattern_description, confidence, evidence
+        FROM factory_learnings
+        WHERE codebase_id = ${codebaseId}
+          AND absorbed_into IS NULL
+          AND pattern_type IN ('dont_try', 'failure_pattern', 'constraint')
+          AND confidence >= 0.3
+        ORDER BY confidence DESC
+        LIMIT 20
+      `
+
+      for (const learning of failureLearnings) {
+        // Check keyword overlap between learning evidence and this prompt
+        const learningKeywords = [
+          ..._extractKeywords(learning.pattern_description),
+          ...((learning.evidence?.keywords || []).map(k => k.toLowerCase())),
+        ]
+        if (learningKeywords.length === 0) continue
+
+        const matchCount = keywords.filter(kw => learningKeywords.includes(kw)).length
+        if (matchCount >= Math.ceil(keywords.length * 0.4)) {
+          return {
+            suppress: true,
+            reason: `Matching ${learning.pattern_type} learning (confidence: ${learning.confidence.toFixed(2)}): "${learning.pattern_description.slice(0, 100)}" — ${matchCount}/${keywords.length} keyword match`,
+          }
+        }
+      }
+    }
+
+    // 3. Even without codebase, check for global failure patterns with high keyword overlap
+    if (!codebaseId) {
+      const globalFailures = await db`
+        SELECT id, pattern_type, pattern_description, confidence, evidence
+        FROM factory_learnings
+        WHERE absorbed_into IS NULL
+          AND pattern_type IN ('dont_try', 'failure_pattern')
+          AND confidence >= 0.5
+        ORDER BY confidence DESC
+        LIMIT 10
+      `
+
+      for (const learning of globalFailures) {
+        const learningKeywords = [
+          ..._extractKeywords(learning.pattern_description),
+          ...((learning.evidence?.keywords || []).map(k => k.toLowerCase())),
+        ]
+        if (learningKeywords.length === 0) continue
+
+        const matchCount = keywords.filter(kw => learningKeywords.includes(kw)).length
+        if (matchCount >= Math.ceil(keywords.length * 0.5)) {
+          return {
+            suppress: true,
+            reason: `Global ${learning.pattern_type} learning (confidence: ${learning.confidence.toFixed(2)}): "${learning.pattern_description.slice(0, 100)}"`,
+          }
+        }
+      }
+    }
+
+    return { suppress: false }
+  } catch (err) {
+    // Never block dispatch on dedup failure — log and allow
+    logger.debug('Dispatch dedup check failed, allowing dispatch', { error: err.message })
+    return { suppress: false }
+  }
+}
+
 async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification }) {
   const ccService = require('./ccService')
 
@@ -80,6 +204,19 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
     const resetsIn = Math.ceil((rlStatus.resetsAt - new Date()) / 60000)
     logger.warn(`Factory dispatch blocked — CLI rate-limited, resets in ${resetsIn}min`, { triggerSource })
     throw new Error(`CLI rate-limited — resets in ${resetsIn}min`)
+  }
+
+  // ─── Dedup Gate: check recent sessions + failure learnings ────────
+  // This is the SINGLE funnel every dispatch flows through. Without this
+  // check the system spawns the same failing task endlessly because
+  // learnings are recorded but never consulted before dispatch.
+  const dedupResult = await _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy })
+  if (dedupResult.suppress) {
+    logger.info(`Factory dispatch suppressed: ${dedupResult.reason}`, {
+      triggerSource,
+      prompt: prompt?.slice(0, 80),
+    })
+    return null
   }
 
   const [session] = await db`

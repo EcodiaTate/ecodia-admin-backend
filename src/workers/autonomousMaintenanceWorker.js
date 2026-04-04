@@ -736,15 +736,16 @@ async function _hasRecentSimilarSession(decision, cooldownMs) {
 
     const cooldownInterval = `${Math.ceil(cooldownMs / 60000)} minutes`
 
-    // Check for recent scheduled sessions with overlapping keywords
+    // Check for recent sessions from ANY source with overlapping keywords.
+    // Previously only checked 'scheduled' — this let cortex/thymos/kg-triggered
+    // sessions bypass dedup entirely, causing infinite retry loops.
     const recent = await db`
-      SELECT id, initial_prompt, status, started_at
+      SELECT id, initial_prompt, status, started_at, triggered_by
       FROM cc_sessions
-      WHERE triggered_by = 'scheduled'
-        AND started_at > now() - ${cooldownInterval}::interval
-        AND status IN ('complete', 'running', 'queued', 'error')
+      WHERE started_at > now() - ${cooldownInterval}::interval
+        AND status IN ('complete', 'running', 'queued', 'error', 'initializing')
       ORDER BY started_at DESC
-      LIMIT 20
+      LIMIT 30
     `
 
     for (const session of recent) {

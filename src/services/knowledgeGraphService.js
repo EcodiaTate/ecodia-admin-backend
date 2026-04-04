@@ -254,9 +254,28 @@ async function embedStaleNodes(batchSize = 100) {
 
   const limit = parseInt(batchSize, 10) || 100
 
+  // First: mark nameless nodes as un-embeddable so they stop clogging the batch.
+  // Nodes without a name can't produce meaningful embedding text, so they'd be
+  // fetched, skipped, and re-fetched forever — blocking real nodes from processing.
+  try {
+    await runWrite(
+      `MATCH (n) WHERE (n.embedding_stale = true OR n.embedding IS NULL)
+       AND n.name IS NULL
+       SET n.embedding_stale = false, n.embedding_skipped = true
+       RETURN count(n) AS skipped`
+    ).then(res => {
+      const skipped = res[0]?.get('skipped')?.toInt?.() ?? res[0]?.get('skipped') ?? 0
+      if (skipped > 0) logger.info(`KG embedding: marked ${skipped} nameless nodes as un-embeddable`)
+    })
+  } catch (err) {
+    logger.debug('Nameless node cleanup failed', { error: err.message })
+  }
+
   // Single query fetches stale nodes with their relationships in one pass
+  // Only fetches nodes that HAVE a name — nameless ones were cleaned above
   const stale = await runQuery(
-    `MATCH (n) WHERE n.embedding_stale = true OR n.embedding IS NULL
+    `MATCH (n) WHERE (n.embedding_stale = true OR n.embedding IS NULL)
+     AND n.name IS NOT NULL
      WITH n LIMIT ${limit}
      OPTIONAL MATCH (n)-[r]-(neighbor)
      RETURN elementId(n) AS nodeId, n AS node, labels(n) AS labels,
@@ -519,7 +538,8 @@ async function ensureVectorIndex() {
 
 async function countStaleNodes() {
   const [result] = await runQuery(
-    `MATCH (n) WHERE n.embedding_stale = true OR n.embedding IS NULL
+    `MATCH (n) WHERE (n.embedding_stale = true OR n.embedding IS NULL)
+     AND n.name IS NOT NULL
      RETURN count(n) AS cnt`
   )
   return result?.get('cnt')?.toInt?.() ?? result?.get('cnt') ?? 0

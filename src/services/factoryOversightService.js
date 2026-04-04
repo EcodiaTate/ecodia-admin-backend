@@ -81,6 +81,13 @@ async function runPostSessionPipeline(sessionId) {
       stage: 'execution',
       message: 'CC completed but made no file changes',
     })
+    // Still record outcome so learnings are extracted — without this,
+    // tasks that CAN'T produce file changes (e.g. investigating external
+    // systems like Google Apps Script) never create failure learnings,
+    // causing the same task to be dispatched in an infinite loop.
+    await recordOutcome(session, 'no_changes', {
+      message: 'Session completed but made no file changes — task may be un-actionable from this codebase',
+    })
     return
   }
 
