@@ -150,13 +150,19 @@ function start() {
   // Delay first cycle to let the system stabilise after restart
   if (STARTUP_COOLDOWN_MS > 0) {
     logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
-    cycleTimer = setTimeout(() => {
+    cycleTimer = setTimeout(async () => {
       if (!running) return
-      runCycle()
-        .catch(err => {
-          logger.error('AutonomousMaintenanceWorker: first cycle crashed', { error: err.message })
-        })
-        .finally(() => { scheduleCycle() })
+      const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
+      try {
+        await Promise.race([
+          runCycle(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('first cycle hard timeout')), CYCLE_HARD_TIMEOUT)),
+        ])
+      } catch (err) {
+        logger.error('AutonomousMaintenanceWorker: first cycle crashed/timed out', { error: err.message })
+        inCycle = false
+      }
+      scheduleCycle()
     }, STARTUP_COOLDOWN_MS)
   } else {
     scheduleCycle()
@@ -208,12 +214,19 @@ function scheduleCycle() {
   }
 
   cycleTimer = setTimeout(async () => {
+    const CYCLE_HARD_TIMEOUT = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
     try {
-      await runCycle()
+      // Race the cycle against a hard timeout — if runCycle hangs
+      // (DeepSeek unresponsive, DB stuck), we still reschedule.
+      await Promise.race([
+        runCycle(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('cycle hard timeout')), CYCLE_HARD_TIMEOUT)),
+      ])
     } catch (err) {
-      logger.error('AutonomousMaintenanceWorker: cycle crashed', { error: err.message })
+      logger.error('AutonomousMaintenanceWorker: cycle crashed/timed out', { error: err.message })
+      inCycle = false
     }
-    scheduleCycle()  // ALWAYS reschedule, even on crash
+    scheduleCycle()  // ALWAYS reschedule, even on crash/timeout
   }, intervalMs)
 }
 
