@@ -6,19 +6,35 @@
 // To add a new capability domain: create the file, add it here.
 // The registry, actionQueue, cortex, and directAction all pick it up
 // automatically. No other files need to change.
+//
+// Each domain is loaded independently so a failure in one domain
+// (e.g. a missing dependency) doesn't prevent ALL other domains
+// from registering. The broken domain logs an error and the rest
+// of the system continues.
 
-require('./gmail')
-require('./calendar')
-require('./drive')
-require('./crm')
-require('./social')
-require('./factory')
-require('./finance')
-require('./system')
-require('./context')
+const logger = require('../config/logger')
+
+const domains = [
+  './gmail',
+  './calendar',
+  './drive',
+  './crm',
+  './social',
+  './factory',
+  './finance',
+  './system',
+  './context',
+]
+
+for (const domain of domains) {
+  try {
+    require(domain)
+  } catch (err) {
+    logger.error(`CapabilityBootstrap: failed to load ${domain}`, { error: err.message, stack: err.stack })
+  }
+}
 
 const registry = require('../services/capabilityRegistry')
-const logger = require('../config/logger')
 
 const total = registry.list().length
 logger.info(`CapabilityRegistry: ${total} capabilities registered across ${

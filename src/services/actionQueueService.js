@@ -607,10 +607,25 @@ async function performAction(item) {
   const registry = require('./capabilityRegistry')
 
   if (!registry.has(capabilityName)) {
-    logger.warn(`ActionQueue: unknown capability "${capabilityName}" (raw: "${rawType}") — available: ${
-      registry.list({ enabledOnly: true }).map(c => c.name).join(', ')
+    const available = registry.list({ enabledOnly: true })
+    logger.warn(`ActionQueue: unknown capability "${capabilityName}" (raw: "${rawType}") — ${available.length} capabilities loaded: ${
+      available.map(c => c.name).join(', ')
     }`)
-    return { message: `Action type "${rawType}" is not registered. The system will learn to handle this.`, unhandled: true }
+    // If registry is empty, capabilities likely failed to load — attempt recovery
+    if (available.length === 0) {
+      try {
+        require('../capabilities/index')
+        if (registry.has(capabilityName)) {
+          logger.info(`ActionQueue: recovered "${capabilityName}" after re-loading capabilities`)
+          // Fall through to execute below
+        }
+      } catch (err) {
+        logger.error('ActionQueue: capability recovery failed', { error: err.message })
+      }
+    }
+    if (!registry.has(capabilityName)) {
+      return { message: `Action type "${rawType}" is not registered. The system will learn to handle this.`, unhandled: true }
+    }
   }
 
   const outcome = await registry.execute(capabilityName, params, { source: 'action_queue', item })
