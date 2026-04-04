@@ -22,6 +22,7 @@ let _cooldownMs = null  // lazy-init from env
 // Consecutive empty cycles counter — for adaptive backoff
 // Persisted to DB so restarts don't reset backoff to 0
 let _emptyCycles = 0
+let _cycleCount = 0  // total cycles since start — for periodic introspection
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
 
@@ -565,6 +566,11 @@ async function readSystemState() {
       ORDER BY confidence DESC
       LIMIT 15
     `.catch(() => []).then(rows => { state.suppressedPatterns = rows }),
+
+    // ─── Selfhood: Goals, Self-Model, Introspection ──────────────────
+    (async () => { try { const gs = require('../services/goalService'); state.goalBrief = await gs.buildGoalBrief(); state.activeGoals = await gs.getActiveGoals() } catch { state.goalBrief = null; state.activeGoals = [] } })(),
+    (async () => { try { const sm = require('../services/selfModelService'); state.selfAssessmentBrief = await sm.buildSelfAssessmentBrief() } catch { state.selfAssessmentBrief = null } })(),
+    (async () => { try { const is = require('../services/introspectionService'); state.introspectionBrief = await is.buildIntrospectionBrief() } catch { state.introspectionBrief = null } })(),
 
     // Count how many investigation sessions ran in the last 7 days.
     // Done in JS instead of SQL to avoid LATERAL unnest issues with the query driver.
