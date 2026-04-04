@@ -634,10 +634,19 @@ async function getEmbedding(text) {
 async function getBatchEmbeddings(texts) {
   if (!env.OPENAI_API_KEY) return texts.map(() => null)
 
+  // Sanitise inputs — OpenAI returns 400 if any text is empty, null, or too long.
+  // text-embedding-3-small has an 8191 token limit (~30k chars conservatively).
+  // One bad entry kills the entire batch, so truncate and filter here.
+  const MAX_CHARS = 8000
+  const sanitised = texts.map(t => {
+    if (!t || typeof t !== 'string') return '[empty]'
+    return t.length > MAX_CHARS ? t.slice(0, MAX_CHARS) : t
+  })
+
   try {
     const response = await axios.post(
       'https://api.openai.com/v1/embeddings',
-      { model: 'text-embedding-3-small', input: texts },
+      { model: 'text-embedding-3-small', input: sanitised },
       { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
     )
     return response.data.data.map(d => {
@@ -648,8 +657,24 @@ async function getBatchEmbeddings(texts) {
       return d.embedding
     })
   } catch (err) {
-    logger.warn('Batch embedding failed', { error: err.message })
-    return texts.map(() => null)
+    // If batch fails, fall back to individual embedding so one bad text doesn't kill 99 good ones
+    logger.warn('Batch embedding failed, falling back to individual', { error: err.message })
+    const results = []
+    for (const text of sanitised) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/embeddings',
+          { model: 'text-embedding-3-small', input: text },
+          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        )
+        const emb = response.data.data[0].embedding
+        results.push(Array.isArray(emb) && emb.length === EXPECTED_EMBEDDING_DIMS ? emb : null)
+      } catch (individualErr) {
+        logger.debug('Individual embedding failed', { error: individualErr.message, textPreview: text.slice(0, 80) })
+        results.push(null)
+      }
+    }
+    return results
   }
 }
 
