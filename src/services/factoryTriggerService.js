@@ -245,7 +245,7 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
   }
 }
 
-async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification }) {
+async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification, streamSource }) {
   const ccService = require('./ccService')
 
   // Reject scheduled/automated dispatches when CLI is rate-limited
@@ -273,12 +273,12 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
     INSERT INTO cc_sessions (
       codebase_id, initial_prompt, triggered_by, trigger_source,
       trigger_ref_id, project_id, client_id, pipeline_stage, working_dir,
-      self_modification
+      self_modification, stream_source
     ) VALUES (
       ${codebaseId || null}, ${prompt}, ${triggeredBy || 'manual'},
       ${triggerSource || 'manual'}, ${triggerRefId || null},
       ${projectId || null}, ${clientId || null}, 'queued', ${workingDir || null},
-      ${!!selfModification}
+      ${!!selfModification}, ${streamSource || null}
     )
     RETURNING *
   `
@@ -427,11 +427,16 @@ async function dispatchFromThymos(incident) {
 // ─── Trigger: Scheduled Maintenance ─────────────────────────────────
 
 async function dispatchFromSchedule(config) {
+  const prompt = config.streamSource
+    ? `[${config.streamSource} Stream] ${config.prompt || `Scheduled maintenance: ${config.task || 'dependency audit'}`}`
+    : (config.prompt || `Scheduled maintenance: ${config.task || 'dependency audit'}`)
+
   return createAndStartSession({
     codebaseId: config.codebaseId,
-    prompt: config.prompt || `Scheduled maintenance: ${config.task || 'dependency audit'}`,
+    prompt,
     triggeredBy: 'scheduled',
     triggerSource: 'scheduled',
+    streamSource: config.streamSource,
   })
 }
 

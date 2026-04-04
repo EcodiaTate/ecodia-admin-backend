@@ -439,9 +439,10 @@ async function runCycle() {
             ? (state.codebases.find(cb => cb.name?.toLowerCase().includes(reflectionAction.codebaseHint.toLowerCase())))?.id
             : null
           await triggers.dispatchFromSchedule({
-            prompt: `[Reflection Stream] ${reflectionAction.intent}`,
+            prompt: reflectionAction.intent,
             codebaseId,
             urgency: reflectionAction.urgency || 'low',
+            streamSource: 'reflection',
           })
           console.log(JSON.stringify({
             level: 'info',
@@ -650,6 +651,11 @@ async function readSystemState() {
       ORDER BY occurrences DESC
       LIMIT 10
     `.catch(() => []).then(rows => { state.appErrors = rows }),
+
+    // Per-stream session stats (48h) — track which cognitive streams produce results
+    db`SELECT stream_source, count(*)::int AS cnt, count(*) FILTER (WHERE status = 'complete')::int AS complete
+       FROM cc_sessions WHERE started_at > now() - interval '48 hours' AND stream_source IS NOT NULL
+       GROUP BY stream_source`.catch(() => []).then(rows => { state.streamStats = rows }),
 
     // Factory learnings health — the AI needs to know when consolidation is needed
     db`
@@ -1028,6 +1034,7 @@ async function actOnDecision(decision, state) {
       await triggers.dispatchFromSchedule({
         codebaseId,
         prompt: `${urgencyPrefix}${decision.intent}${contextSuffix}`,
+        streamSource: decision.stream || undefined,
       })
     }
 
@@ -1052,6 +1059,11 @@ function buildSystemBrief(state) {
     const successRate = h.total > 0 ? Math.round((h.complete / h.total) * 100) : 'N/A'
     lines.push(`Factory (48h): ${h.total} sessions, ${successRate}% success, avg confidence ${h.avg_confidence ?? 'N/A'}`)
     lines.push(`Last session: ${h.last_session ? new Date(h.last_session).toISOString() : 'never'}`)
+  }
+
+  if (state.streamStats?.length > 0) {
+    lines.push('\nPer-stream activity (48h):')
+    state.streamStats.forEach(s => lines.push(`  ${s.stream_source}: ${s.cnt} sessions, ${s.complete} complete`))
   }
 
   if (state.errorPatterns?.length > 0) {
