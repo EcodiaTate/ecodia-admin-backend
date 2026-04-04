@@ -20,9 +20,55 @@ const _recentDispatches = new Map()
 let _cooldownMs = null  // lazy-init from env
 
 // Consecutive empty cycles counter — for adaptive backoff
+// Persisted to DB so restarts don't reset backoff to 0
 let _emptyCycles = 0
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
+
+// ─── Restart Resilience ──────────────────────────────────────────────
+// The organism restarts constantly (self-mod deploys, PM2 restarts).
+// It must pick up where it left off. These functions persist volatile
+// state to the DB so the mind doesn't lose context across restarts.
+
+async function _persistCycleState() {
+  try {
+    await db`
+      INSERT INTO worker_heartbeats (worker_name, status, error_msg, last_run_at)
+      VALUES ('maintenance_state', 'active', ${JSON.stringify({
+        emptyCycles: _emptyCycles,
+        recentDispatches: Object.fromEntries(_recentDispatches),
+      })}, now())
+      ON CONFLICT (worker_name) DO UPDATE
+      SET status = 'active',
+          error_msg = EXCLUDED.error_msg,
+          last_run_at = now()
+    `
+  } catch {}
+}
+
+async function _restoreCycleState() {
+  try {
+    const [row] = await db`
+      SELECT error_msg FROM worker_heartbeats
+      WHERE worker_name = 'maintenance_state'
+    `
+    if (row?.error_msg) {
+      const state = JSON.parse(row.error_msg)
+      if (typeof state.emptyCycles === 'number') {
+        _emptyCycles = state.emptyCycles
+        logger.info(`Restored maintenance state: emptyCycles=${_emptyCycles}`)
+      }
+      if (state.recentDispatches) {
+        for (const [key, ts] of Object.entries(state.recentDispatches)) {
+          if (Date.now() - ts < 7200000) _recentDispatches.set(key, ts) // only restore if <2h old
+        }
+        if (_recentDispatches.size > 0) {
+          logger.info(`Restored ${_recentDispatches.size} dispatch cooldowns from DB`)
+        }
+      }
+    }
+  } catch {}
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // AUTONOMOUS MAINTENANCE WORKER
@@ -97,6 +143,9 @@ function start() {
   if (running) return
   running = true
   logger.info('AutonomousMaintenanceWorker: started')
+
+  // Restore volatile state from DB — picks up where we left off after restart
+  _restoreCycleState().catch(() => {})
 
   // Delay first cycle to let the system stabilise after restart
   if (STARTUP_COOLDOWN_MS > 0) {
@@ -280,6 +329,7 @@ async function runCycle() {
     try { outcomeCount = await verifyOutcomes() } catch {}
 
     await recordHeartbeat('autonomous_maintenance', 'active')
+    _persistCycleState().catch(() => {})  // survive restarts
     const cycleSummary = `AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, ${outcomeCount} outcomes verified, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`
     logger.info(cycleSummary)
     // Also console.log — winston transport may not flush in all PM2 restart scenarios
