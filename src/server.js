@@ -5,6 +5,15 @@ const { initWS } = require('./websocket/wsManager')
 const db = require('./config/db')
 const logger = require('./config/logger')
 
+// ── Boot: Capability Registry ────────────────────────────────────────
+// Must load BEFORE server.listen() so that incoming requests never hit
+// an empty registry during the boot window.
+try {
+  require('./capabilities/index')
+} catch (err) {
+  logger.error('Capability registry failed to boot — actions will not work', { error: err.message })
+}
+
 const server = createServer(app)
 initWS(app, server)
 
@@ -169,14 +178,6 @@ server.listen(env.PORT, async () => {
     )
   }, 5 * 60 * 1000) // every 5 minutes
   orphanCleanupTimer.unref()
-
-  // ── Boot: Capability Registry ────────────────────────────────────
-  // Must load before any worker that uses execute() or performAction().
-  try {
-    require('./capabilities/index')
-  } catch (err) {
-    logger.error('Capability registry failed to boot — actions will not work', { error: err.message })
-  }
 
   // ── Boot: Workers ─────────────────────────────────────────────────
   // Workers that have their own PM2 process in ecosystem.config.js are
