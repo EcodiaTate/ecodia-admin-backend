@@ -936,6 +936,15 @@ async function startSession(session) {
       }
     }
 
+    // Log rapid-death sessions for diagnostics — process died before producing any output
+    const sessionDurationMs = Date.now() - sessionData.startedAt
+    if (!success && !streamResult && stderrLines.length === 0 && sessionDurationMs < 30_000) {
+      logger.warn(`CC session ${session.id} rapid death: ${sessionDurationMs}ms, zero output`, {
+        code, signal: signal || null, errorMessage,
+        triggerSource: session.trigger_source,
+      })
+    }
+
     // Detect rate limiting and record for backoff
     if (rateLimitEvent?.rate_limit_info?.status === 'rejected') {
       const resetsAt = rateLimitEvent.rate_limit_info.resetsAt
@@ -1220,7 +1229,7 @@ async function resumeSession(sessionId, message) {
 
   // Close handler
   let _closeHandled = false
-  proc.on('close', async (code) => {
+  proc.on('close', async (code, signal) => {
     if (_closeHandled) return
     _closeHandled = true
 
@@ -1240,13 +1249,39 @@ async function resumeSession(sessionId, message) {
       return
     }
 
-    const success = code === 0 && !streamResult?.is_error
+    // Treat stdin-only warnings as non-errors (same logic as startSession)
+    const isStdinWarningOnly = streamResult?.is_error &&
+      streamResult?.result?.includes('no stdin data received') &&
+      !streamResult?.result?.replace(/.*no stdin data received[^\n]*/, '').trim()
+    const success = code === 0 && (!streamResult?.is_error || isStdinWarningOnly)
     const status = success ? 'complete' : 'error'
     let errorMessage = null
     if (!success) {
-      if (streamResult?.is_error && streamResult?.result) errorMessage = streamResult.result
-      else if (stderrLines.length > 0) errorMessage = stderrLines.slice(-5).join('\n')
-      else errorMessage = `Exit code ${code}`
+      if (streamResult?.is_error && streamResult?.result &&
+          !streamResult.result.includes('no stdin data received')) {
+        errorMessage = streamResult.result
+      } else if (stderrLines.length > 0) {
+        const meaningfulStderr = stderrLines.filter(l =>
+          l.trim() && !l.includes('no stdin data received')
+        )
+        if (meaningfulStderr.length > 0) {
+          errorMessage = meaningfulStderr.slice(-5).join('\n')
+        }
+      }
+      // Classify by exit code/signal when no meaningful error extracted
+      if (!errorMessage) {
+        if (code === null && signal === 'SIGKILL') {
+          errorMessage = `Process killed by SIGKILL (exit code null) — OOM killer or force-kill by PM2/system`
+        } else if (code === null && signal === 'SIGTERM') {
+          errorMessage = `Process killed by SIGTERM (exit code null) — PM2 restart, deployment, or graceful shutdown`
+        } else if (code === null && signal) {
+          errorMessage = `Process killed by ${signal} (exit code null)`
+        } else if (code === null) {
+          errorMessage = `Process exited abnormally (exit code null, no signal) — likely parent process killed during PM2 restart or OOM`
+        } else {
+          errorMessage = `Exit code ${code}`
+        }
+      }
     }
 
     await updateSessionStatus(sessionId, status, { error_message: errorMessage }).catch(() => {})
@@ -1254,7 +1289,7 @@ async function resumeSession(sessionId, message) {
       await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
     }
     broadcastToSession(sessionId, 'cc:status', { status, code, resumed: true })
-    logger.info(`CC resumed session ${sessionId} completed`, { code, status })
+    logger.info(`CC resumed session ${sessionId} completed`, { code, status, signal: signal || null })
   })
 
   proc.on('error', async (err) => {
