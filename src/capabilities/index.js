@@ -25,6 +25,7 @@ const domains = [
   './system',
   './selfhood',
   './context',
+  './growth',
 ]
 
 for (const domain of domains) {

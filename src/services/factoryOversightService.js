@@ -1114,17 +1114,22 @@ try {
 async function consolidateLearnings() {
   const stats = { embedded: 0, merged: 0, pruned: 0 }
 
-  // Step 1: Embed learnings that lack embeddings
+  // Step 1: Embed all learnings that lack embeddings (in batches)
   if (env.OPENAI_API_KEY) {
-    try {
-      const unembedded = await db`
-        SELECT id, pattern_description, pattern_type
-        FROM factory_learnings
-        WHERE embedding IS NULL AND absorbed_into IS NULL
-        ORDER BY created_at DESC LIMIT 20
-      `
+    const batchSize = parseInt(env.FACTORY_LEARNING_EMBED_BATCH_SIZE || '50', 10)
+    let hasMore = true
 
-      if (unembedded.length > 0) {
+    while (hasMore) {
+      try {
+        const unembedded = await db`
+          SELECT id, pattern_description, pattern_type
+          FROM factory_learnings
+          WHERE embedding IS NULL AND absorbed_into IS NULL
+          ORDER BY created_at DESC LIMIT ${batchSize}
+        `
+
+        if (unembedded.length === 0) { hasMore = false; break }
+
         const axios = require('axios')
         const texts = unembedded.map(l => `[${l.pattern_type}] ${l.pattern_description.slice(0, 2000)}`)
         const embResponse = await axios.post(
@@ -1132,7 +1137,6 @@ async function consolidateLearnings() {
           { model: 'text-embedding-3-small', input: texts },
           { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
         )
-        // OpenAI may return embeddings out of order — index by the `index` field
         const embeddingsByIndex = new Map(embResponse.data.data.map(d => [d.index, d.embedding]))
 
         for (let i = 0; i < unembedded.length; i++) {
@@ -1143,9 +1147,12 @@ async function consolidateLearnings() {
             stats.embedded++
           }
         }
+
+        hasMore = unembedded.length === batchSize
+      } catch (err) {
+        logger.debug('Learning embedding batch failed', { error: err.message })
+        hasMore = false
       }
-    } catch (err) {
-      logger.debug('Learning embedding batch failed', { error: err.message })
     }
   }
 
@@ -1230,11 +1237,12 @@ async function consolidateLearnings() {
     logger.debug('Learning merge pass failed', { error: err.message })
   }
 
-  // Step 3: Hard prune — delete absorbed learnings older than 30 days
+  // Step 3: Hard prune — delete absorbed learnings past the retention window
   try {
+    const pruneDays = parseInt(env.FACTORY_LEARNING_PRUNE_AFTER_DAYS || '30', 10)
     const pruned = await db`
       DELETE FROM factory_learnings
-      WHERE absorbed_into IS NOT NULL AND updated_at < now() - interval '30 days'
+      WHERE absorbed_into IS NOT NULL AND updated_at < now() - make_interval(days => ${pruneDays})
     `
     stats.pruned = pruned.count || 0
   } catch (err) {
