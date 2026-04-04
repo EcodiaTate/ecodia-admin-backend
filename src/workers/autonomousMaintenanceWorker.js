@@ -258,6 +258,14 @@ async function runCycle() {
     if (timedOut) return
     logger.info('AutonomousMaintenanceWorker: system state read OK')
 
+    // Log what the organism sees — the full system brief
+    const brief = buildSystemBrief(state)
+    console.log(JSON.stringify({
+      level: 'info',
+      message: `SystemBrief:\n${brief}`,
+      timestamp: new Date().toISOString(),
+    }))
+
     // 2. Ask the mind what this system needs right now
     logger.info('AutonomousMaintenanceWorker: calling DeepSeek...')
     const allDecisions = await thinkAboutMaintenance(state)
@@ -314,14 +322,15 @@ async function runCycle() {
       decisions.push(d)
     }
 
-    // 5. Act on each decision
-    let actioned = 0
-    for (const decision of decisions) {
-      if (await actOnDecision(decision, state)) {
-        actioned++
-        _recentDispatches.set(_normaliseDecisionKey(decision), now)
-      }
-    }
+    // 5. Act on decisions — parallel dispatch for speed
+    const results = await Promise.allSettled(
+      decisions.map(async decision => {
+        const ok = await actOnDecision(decision, state)
+        if (ok) _recentDispatches.set(_normaliseDecisionKey(decision), now)
+        return ok
+      })
+    )
+    const actioned = results.filter(r => r.status === 'fulfilled' && r.value).length
 
     // Track empty cycles for adaptive backoff
     if (decisions.length === 0) {
