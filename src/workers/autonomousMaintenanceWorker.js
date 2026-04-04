@@ -164,12 +164,28 @@ async function runCycle() {
   inCycle = true
   const cycleStart = Date.now()
 
+  // Hard timeout — if the cycle hangs (DeepSeek unresponsive, DB query stuck),
+  // kill it after 3 minutes so the worker doesn't go silent forever.
+  const CYCLE_TIMEOUT_MS = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '180000')
+  let timedOut = false
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true
+    logger.error('AutonomousMaintenanceWorker: cycle TIMED OUT after 3min — force-ending')
+    inCycle = false
+  }, CYCLE_TIMEOUT_MS)
+
   try {
     // 1. Build a complete picture of system state
+    logger.info('AutonomousMaintenanceWorker: reading system state...')
     const state = await readSystemState()
+    if (timedOut) return
+    logger.info('AutonomousMaintenanceWorker: system state read OK')
 
     // 2. Ask the mind what this system needs right now
+    logger.info('AutonomousMaintenanceWorker: calling DeepSeek...')
     const allDecisions = await thinkAboutMaintenance(state)
+    if (timedOut) return
+    logger.info(`AutonomousMaintenanceWorker: mind returned ${allDecisions.length} decision(s)`)
 
     // 3. Apply decision cap — only if explicitly configured (0 = unlimited)
     const capped = MAX_DECISIONS_PER_CYCLE > 0 ? allDecisions.slice(0, MAX_DECISIONS_PER_CYCLE) : allDecisions
@@ -249,6 +265,7 @@ async function runCycle() {
     logger.error('AutonomousMaintenanceWorker: cycle failed', { error: err.message })
     await recordHeartbeat('autonomous_maintenance', 'error', err.message)
   } finally {
+    clearTimeout(timeoutHandle)
     inCycle = false
   }
 }
