@@ -870,6 +870,12 @@ async function startSession(session) {
     if (_closeHandled) return
     _closeHandled = true
 
+    // Immediately mark as 'completing' BEFORE any async work — prevents the
+    // orphan-cleanup from falsely marking this session as orphaned during the
+    // async window (readline drain, error extraction, oversight pipeline).
+    // This is fire-and-forget: if it fails, the worst case is a false orphan.
+    db`UPDATE cc_sessions SET status = 'completing' WHERE id = ${session.id} AND status IN ('running', 'initializing')`.catch(() => {})
+
     // Timeout the readline drain — if readline hangs, don't block forever
     const RL_DRAIN_TIMEOUT = 5000
     await Promise.race([
@@ -954,7 +960,18 @@ async function startSession(session) {
         await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
       }
     } catch (dbErr) {
-      logger.error(`Failed to update session ${session.id} status in DB`, { error: dbErr.message, status })
+      logger.error(`Failed to update session ${session.id} status in DB — retrying`, { error: dbErr.message, status })
+      // Retry once after a short delay — transient DB failures during close are
+      // the primary cause of false orphans (status stays 'running'/'completing')
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        await updateSessionStatus(session.id, status, { error_message: errorMessage })
+        if (!success) {
+          await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
+        }
+      } catch (retryErr) {
+        logger.error(`Retry also failed for session ${session.id} status update`, { error: retryErr.message })
+      }
     }
 
     broadcastToSession(session.id, 'cc:status', { status, code })
@@ -1033,6 +1050,10 @@ async function startSession(session) {
   proc.on('error', async (err) => {
     if (_closeHandled) return  // close handler already ran
     _closeHandled = true
+
+    // Mark completing immediately to prevent false orphan detection
+    db`UPDATE cc_sessions SET status = 'completing' WHERE id = ${session.id} AND status IN ('running', 'initializing')`.catch(() => {})
+
     rl.close()
     stderrRl.close()
     clearTimeout(sessionData.timeout)
@@ -1202,6 +1223,10 @@ async function resumeSession(sessionId, message) {
   proc.on('close', async (code) => {
     if (_closeHandled) return
     _closeHandled = true
+
+    // Mark completing immediately to prevent false orphan detection
+    db`UPDATE cc_sessions SET status = 'completing' WHERE id = ${sessionId} AND status IN ('running', 'initializing')`.catch(() => {})
+
     await Promise.race([
       Promise.all([rlClosed, stderrRlClosed]),
       new Promise(resolve => setTimeout(resolve, 5000)),

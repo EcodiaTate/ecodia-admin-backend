@@ -34,6 +34,7 @@ async function cleanupOrphanedSessions() {
   // If they have a cc_cli_session_id, mark as 'paused' (resumable via --resume).
   // Only truly orphan sessions that have no CLI session ID (old sessions or
   // sessions that died before the init message was received).
+  // 'completing' means the close handler is actively processing — don't touch those
   const resumable = await db`
     UPDATE cc_sessions
     SET status = 'paused',
@@ -69,6 +70,27 @@ async function cleanupOrphanedSessions() {
   if (orphans.length > 0) {
     logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (no CLI session ID — not resumable)`, {
       ids: orphans.map(r => r.id),
+    })
+  }
+
+  // Sessions stuck in 'completing' for >10 minutes — the close handler crashed or
+  // the process was killed mid-close. These need cleanup too, but with a longer
+  // window since 'completing' is a legitimate transitional state.
+  const stuckCompleting = await db`
+    UPDATE cc_sessions
+    SET status = 'error',
+        error_message = 'Session stuck in completing state — close handler did not finish',
+        completed_at = now()
+    WHERE status = 'completing'
+      AND (
+        (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '10 minutes')
+        OR (last_heartbeat_at IS NULL AND started_at < now() - interval '15 minutes')
+      )
+    RETURNING id, started_at
+  `
+  if (stuckCompleting.length > 0) {
+    logger.warn(`Cleaned up ${stuckCompleting.length} session(s) stuck in completing state`, {
+      ids: stuckCompleting.map(r => r.id),
     })
   }
 }
