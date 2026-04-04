@@ -72,12 +72,13 @@ CREATE TABLE IF NOT EXISTS organism_self_model (
   -- Timestamps
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- Unique constraint: one active belief per aspect+key (latest version wins)
-  UNIQUE (aspect, key) WHERE supersedes IS NULL
+  -- Versioned: latest version per aspect+key is the one with supersedes IS NULL
+  -- Partial unique index created below (can't use WHERE in table constraints)
 );
 
 CREATE INDEX IF NOT EXISTS idx_self_model_aspect ON organism_self_model(aspect);
 CREATE INDEX IF NOT EXISTS idx_self_model_key ON organism_self_model(key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_self_model_active_unique ON organism_self_model(aspect, key) WHERE supersedes IS NULL;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- INTROSPECTION LOGS — cognitive health, decision quality, meta-learning
