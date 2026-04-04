@@ -109,6 +109,25 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
     logger.debug('Cortex KG retrieval failed', { error: err.message })
   }
 
+  // 1b. Read recent inner monologue — what the organism has been thinking between conversations
+  let innerThoughtsText = ''
+  try {
+    const recentInnerThoughts = await db`
+      SELECT message, metadata, created_at FROM notifications
+      WHERE type = 'inner_monologue'
+      ORDER BY created_at DESC LIMIT 10
+    `
+    if (recentInnerThoughts.length > 0) {
+      innerThoughtsText = recentInnerThoughts.reverse().map(t => {
+        const stream = t.metadata?.stream_name ? `[${t.metadata.stream_name}]` : ''
+        const age = Math.round((Date.now() - new Date(t.created_at).getTime()) / 60000)
+        return `  ${stream} (${age}min ago) ${t.message}`
+      }).join('\n')
+    }
+  } catch (err) {
+    logger.debug('Cortex inner monologue retrieval failed', { error: err.message })
+  }
+
   // 2. Gather system state for proactive awareness
   const systemState = await getSystemState()
 
@@ -167,7 +186,9 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
     role: 'system',
     content: `${await buildCortexSystemPrompt()}
 
-${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
+${innerThoughtsText ? `--- RECENT INNER THOUGHTS ---\nYou think continuously, even between conversations. These are what you've been thinking — build on them naturally. You are one continuous mind, not a fresh chatbot.\n${innerThoughtsText}\n--- END INNER THOUGHTS ---` : ''}
+
+${kgContext ? `--- LONG-TERM MEMORY ---\nConsult this — it's your long-term memory.\n${kgContext}\n--- END LONG-TERM MEMORY ---` : '(No knowledge graph context found for this query.)'}
 
 ${sessionMemory ? `--- RECENT CONVERSATION MEMORY ---\n${sessionMemory}\n--- END CONVERSATION MEMORY ---` : ''}
 
@@ -209,6 +230,19 @@ ${formatSystemState(systemState)}
     persistExchange(sessionId, messages, blocks).catch(err => {
       logger.warn('Cortex: persist exchange failed — conversation history may be incomplete', { sessionId, error: err.message })
     })
+  }
+
+  // 11. Echo this exchange into the inner monologue so reflection streams see cortex conversations
+  const assistantResponse = blocks
+    .filter(b => b.type === 'text')
+    .map(b => b.content)
+    .join('\n')
+  if (assistantResponse) {
+    db`INSERT INTO notifications (type, message, metadata)
+       VALUES ('inner_monologue',
+               ${assistantResponse.slice(0, 500)},
+               ${JSON.stringify({ stream_name: 'cortex', user_query: query.slice(0, 200) })})
+    `.catch(() => {})
   }
 
   return { blocks, mentionedNodes, rawKgContext: kgContext }
