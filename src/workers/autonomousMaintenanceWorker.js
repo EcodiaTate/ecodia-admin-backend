@@ -352,6 +352,14 @@ async function runCycle() {
     let outcomeCount = 0
     try { outcomeCount = await verifyOutcomes() } catch {}
 
+    // 8. Periodic introspection + first-boot self-model seeding
+    const _introInterval = parseInt(env.INTROSPECTION_CYCLE_INTERVAL || '10')
+    if (_introInterval > 0 && _cycleCount % _introInterval === 0) {
+      try { const is = require('../services/introspectionService'); const r = await is.runFullIntrospection(); logger.info(`Introspection: ${r.overallAssessment} — ${r.concerns.length} concerns, ${r.selfModelUpdates.length} self-model updates`) } catch (err) { logger.debug('Introspection cycle failed', { error: err.message }) }
+    }
+    if (_cycleCount === 0) { try { const sm = require('../services/selfModelService'); const seeded = await sm.seedIfEmpty(); if (seeded) logger.info('SelfModel: first-boot seed complete') } catch {} }
+    _cycleCount++
+
     await recordHeartbeat('autonomous_maintenance', 'active')
     _persistCycleState().catch(() => {})  // survive restarts
     const cycleSummary = `AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, ${outcomeCount} outcomes verified, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`
@@ -677,7 +685,10 @@ EXPERIMENTS:
 - Can you profile performance and find bottlenecks nobody asked about?
 - Can you improve your own oversight pipeline to be smarter about what to deploy?
 
-BUDGET: 1-2 decisions maximum. Exploration is a luxury. Quality over quantity.
+GOAL MANAGEMENT: You have a persistent goal system. Create/advance/abandon goals.
+${(() => { try { return require('../services/goalService').buildGoalFormationContext(state.activeGoals || []) } catch { return '' } })()}
+
+BUDGET: 1-3 decisions maximum. Exploration is a luxury. Quality over quantity.
 Returning [] is perfectly valid if nothing seems worth the investment right now.
 
 Respond as a JSON array. Each decision:
@@ -686,8 +697,11 @@ Respond as a JSON array. Each decision:
   "reason": "what opportunity you see",
   "codebaseHint": "which codebase to target",
   "urgency": "low",
-  "type": "exploration | self_improvement | experiment | organism_evolution"
+  "type": "exploration | self_improvement | experiment | organism_evolution | goal_pursuit",
+  "goalId": null,
+  "newGoal": null
 }
+goalId: integer ID of a goal this advances. newGoal: {"title":"...","goalType":"...","successCriteria":"..."} to create one.
 
 Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}. This is an EXPLORATION cycle — think big, not reactive.`
   } else {
@@ -848,6 +862,10 @@ async function actOnDecision(decision, state) {
 
     logger.info(`AutonomousMaintenanceWorker: acting — "${decision.intent.slice(0, 80)}..." [${decision.type}, ${decision.urgency}]`)
 
+    // ─── Goal system integration ─────────────────────────────────────
+    if (decision.newGoal) { try { const gs = require('../services/goalService'); await gs.createGoal({ title: decision.newGoal.title, description: decision.newGoal.description, goalType: decision.newGoal.goalType || 'growth', successCriteria: decision.newGoal.successCriteria, origin: 'maintenance' }) } catch (err) { logger.debug('Goal creation failed', { error: err.message }) } }
+    if (decision.goalId) { try { const gs = require('../services/goalService'); await gs.recordAttempt(decision.goalId, { action: decision.intent?.slice(0, 200), outcome: 'dispatched' }) } catch (err) { logger.debug('Goal attempt recording failed', { error: err.message }) } }
+
     // Embed urgency and context into the prompt — dispatchFromSchedule only passes prompt through
     const urgencyPrefix = decision.urgency === 'immediate' ? '[URGENT] ' : ''
     const contextSuffix = decision.reason ? `\n\nContext: ${decision.reason}` : ''
@@ -992,6 +1010,12 @@ function buildSystemBrief(state) {
   } else {
     lines.push(`\nOrganism percepts: none received (organism may be quiet or symbridge disconnected)`)
   }
+
+  // ─── Selfhood: goals, self-assessment, introspection ─────────────
+  if (state.goalBrief) lines.push(`\n${state.goalBrief}`)
+  else lines.push(`\nActive goals: NONE — use exploration cycles to set direction.`)
+  if (state.selfAssessmentBrief) lines.push(`\n${state.selfAssessmentBrief}`)
+  if (state.introspectionBrief) lines.push(`\n${state.introspectionBrief}`)
 
   // CRITICAL: Show active dont_try and failure_pattern learnings so the mind
   // knows what NOT to suggest. Without this, it sees errors in the state brief

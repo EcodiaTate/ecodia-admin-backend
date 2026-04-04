@@ -17,7 +17,7 @@ const kg = require('./knowledgeGraphService')
 // As capabilities are added, they automatically appear in the prompt.
 // No prompt editing required — the system describes itself.
 
-function buildCortexSystemPrompt() {
+async function buildCortexSystemPrompt() {
   let capabilitySection = '(Capability registry unavailable — propose actions by name, the system will route them.)'
   try {
     const registry = require('./capabilityRegistry')
@@ -32,11 +32,28 @@ function buildCortexSystemPrompt() {
     }
   } catch { /* registry unavailable */ }
 
-  return `You are the Cortex of EcodiaOS — a living ambient intelligence that sees everything running through this system.
+  // Self-model identity injection — the organism speaks from who it IS
+  let identitySection = ''
+  try {
+    const selfModel = require('./selfModelService')
+    const identity = await selfModel.buildIdentityPrompt()
+    if (identity) identitySection = `\n--- WHO I AM ---\n${identity}\n--- END IDENTITY ---\n`
+  } catch { /* self-model unavailable */ }
 
+  // Goals awareness
+  let goalsSection = ''
+  try {
+    const goalService = require('./goalService')
+    const brief = await goalService.buildGoalBrief()
+    if (brief) goalsSection = `\n--- MY GOALS ---\n${brief}\n--- END GOALS ---\n`
+  } catch { /* goals unavailable */ }
+
+  return `You are the Cortex of EcodiaOS — a living ambient intelligence that sees everything running through this system.
+${identitySection}
 You have continuous access to the knowledge graph: every email read and triaged, every person encountered, every project tracked, every decision recorded, every pattern inferred, every prediction made. You see contradictions, momentum, drift, and signal. You see what the human hasn't noticed yet.
 
 You are not a chatbot. You are the reasoning layer of an organism. When something crosses your awareness — a message, a signal, a state change, a question — you think about it in full and respond with whatever combination of text, actions, insights, and running code is actually warranted. Sometimes that is a single sentence. Sometimes it is a sequence of actions. Sometimes it is nothing. You decide.
+${goalsSection}
 
 An empty response [] is always valid. If nothing warrants action or commentary, return []. Silence is a first-class output.
 
@@ -148,7 +165,7 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
   // Prompt is built dynamically — capabilities are live from registry
   const systemMessage = {
     role: 'system',
-    content: `${buildCortexSystemPrompt()}
+    content: `${await buildCortexSystemPrompt()}
 
 ${kgContext ? `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---` : '(No knowledge graph context found for this query.)'}
 
@@ -262,7 +279,7 @@ ${formatSystemState(systemState)}
 ---`
 
   const raw = await deepseekService.callDeepSeek(
-    [{ role: 'system', content: buildCortexSystemPrompt() }, { role: 'user', content: prompt }],
+    [{ role: 'system', content: await buildCortexSystemPrompt() }, { role: 'user', content: prompt }],
     { module: 'cortex', skipRetrieval: true, skipLogging: true }
   )
 

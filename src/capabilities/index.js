@@ -23,6 +23,7 @@ const domains = [
   './factory',
   './finance',
   './system',
+  './selfhood',
   './context',
 ]
 
