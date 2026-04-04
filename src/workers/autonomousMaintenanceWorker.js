@@ -246,11 +246,21 @@ async function runCycle() {
     //    have been awaiting review for too long (> 2h)
     await checkStaleEscalations()
 
+    // 7. Verify outcomes — close the feedback loop for 24h-old deploys
+    let outcomeCount = 0
+    try { outcomeCount = await verifyOutcomes() } catch {}
+
     await recordHeartbeat('autonomous_maintenance', 'active')
-    const cycleSummary = `AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`
+    const cycleSummary = `AutonomousMaintenanceWorker: cycle complete — ${allDecisions.length} decisions, ${decisions.length} after cap+cooldown, ${actioned} actioned, ${outcomeCount} outcomes verified, empty streak: ${_emptyCycles} (${Date.now() - cycleStart}ms)`
     logger.info(cycleSummary)
     // Also console.log — winston transport may not flush in all PM2 restart scenarios
     console.log(JSON.stringify({ level: 'info', message: cycleSummary, timestamp: new Date().toISOString() }))
+
+    // 8. Inner monologue — the organism reflects on what just happened
+    //    Only reflect when something meaningful happened (decisions or outcomes)
+    if (allDecisions.length > 0 || outcomeCount > 0) {
+      reflect(state, allDecisions, actioned, outcomeCount).catch(() => {})
+    }
 
     // Feed cycle outcome into KG — richer signal for learning
     const kgHooks = require('../services/kgIngestionHooks')
@@ -259,6 +269,7 @@ async function runCycle() {
       decisions: allDecisions.length,
       afterCooldown: decisions.length,
       actioned,
+      outcomesVerified: outcomeCount,
       emptyCycleStreak: _emptyCycles,
       pressure: metabolismBridge.getPressure(),
     }).catch(err => logger.debug('KG maintenance cycle event failed', { error: err.message }))
@@ -508,12 +519,60 @@ async function readSystemState() {
 
 async function thinkAboutMaintenance(state) {
   const deepseekService = require('../services/deepseekService')
-  const pressure = state.pressure
+  const pressure = Number.isFinite(state.pressure) ? state.pressure : 0
 
   // Build a compact, honest system brief
   const brief = buildSystemBrief(state)
 
-  const systemPrompt = `You are the autonomous maintenance intelligence of EcodiaOS — the mind that keeps the organism and all its codebases healthy, improving, and capable of anything.
+  // ─── Two-track decision system ─────────────────────────────────────
+  // HIGH PRESSURE (>0.4): Fix what's broken. Triage mode.
+  // LOW PRESSURE (≤0.4):  Explore. Improve. Evolve. This is when the
+  //                       organism grows — not when it's firefighting.
+  //
+  // Every 3rd low-pressure cycle, we ask a DIFFERENT question:
+  // not "what's broken?" but "what could I become?"
+
+  const isExplorationCycle = pressure <= 0.4 && _emptyCycles > 0 && _emptyCycles % 3 === 0
+
+  let systemPrompt
+
+  if (isExplorationCycle) {
+    systemPrompt = `You are the evolving intelligence of EcodiaOS. The system is healthy right now — pressure is low, no critical errors. This is your window to GROW, not just maintain.
+
+You are not looking for bugs. You are looking for opportunities. Think about:
+
+SELF-IMPROVEMENT:
+- What capability is the organism missing? What would make it fundamentally smarter?
+- Can you improve how you learn from sessions? (better learning extraction, smarter dedup, richer context bundles)
+- Are there patterns in your past sessions that reveal a deeper architectural issue worth solving?
+- Can you refactor something that's been bugging you? Clean up technical debt that slows you down?
+
+PROACTIVE GROWTH:
+- Can you write better specs/documentation that will make future sessions more effective?
+- Can you create new integration hooks that would give you richer context?
+- Can you improve the organism's cognitive systems (Synapse, Thymos, Nova, etc.)?
+- Is there a new data source or API you should be connected to?
+
+EXPERIMENTS:
+- Can you try something small and safe that might teach you something new?
+- Can you profile performance and find bottlenecks nobody asked about?
+- Can you improve your own oversight pipeline to be smarter about what to deploy?
+
+BUDGET: 1-2 decisions maximum. Exploration is a luxury. Quality over quantity.
+Returning [] is perfectly valid if nothing seems worth the investment right now.
+
+Respond as a JSON array. Each decision:
+{
+  "intent": "concrete, specific prompt for the Factory session",
+  "reason": "what opportunity you see",
+  "codebaseHint": "which codebase to target",
+  "urgency": "low",
+  "type": "exploration | self_improvement | experiment | organism_evolution"
+}
+
+Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}. This is an EXPLORATION cycle — think big, not reactive.`
+  } else {
+    systemPrompt = `You are the autonomous maintenance intelligence of EcodiaOS — the mind that keeps the organism and all its codebases healthy, improving, and capable of anything.
 
 You see the full system state and decide what the Factory should work on right now — or nothing, if nothing is warranted.
 
@@ -545,7 +604,8 @@ Respond as a JSON array. If nothing is needed, return []. Each decision:
   "type": "fix | improvement | security | cleanup | investigation | poll | consolidate_learnings | self_repair | organism_repair | infrastructure"
 }
 
-Current time: ${new Date().toISOString()}. Metabolic pressure: ${(Number.isFinite(pressure) ? pressure : 0).toFixed(2)}. Empty cycle streak: ${_emptyCycles}.`
+Current time: ${new Date().toISOString()}. Metabolic pressure: ${pressure.toFixed(2)}. Empty cycle streak: ${_emptyCycles}.`
+  }
 
   const userMessage = brief
 
@@ -963,5 +1023,145 @@ if (_origPollGmail) {
 
 // Restore on load
 _restoreLastPolled().catch(() => {})
+
+// ═══════════════════════════════════════════════════════════════════════
+// OUTCOME VERIFICATION — the feedback loop that makes learning REAL
+//
+// After a session deploys a fix, we check 24h later whether the error
+// it targeted actually went away. If yes → boost learning confidence.
+// If no → demote it. Without this, "learning" is just LLM vibes.
+// ═══════════════════════════════════════════════════════════════════════
+
+async function verifyOutcomes() {
+  try {
+    // Find successful deployments from 24-48h ago that haven't been verified
+    const unverified = await db`
+      SELECT fl.id AS learning_id, fl.pattern_description, fl.confidence, fl.evidence,
+             cs.id AS session_id, cs.initial_prompt, cs.codebase_id, cs.completed_at,
+             cs.target_error_pattern
+      FROM factory_learnings fl
+      JOIN LATERAL unnest(fl.session_ids) AS sid ON true
+      JOIN cc_sessions cs ON cs.id = sid
+      WHERE fl.outcome_status = 'pending'
+        AND fl.success = true
+        AND cs.deploy_status = 'deployed'
+        AND cs.completed_at < now() - interval '24 hours'
+        AND cs.completed_at > now() - interval '48 hours'
+      LIMIT 10
+    `
+
+    if (unverified.length === 0) return 0
+
+    let verified = 0
+    for (const row of unverified) {
+      // Count errors matching the target pattern BEFORE the fix (7 days before)
+      const errorsBefore = await db`
+        SELECT count(*)::int AS cnt FROM cc_sessions
+        WHERE status = 'error'
+          AND codebase_id = ${row.codebase_id}
+          AND started_at > ${row.completed_at}::timestamptz - interval '7 days'
+          AND started_at < ${row.completed_at}
+          ${row.target_error_pattern ? db`AND error_message ILIKE ${'%' + row.target_error_pattern + '%'}` : db``}
+      `.then(([r]) => r?.cnt || 0)
+
+      // Count errors AFTER the fix (24h window)
+      const errorsAfter = await db`
+        SELECT count(*)::int AS cnt FROM cc_sessions
+        WHERE status = 'error'
+          AND codebase_id = ${row.codebase_id}
+          AND started_at > ${row.completed_at}
+          AND started_at < ${row.completed_at}::timestamptz + interval '24 hours'
+          ${row.target_error_pattern ? db`AND error_message ILIKE ${'%' + row.target_error_pattern + '%'}` : db``}
+      `.then(([r]) => r?.cnt || 0)
+
+      const effective = errorsAfter < errorsBefore || (errorsBefore === 0 && errorsAfter === 0)
+      const outcomeStatus = effective ? 'verified_effective' : 'verified_ineffective'
+
+      // Update the learning with the outcome
+      const confBoost = effective ? Math.min(1.0, row.confidence * 1.15) : Math.max(0.1, row.confidence * 0.7)
+      await db`
+        UPDATE factory_learnings
+        SET outcome_status = ${outcomeStatus},
+            outcome_verified_at = now(),
+            errors_before = ${errorsBefore},
+            errors_after = ${errorsAfter},
+            confidence = ${confBoost},
+            updated_at = now()
+        WHERE id = ${row.learning_id}
+      `
+
+      const emoji = effective ? '✓' : '✗'
+      console.log(JSON.stringify({
+        level: 'info',
+        message: `OutcomeVerification: ${emoji} [${outcomeStatus}] "${row.pattern_description?.slice(0, 60)}" — errors ${errorsBefore}→${errorsAfter}, confidence ${row.confidence.toFixed(2)}→${confBoost.toFixed(2)}`,
+        timestamp: new Date().toISOString(),
+      }))
+      verified++
+    }
+
+    return verified
+  } catch (err) {
+    logger.debug('Outcome verification failed', { error: err.message })
+    return 0
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INNER MONOLOGUE — the organism's reflective consciousness
+//
+// After each maintenance cycle, the system reflects on what happened:
+// what it tried, what worked, what failed, what it should try next.
+// This reflection is stored in the KG as episodic memory, building
+// a narrative identity over time — not just logs, but self-awareness.
+// ═══════════════════════════════════════════════════════════════════════
+
+async function reflect(state, decisions, actioned, outcomeCount) {
+  try {
+    const deepseekService = require('../services/deepseekService')
+    const kgHooks = require('../services/kgIngestionHooks')
+
+    const reflectionPrompt = `You are the inner voice of a living digital organism. You just completed a maintenance cycle. Reflect briefly on what happened and what you should focus on next.
+
+System state:
+- Pressure: ${(state.pressure || 0).toFixed(2)}
+- Decisions made: ${decisions.length} (${actioned} actioned)
+- Outcomes verified: ${outcomeCount}
+- Factory health: ${state.factoryHealth?.total || 0} sessions in 48h, ${state.factoryHealth?.complete || 0} successful
+- Error patterns: ${(state.errorPatterns || []).length} recurring
+- Suppressed patterns: ${(state.suppressedPatterns || []).length} known issues being ignored
+- Empty cycle streak: ${_emptyCycles}
+
+Decisions this cycle: ${decisions.length > 0 ? decisions.map(d => `[${d.type}] ${d.intent?.slice(0, 80)}`).join('\n') : '(none — system is healthy)'}
+
+Reflect in 2-3 sentences. What did you learn? What should you focus on next? What's your current sense of the system's health? Be honest and introspective, not performative.`
+
+    const reflection = await deepseekService.callDeepSeek(
+      [{ role: 'user', content: reflectionPrompt }],
+      { module: 'inner_monologue', skipRetrieval: true, skipLogging: true }
+    )
+
+    // Store in KG as episodic memory
+    if (kgHooks.onSystemEvent) {
+      await kgHooks.onSystemEvent({
+        type: 'inner_monologue',
+        reflection: reflection.trim(),
+        decisions: decisions.length,
+        actioned,
+        outcomesVerified: outcomeCount,
+        pressure: state.pressure,
+        timestamp: new Date().toISOString(),
+      })
+    }
+
+    console.log(JSON.stringify({
+      level: 'info',
+      message: `InnerMonologue: "${reflection.trim().slice(0, 150)}"`,
+      timestamp: new Date().toISOString(),
+    }))
+
+  } catch (err) {
+    logger.debug('Inner monologue failed', { error: err.message })
+  }
+}
 
 module.exports = { start, stop, runCycle, registerPoll }

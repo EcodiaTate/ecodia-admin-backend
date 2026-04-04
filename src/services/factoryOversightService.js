@@ -311,6 +311,15 @@ async function runPostSessionPipeline(sessionId) {
         // Step 4: Post-deploy monitoring
         await monitorPostDeploy(session, deployResult)
 
+        // Extract the error pattern this session was targeting (for 24h outcome verification).
+        // Look for common error-describing patterns in the initial prompt.
+        const errorPatternMatch = (session.initial_prompt || '').match(
+          /(?:fix|investigate|resolve|address)\s+(?:the\s+)?['""]?([^'""\n]{10,80}?)(?:\s+error|\s+issue|\s+bug|['""])/i
+        )
+        if (errorPatternMatch) {
+          db`UPDATE cc_sessions SET target_error_pattern = ${errorPatternMatch[1].trim()} WHERE id = ${session.id}`.catch(() => {})
+        }
+
         // Step 5: Outcome learning
         await recordOutcome(session, 'success', { confidence, filesChanged, commitSha: deployResult.commitSha })
 
