@@ -297,6 +297,29 @@ async function checkOrganismHealth() {
       lastResponseMs: responseMs,
       data: res.data,
     }
+
+    // Extract percept-like data from health and emit as cognitive broadcast
+    // so the maintenance worker has organism awareness without relying on
+    // the symbridge Redis consumer (which suffers from stale-consumer races).
+    try {
+      const h = res.data
+      const systems = h.systems || {}
+      const synapse = systems.synapse || {}
+      const thymos = systems.thymos || {}
+      const atune = systems.atune || {}
+      const percept = {
+        percept_type: 'internal:health_poll',
+        salience: 0.4,
+        content: `Organism ${h.instance_name || 'unknown'}: phase ${h.phase || '?'}, ` +
+          `coherence ${synapse.coherence_composite || '?'}, ` +
+          `${thymos.active_incidents || 0} active incidents (${thymos.healing_mode || 'nominal'}), ` +
+          `cycle ${synapse.cycle_count || '?'}, rhythm ${synapse.rhythm_state || '?'}`,
+        source: 'organism',
+      }
+      const eventBus = require('./internalEventBusService')
+      eventBus.emit('organism:cognitive_broadcast', percept)
+      logger.info('Organism health percept emitted', { percept_type: percept.percept_type })
+    } catch (e) { logger.warn('Health percept emit failed', { error: e.message }) }
   } catch (err) {
     organismHealthState.consecutiveFailures++
     organismHealthState.lastCheck = new Date().toISOString()

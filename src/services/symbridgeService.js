@@ -313,6 +313,7 @@ async function routeMessage(message) {
     case 'cognitive_broadcast': {
       // Organism sends a cognitive percept to EcodiaOS
       // Route to internal event bus so services can react to organism's cognitive state
+      logger.info(`Symbridge: processing cognitive_broadcast (${message.payload.percept_type}, salience: ${message.payload.salience})`)
       const eventBus = require('./internalEventBusService')
       eventBus.emit('organism:cognitive_broadcast', {
         percept_type: message.payload.percept_type,
@@ -368,30 +369,66 @@ async function startRedisConsumer() {
 
   // Create consumer group (ignore if exists)
   try {
-    await redis.xgroup('CREATE', stream, consumerGroup, '0', 'MKSTREAM')
+    await redis.xgroup('CREATE', stream, consumerGroup, '$', 'MKSTREAM')
   } catch {
-    // Group may already exist
+    // Group already exists — advance to latest so we don't replay old messages
+    try { await redis.xgroup('SETID', stream, consumerGroup, '$') } catch {}
   }
 
-  logger.info('Symbridge Redis consumer started', { stream, consumerGroup })
+  // Clean stale consumers from previous PM2 restarts
+  try {
+    const consumers = await redis.xinfo('CONSUMERS', stream, consumerGroup)
+    for (let i = 0; i < consumers.length; i += 2) {
+      // xinfo returns flat array: [name, val, name, val, ...] per consumer block
+    }
+    // Simpler: just delete all consumers except ours — they'll be recreated if alive
+    const consumerList = await redis.call('XINFO', 'CONSUMERS', stream, consumerGroup)
+    // Parse consumer names from the nested response
+    if (Array.isArray(consumerList)) {
+      for (const entry of consumerList) {
+        const name = Array.isArray(entry) ? entry[1] : entry?.name
+        if (name && name !== consumerName) {
+          try { await redis.xgroup('DELCONSUMER', stream, consumerGroup, name) } catch {}
+        }
+      }
+    }
+  } catch {}
+
+  logger.info('Symbridge Redis consumer started', { stream, consumerGroup, consumer: consumerName })
+
+  // Dedicated connection for blocking XREADGROUP — ioredis with maxRetriesPerRequest
+  // can hang on BLOCK commands when the main client retries interfere.
+  const Redis = require('ioredis')
+  const blockingRedis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null })
+  blockingRedis.on('error', () => {})
 
   async function poll() {
     try {
-      const messages = await redis.xreadgroup(
+      const messages = await blockingRedis.xreadgroup(
         'GROUP', consumerGroup, consumerName,
-        'COUNT', 10, 'BLOCK', 5000,
+        'COUNT', 10, 'BLOCK', 2000,
         'STREAMS', stream, '>'
       )
 
       if (messages) {
+        logger.info(`Symbridge consumer: received ${messages.length} stream(s)`)
         for (const [, entries] of messages) {
           for (const [id, fields] of entries) {
             try {
-              const data = JSON.parse(fields[1]) // fields = ['data', '...json...']
+              // ioredis returns fields as flat array: ['key1','val1','key2','val2',...]
+              let raw
+              if (Array.isArray(fields)) {
+                // Find 'data' field in alternating key-value pairs
+                const idx = fields.indexOf('data')
+                raw = idx >= 0 ? fields[idx + 1] : fields[1]
+              } else {
+                raw = fields.data || fields
+              }
+              const data = JSON.parse(raw)
               await receiveMessage(data)
               await redis.xack(stream, consumerGroup, id)
             } catch (err) {
-              logger.debug('Failed to process Redis symbridge message', { error: err.message })
+              logger.info('Failed to process Redis symbridge message', { error: err.message, fieldsType: typeof fields, isArray: Array.isArray(fields), sample: JSON.stringify(fields).slice(0, 200) })
             }
           }
         }
