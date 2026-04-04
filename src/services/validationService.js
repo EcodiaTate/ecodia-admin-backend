@@ -66,15 +66,17 @@ function detectProjectType(repoPath) {
   }
 
   if (hasFile('pyproject.toml') || hasFile('setup.py') || hasFile('requirements.txt')) {
+    const depsReady = hasDir('venv') || hasDir('.venv')
     return {
       runtime: 'python',
-      hasTests: hasFile('tests') || hasFile('test'),
-      hasLint: true,
-      hasTypecheck: hasFile('mypy.ini') || hasFile('pyproject.toml'),
+      depsInstalled: depsReady,
+      hasTests: depsReady && (hasFile('tests') || hasFile('test') || hasDir('tests') || hasDir('test')),
+      hasLint: depsReady,
+      hasTypecheck: depsReady && (hasFile('mypy.ini') || hasFile('pyproject.toml')),
       hasPlaywright: false,
-      testCmd: ['python', ['-m', 'pytest', '--tb=short', '-q']],
-      lintCmd: ['ruff', ['check', '.']],
-      typecheckCmd: hasFile('mypy.ini') || hasFile('pyproject.toml') ? ['mypy', ['.']] : null,
+      testCmd: depsReady ? ['python', ['-m', 'pytest', '--tb=short', '-q']] : null,
+      lintCmd: depsReady ? ['ruff', ['check', '.']] : null,
+      typecheckCmd: depsReady && (hasFile('mypy.ini') || hasFile('pyproject.toml')) ? ['mypy', ['.']] : null,
     }
   }
 
@@ -149,7 +151,7 @@ async function validateChanges(sessionId) {
 
   // Confidence score — heuristic baseline, then blend with historical outcomes
   const W = {
-    baselineNoDeps:   parseFloat(env.VALIDATION_BASELINE_NO_DEPS       || '0.55'),
+    baselineNoDeps:   parseFloat(env.VALIDATION_BASELINE_NO_DEPS       || '0.40'),
     testsPass:        parseFloat(env.VALIDATION_WEIGHT_TESTS_PASS       || '0.4'),
     testsNull:        parseFloat(env.VALIDATION_WEIGHT_TESTS_NULL       || '0.2'),
     lintPass:         parseFloat(env.VALIDATION_WEIGHT_LINT_PASS        || '0.2'),

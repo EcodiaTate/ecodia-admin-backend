@@ -264,10 +264,10 @@ async function buildContextBundle(session) {
         const promptVec = embResponse.data.data[0].embedding
         const vecStr = `[${promptVec.join(',')}]`
 
-        const softConfidence = parseFloat(env.CC_LEARNING_CONFIDENCE_SOFT || '0.3')
-        const softLimit = parseInt(env.CC_LEARNING_SOFT_LIMIT || '30')
-        const softReturn = parseInt(env.CC_LEARNING_SOFT_RETURN || '5')
-        const similarityThreshold = parseFloat(env.CC_LEARNING_SIMILARITY_THRESHOLD || '0.35')
+        const softConfidence = parseFloat(env.CC_LEARNING_CONFIDENCE_SOFT || '0.15')
+        const softLimit = parseInt(env.CC_LEARNING_SOFT_LIMIT || '50')
+        const softReturn = parseInt(env.CC_LEARNING_SOFT_RETURN || '12')
+        const similarityThreshold = parseFloat(env.CC_LEARNING_SIMILARITY_THRESHOLD || '0.3')
         const semanticMatches = await db`
           SELECT id, pattern_type, pattern_description, confidence, times_applied, last_applied_at, evidence,
                  1 - (embedding <=> ${vecStr}::vector) AS similarity
@@ -316,7 +316,7 @@ async function buildContextBundle(session) {
         return { ...l, relevanceScore: overlap + (fileOverlap ? 3 : 0) }
       })
 
-      const _softRet = parseInt(env.CC_LEARNING_SOFT_RETURN || '5')
+      const _softRet = parseInt(env.CC_LEARNING_SOFT_RETURN || '12')
       relevantSoft = scoredSoft
         .filter(l => l.relevanceScore > 0)
         .sort((a, b) => b.relevanceScore - a.relevanceScore)

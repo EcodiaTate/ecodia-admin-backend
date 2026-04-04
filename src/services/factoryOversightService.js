@@ -208,7 +208,11 @@ async function runPostSessionPipeline(sessionId) {
     }).catch(() => {})
     // Deferred review: don't inject confidence: 0 which would drag down the blend.
     // Pass null so the blending logic knows to skip the review signal entirely.
-    review = { approved: true, notes: `Review deferred (metabolic pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate})`, confidence: null, deferred: true }
+    // Deferred review: set approved to null (pending), NOT true.
+    // The deploy gate checks `reviewApproved !== false`, so null passes
+    // only if validation confidence alone meets threshold. This prevents
+    // auto-deploying bad code while review is still running.
+    review = { approved: null, notes: `Review deferred (metabolic pressure ${pressure.toFixed(2)} > gate ${reviewPressureGate})`, confidence: null, deferred: true }
   } else {
     review = await reviewChanges(session, filesChanged)
   }
@@ -824,8 +828,17 @@ async function extractLearningPattern(session, outcome, details) {
     let diffSnippet = ''
     if (session.repo_path) {
       try {
-        diffSnippet = execFileSync('git', ['diff', '--stat'], { cwd: session.repo_path, encoding: 'utf-8' }).trim()
-        if (diffSnippet) diffSnippet = `\nDiff stat:\n${diffSnippet.slice(0, 1000)}`
+        // Use actual diff (truncated) not just --stat. The learning needs to see
+        // WHAT changed, not just how many files. This is the difference between
+        // "fixed deploy issue" and "deploy failed due to unclosed DB connection in pool.js"
+        const fullDiff = execFileSync('git', ['diff', '-U3', '--no-color'], { cwd: session.repo_path, encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024 }).trim()
+        if (fullDiff) {
+          diffSnippet = `\nCode diff (truncated):\n${fullDiff.slice(0, 3000)}`
+        } else {
+          // No unstaged diff — try last commit diff (session may have already committed)
+          const commitDiff = execFileSync('git', ['diff', 'HEAD~1', 'HEAD', '-U3', '--no-color'], { cwd: session.repo_path, encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024 }).trim()
+          if (commitDiff) diffSnippet = `\nCode diff (last commit, truncated):\n${commitDiff.slice(0, 3000)}`
+        }
       } catch {}
     }
 
