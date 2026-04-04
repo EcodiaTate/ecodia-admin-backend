@@ -887,6 +887,44 @@ async function getPendingForSender(email, name) {
   `
 }
 
+// ─── Retry failed pending actions ──────────────────────────────────────
+// Actions that hit transient errors (e.g. capability registry not loaded during
+// boot race) go back to 'pending' with an error_message. This function finds
+// them and re-executes, clearing the error on success.
+
+async function retryFailed({ limit = 10 } = {}) {
+  const retryable = await db`
+    SELECT id FROM action_queue
+    WHERE status = 'pending'
+      AND error_message IS NOT NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    ORDER BY
+      CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+      created_at ASC
+    LIMIT ${limit}
+  `
+  if (retryable.length === 0) return { retried: 0, succeeded: 0, failed: 0 }
+
+  let succeeded = 0
+  let failed = 0
+  for (const { id } of retryable) {
+    try {
+      // Clear the error message before retrying so it doesn't loop
+      await db`UPDATE action_queue SET error_message = NULL WHERE id = ${id}`
+      await execute(id)
+      succeeded++
+    } catch (err) {
+      failed++
+      logger.debug(`Action queue retry failed for ${id}`, { error: err.message })
+    }
+  }
+
+  if (succeeded > 0) {
+    logger.info(`Action queue: retried ${retryable.length} failed actions — ${succeeded} succeeded, ${failed} failed`)
+  }
+  return { retried: retryable.length, succeeded, failed }
+}
+
 // purgeExpired — public alias for manual trigger via route
 async function purgeExpired() {
   const expired = await db`
@@ -916,6 +954,7 @@ module.exports = {
   getStats,
   expireStale,
   purgeExpired,
+  retryFailed,
   // Decision intelligence exports
   evaluateSuppression,
   getSenderReputation,

@@ -934,6 +934,7 @@ const pollRegistry = new Map([
   ['poll_vercel',   async () => { if (workspacePollers.pollVercel) { await workspacePollers.pollVercel(); _lastPolled.vercel = Date.now() } }],
   ['poll_meta',     async () => { if (workspacePollers.pollMeta) { await workspacePollers.pollMeta(); _lastPolled.meta = Date.now() } }],
   ['expire_queue',  async () => { if (workspacePollers.expireStaleActions) await workspacePollers.expireStaleActions() }],
+  ['retry_failed_actions', async () => { const aq = require('../services/actionQueueService'); await aq.retryFailed() }],
 ])
 
 /**
@@ -1129,8 +1130,8 @@ function buildSystemBrief(state) {
 
   if (state.actionQueuePressure) {
     const q = state.actionQueuePressure
-    if (q.pending > 10 || q.urgent > 0) {
-      lines.push(`\nAction queue: ${q.pending} pending${q.urgent > 0 ? `, ${q.urgent} urgent` : ''}`)
+    if (q.pending > 10 || q.urgent > 0 || q.pending_with_errors > 0) {
+      lines.push(`\nAction queue: ${q.pending} pending${q.urgent > 0 ? `, ${q.urgent} urgent` : ''}${q.pending_with_errors > 0 ? `, ${q.pending_with_errors} with errors (use type: "poll", intent: "retry_failed_actions")` : ''}`)
     }
   }
 
@@ -1154,7 +1155,7 @@ function buildSystemBrief(state) {
       .map(([k, v]) => `${k}: ${v === null ? 'never polled' : `${v}min ago`}`)
       .join(', ')
     lines.push(`\nIntegration staleness: ${stale}`)
-    lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue)`)
+    lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue, retry_failed_actions)`)
   }
 
   // Your own recent reflections — continuity across cycles.
