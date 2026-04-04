@@ -252,7 +252,7 @@ async function buildContextBundle(session) {
         const axios = require('axios')
         const embResponse = await axios.post(
           'https://api.openai.com/v1/embeddings',
-          { model: 'text-embedding-3-small', input: session.initial_prompt.slice(0, 2000) },
+          { model: 'text-embedding-3-small', input: session.initial_prompt.slice(0, 8000) },
           { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
         )
         const promptVec = embResponse.data.data[0].embedding
@@ -412,7 +412,7 @@ function _selectRelevantSections(content, promptWords, budgetChars) {
 
   // Always include preamble (usually short)
   if (preamble && preamble.text.trim()) {
-    const text = preamble.text.slice(0, 1000)
+    const text = preamble.text.slice(0, 5000)
     parts.push(text)
     used += text.length
   }
@@ -436,7 +436,7 @@ function _selectRelevantSections(content, promptWords, budgetChars) {
       }
     } else if (section.overlap > 0 && used + 2000 <= budgetChars) {
       // Relevant but over budget — include truncated
-      parts.push(section.heading + '\n' + section.text.slice(0, 1500) + '\n...(truncated)')
+      parts.push(section.heading + '\n' + section.text.slice(0, 5000) + '\n...(truncated)')
       used += 1500 + section.heading.length
     } else {
       // Low relevance or no budget — one-line summary
@@ -497,16 +497,16 @@ function assemblePrompt(session, bundle) {
     parts.push('## Recent Factory Activity on This Codebase')
     parts.push('These are previous autonomous sessions — avoid duplicating work. Learn from failures.')
     for (const s of bundle.sessionHistory) {
-      const files = (s.files_changed || []).slice(0, 5).join(', ')
+      const files = (s.files_changed || []).join(', ')
       const conf = s.confidence_score ? `, confidence: ${s.confidence_score}` : ''
       const stage = s.pipeline_stage && s.pipeline_stage !== 'complete' ? `, stage: ${s.pipeline_stage}` : ''
       const deploy = s.deploy_status && s.deploy_status !== 'none' ? `, deploy: ${s.deploy_status}` : ''
       const trigger = s.trigger_source ? `, via: ${s.trigger_source}` : ''
-      parts.push(`- [${s.status}${conf}${stage}${deploy}${trigger}] ${(s.initial_prompt || '').slice(0, 150)}`)
+      parts.push(`- [${s.status}${conf}${stage}${deploy}${trigger}] ${(s.initial_prompt || '').slice(0, 500)}`)
       if (files) parts.push(`  Files: ${files}`)
       // Full error context for failed sessions — this is what future sessions need to learn from
       if (s.error_message && s.status !== 'complete') {
-        parts.push(`  ERROR: ${s.error_message.slice(0, 300)}`)
+        parts.push(`  ERROR: ${s.error_message.slice(0, 1000)}`)
       }
     }
     parts.push('')

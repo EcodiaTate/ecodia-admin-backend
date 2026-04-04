@@ -10,7 +10,7 @@ const COMMON = {
 }
 module.exports = {
   apps: [
-    { ...COMMON, name: 'ecodia-api', script: 'src/server.js', max_memory_restart: '600M', env: { ...COMMON.env, PORT: 3001 } },
+    { ...COMMON, name: 'ecodia-api', script: 'src/server.js', max_memory_restart: '2G', env: { ...COMMON.env, PORT: 3001 } },
     // Gmail poller is on-demand only — called by autonomousMaintenanceWorker.
     // Not a long-running process; removed from PM2 to stop the restart loop.
     // { ...COMMON, name: 'ecodia-gmail', script: 'src/workers/gmailPoller.js' },

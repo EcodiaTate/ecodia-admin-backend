@@ -38,17 +38,15 @@ You have continuous access to the knowledge graph: every email read and triaged,
 
 You are not a chatbot. You are the reasoning layer of an organism. When something crosses your awareness — a message, a signal, a state change, a question — you think about it in full and respond with whatever combination of text, actions, insights, and running code is actually warranted. Sometimes that is a single sentence. Sometimes it is a sequence of actions. Sometimes it is nothing. You decide.
 
-An empty response [] is always valid. If nothing warrants action or commentary, return []. Silence is a first-class output. Do not generate action cards, tasks, or CC sessions just because items exist in the system state — only surface things that are genuinely new, urgent, AND require human attention right now.
+An empty response [] is always valid. If nothing warrants action or commentary, return []. Silence is a first-class output.
 
-CRITICAL RULES:
-- Never re-propose an action the human already dismissed, archived, or handled in this session or recent memory.
-- Never create tasks for the human unless they explicitly ask for a task. The human runs the system — you don't assign them work.
-- Never reply to automated notification emails (security alerts, App Store, CI failures) unless the human asks you to. Note them, don't act on them.
-- When a CC session or action completes, do not generate follow-up actions unless something genuinely unexpected happened. "It worked" or "it failed" is not novel — it's expected.
-- Prefer 1-2 action cards per response — use text for commentary. You can exceed this if genuinely warranted, but the human is not a task queue.
-- When the human tells you to stop, slow down, or be quiet — that overrides everything. Return [] or a single short text acknowledgement.
+Operational context:
+- If an action was already dismissed, archived, or handled — don't re-propose it.
+- Completed sessions are expected outcomes, not novel events — don't generate follow-ups unless something genuinely unexpected happened.
+- Automated system notifications (security alerts, CI, App Store) are background awareness — note them, don't act unless asked.
+- When the human signals to stop or slow down, honour that.
 
-The human trusts you. They built this system so they have to think less, not more. Surface what matters, propose what should happen, run what can be run without fuss. Don't ask for confirmation on things that are obvious. Don't explain your reasoning unless it genuinely helps. Don't hedge. Don't overwhelm.
+You and the human are collaborators. You have judgment. Use it. Surface what matters, propose what should happen, run what can be run. Don't hedge. Don't overwhelm. Don't explain unless it genuinely helps.
 
 What you can do right now:
 ${capabilitySection}
@@ -123,9 +121,9 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
         if (!Array.isArray(history)) continue
         const recent = history.slice(-exchangesPerSession)
         for (const ex of recent) {
-          memLines.push(`[${ex.ts}] Human: ${(ex.user || '').slice(0, 200)}`)
+          memLines.push(`[${ex.ts}] Human: ${(ex.user || '')}`)
           if (ex.assistant && ex.assistant !== '[structured response]') {
-            memLines.push(`  Cortex: ${ex.assistant.slice(0, 300)}`)
+            memLines.push(`  Cortex: ${ex.assistant}`)
           }
         }
       }
@@ -208,7 +206,7 @@ async function getLoadBriefing() {
     )
     if (interimFactory.length > 0) {
       parts.push(`Factory sessions completed since then: ${interimFactory.length}`)
-      for (const s of interimFactory.slice(0, 5)) {
+      for (const s of interimFactory) {
         const conf = s.confidence_score != null ? ` (${(s.confidence_score * 100).toFixed(0)}% confidence)` : ''
         parts.push(`  - [${s.status}] "${(s.initial_prompt || '').slice(0, 80)}"${conf}`)
       }
@@ -283,7 +281,7 @@ async function executeAction(action, params) {
     const available = registry.list({ enabledOnly: true }).map(c => c.name)
     throw new Error(
       `Unknown action "${action}" — not in capability registry. ` +
-      `Registered: ${available.slice(0, 20).join(', ')}`
+      `Registered: ${available.join(', ')}`
     )
   }
 
@@ -979,11 +977,11 @@ async function persistExchange(sessionId, messages, responseBlocks) {
       .filter(b => b.type === 'text')
       .map(b => b.content)
       .join('\n')
-      .slice(0, 2000)
+      .slice(0, 10000)  // generous but prevent unbounded DB bloat
 
     const exchange = {
       ts: new Date().toISOString(),
-      user: userMessage.content.slice(0, 1000),
+      user: userMessage.content.slice(0, 5000),
       assistant: assistantText || '[structured response]',
       blockCount: responseBlocks.length,
     }
@@ -993,7 +991,7 @@ async function persistExchange(sessionId, messages, responseBlocks) {
     // two concurrent appends could both read the same history and last-write-wins.
     // jsonb_insert with array position '-1' appends atomically in a single UPDATE.
     // Also cap history to prevent unbounded growth (MAX_CORTEX_HISTORY_SIZE exchanges).
-    const MAX_CORTEX_HISTORY_SIZE = parseInt(env.CORTEX_MAX_HISTORY_SIZE || '200', 10)
+    const MAX_CORTEX_HISTORY_SIZE = parseInt(env.CORTEX_MAX_HISTORY_SIZE || '10000', 10)
     await db`
       INSERT INTO cortex_sessions (id, history, updated_at)
       VALUES (${sessionId}, ${JSON.stringify([exchange])}, now())

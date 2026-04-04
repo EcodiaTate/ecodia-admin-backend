@@ -159,14 +159,14 @@ const envSchema = z.object({
   // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
   CORTEX_TEMPERATURE: z.string().default(''),
   // Cortex context tuning (0 = unlimited where applicable)
-  CORTEX_KG_MAX_SEEDS: z.string().default('20'),
-  CORTEX_KG_MAX_DEPTH: z.string().default('5'),
+  CORTEX_KG_MAX_SEEDS: z.string().default('50'),
+  CORTEX_KG_MAX_DEPTH: z.string().default('8'),
   CORTEX_KG_MIN_SIMILARITY: z.string().default('0.4'),
-  CORTEX_SESSION_MEMORY_LOOKBACK: z.string().default('3'),
-  CORTEX_MEMORY_EXCHANGES_PER_SESSION: z.string().default('3'),
+  CORTEX_SESSION_MEMORY_LOOKBACK: z.string().default('10'),
+  CORTEX_MEMORY_EXCHANGES_PER_SESSION: z.string().default('10'),
   // CC context bundle tuning
-  CC_CONTEXT_CODE_CHUNKS_LIMIT: z.string().default('15'),
-  CC_SESSION_HISTORY_LIMIT: z.string().default('10'),
+  CC_CONTEXT_CODE_CHUNKS_LIMIT: z.string().default('50'),
+  CC_SESSION_HISTORY_LIMIT: z.string().default('30'),
   CC_LEARNING_CONFIDENCE_HARD: z.string().default('0.2'),
   CC_LEARNING_CONFIDENCE_SOFT: z.string().default('0.3'),
   CC_LEARNING_CONFIDENCE_GLOBAL: z.string().default('0.3'),
