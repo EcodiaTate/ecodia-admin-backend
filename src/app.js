@@ -22,6 +22,7 @@ const vercelRoutes = require('./routes/vercel')
 const metaRoutes = require('./routes/meta')
 const actionQueueRoutes = require('./routes/actionQueue')
 const contextTrackingRoutes = require('./routes/contextTracking')
+const kgExplorerRoutes = require('./routes/kgExplorer')
 
 const app = express()
 
@@ -66,6 +67,7 @@ app.use('/api/vercel', vercelRoutes)
 app.use('/api/meta', metaRoutes)
 app.use('/api/actions', actionQueueRoutes)
 app.use('/api/context', contextTrackingRoutes)
+app.use('/kg-explorer', kgExplorerRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)
