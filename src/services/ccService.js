@@ -1128,10 +1128,14 @@ async function resumeSession(sessionId, message) {
   broadcastToSession(sessionId, 'cc:output', { type: 'user', content: message })
   broadcastToSession(sessionId, 'cc:stage', { stage: 'executing', progress: 0.5, resumed: true })
 
-  // Heartbeat
+  // Heartbeat — log failures for observability (silent failures cause false orphan detection)
   await db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${sessionId}`
   sessionData.heartbeatTimer = setInterval(async () => {
-    try { await db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${sessionId}` } catch {}
+    try {
+      await db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${sessionId}`
+    } catch (err) {
+      logger.warn(`CC resumed session ${sessionId} heartbeat failed`, { error: err.message })
+    }
   }, 60_000)
   sessionData.heartbeatTimer.unref()
 

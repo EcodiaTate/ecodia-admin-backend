@@ -72,11 +72,29 @@ async function _onOrganismPercept(percept) {
 
 // ─── Start ────────────────────────────────────────────────────────────
 
+// Startup cooldown — after a PM2 restart, wait before the first cycle.
+// This prevents the restart→dispatch→restart feedback loop: the maintenance
+// worker would see "orphaned session" errors caused by the restart itself,
+// dispatch new sessions to investigate them, those sessions deploy, which
+// triggers another restart, ad infinitum.
+const STARTUP_COOLDOWN_MS = parseInt(env.MAINTENANCE_STARTUP_COOLDOWN_MS || '120000') // 2 min default
+
 function start() {
   if (running) return
   running = true
   logger.info('AutonomousMaintenanceWorker: started')
-  scheduleCycle()
+
+  // Delay first cycle to let the system stabilise after restart
+  if (STARTUP_COOLDOWN_MS > 0) {
+    logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
+    cycleTimer = setTimeout(() => {
+      if (!running) return
+      runCycle().then(() => scheduleCycle())
+    }, STARTUP_COOLDOWN_MS)
+  } else {
+    scheduleCycle()
+  }
+
   try {
     const eventBus = require('../services/internalEventBusService')
     eventBus.on('factory:deploy_failed', _onDeployFailed)
@@ -151,9 +169,12 @@ async function runCycle() {
     }
 
     // 4. Apply cooldown — skip decisions targeting recently-dispatched patterns
+    //    Two layers: in-memory map (fast, survives within a process) +
+    //    DB-backed dedup (survives PM2 restarts — the critical fix for the
+    //    restart→dispatch→restart feedback loop).
     const now = Date.now()
     const cooldownMs = parseInt(env.MAINTENANCE_COOLDOWN_MS || '7200000')
-    const decisions = capped.filter(d => {
+    const decisionsAfterMemCooldown = capped.filter(d => {
       const key = _normaliseDecisionKey(d)
       const lastDispatch = _recentDispatches.get(key)
       if (lastDispatch && (now - lastDispatch) < cooldownMs) {
@@ -162,6 +183,19 @@ async function runCycle() {
       }
       return true
     })
+
+    // DB-backed dedup — catches duplicates after PM2 restart when in-memory map is empty
+    const decisions = []
+    for (const d of decisionsAfterMemCooldown) {
+      if (d.type !== 'poll' && d.type !== 'consolidate_learnings') {
+        const hasSimilar = await _hasRecentSimilarSession(d, cooldownMs)
+        if (hasSimilar) {
+          logger.debug(`AutonomousMaintenanceWorker: DB dedup skip — similar session found for "${(d.intent || '').slice(0, 60)}"`)
+          continue
+        }
+      }
+      decisions.push(d)
+    }
 
     // 5. Act on each decision
     let actioned = 0

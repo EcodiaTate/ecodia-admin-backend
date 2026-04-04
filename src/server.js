@@ -82,7 +82,7 @@ async function gracefulShutdown(signal) {
       // stopAllSessions kills child processes and marks DB as 'paused' (resumable)
       await Promise.race([
         ccService.stopAllSessions('Process restarting — session paused for resume'),
-        new Promise(resolve => setTimeout(resolve, 10000)), // Don't block shutdown >10s (kill_timeout is 12s)
+        new Promise(resolve => setTimeout(resolve, 30000)), // Don't block shutdown >30s (kill_timeout is 45s)
       ])
     }
   } catch (err) {
@@ -100,6 +100,11 @@ async function gracefulShutdown(signal) {
   for (const conn of openConnections) {
     try { conn.destroy() } catch {}
   }
+
+  // Close the DB connection pool — prevents connection leaks across restarts
+  // and ensures in-flight queries complete before the process exits.
+  try { await db.end({ timeout: 5 }) } catch {}
+
   server.close(() => process.exit(0))
 
   // Hard exit fallback — if server.close() still hangs (e.g. connections
@@ -119,11 +124,33 @@ process.on('uncaughtException', async (err) => {
   await gracefulShutdown('uncaughtException').catch(() => {})
   process.exit(1)
 })
-process.on('unhandledRejection', async (reason) => {
+// Track unhandled rejections — crash only on repeated rapid-fire failures
+// (a sign of systemic breakage, not transient hiccups during shutdown/restart).
+let _unhandledRejectionCount = 0
+let _unhandledRejectionWindowStart = Date.now()
+const REJECTION_CRASH_THRESHOLD = parseInt(env.UNHANDLED_REJECTION_CRASH_THRESHOLD || '5')
+const REJECTION_CRASH_WINDOW_MS = parseInt(env.UNHANDLED_REJECTION_CRASH_WINDOW_MS || '10000')
+
+process.on('unhandledRejection', (reason) => {
   const msg = reason instanceof Error ? reason.message : String(reason)
-  logger.error('Unhandled rejection — triggering graceful shutdown', { error: msg })
-  await gracefulShutdown('unhandledRejection').catch(() => {})
-  process.exit(1)
+  const stack = reason instanceof Error ? reason.stack : undefined
+  logger.error('Unhandled rejection (non-fatal)', { error: msg, stack })
+
+  // If we're already shutting down, swallow — don't compound the shutdown
+  if (shuttingDown) return
+
+  // Track rate — crash only if rejections are piling up (systemic failure)
+  const now = Date.now()
+  if (now - _unhandledRejectionWindowStart > REJECTION_CRASH_WINDOW_MS) {
+    _unhandledRejectionCount = 0
+    _unhandledRejectionWindowStart = now
+  }
+  _unhandledRejectionCount++
+
+  if (REJECTION_CRASH_THRESHOLD > 0 && _unhandledRejectionCount >= REJECTION_CRASH_THRESHOLD) {
+    logger.error(`${_unhandledRejectionCount} unhandled rejections in ${REJECTION_CRASH_WINDOW_MS}ms — triggering shutdown`)
+    gracefulShutdown('unhandledRejection:flood').catch(() => {})
+  }
 })
 
 server.listen(env.PORT, async () => {

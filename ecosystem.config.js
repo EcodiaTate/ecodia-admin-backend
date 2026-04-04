@@ -5,7 +5,7 @@ const COMMON = {
   min_uptime: '10s',
   restart_delay: 2000,
   exp_backoff_restart_delay: 100,
-  kill_timeout: 12000,
+  kill_timeout: 45000,
   env: { NODE_ENV: 'production' },
 }
 module.exports = {
