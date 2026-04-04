@@ -163,6 +163,21 @@ router.get('/sessions/:id/pipeline', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// POST /api/cc/sessions/:id/resume — resume a completed/paused session with a new message
+const resumeSchema = z.object({
+  content: z.string().min(1),
+})
+
+router.post('/sessions/:id/resume', validate(resumeSchema), async (req, res, next) => {
+  try {
+    const ccService = require('../services/ccService')
+    await ccService.resumeSession(req.params.id, req.body.content)
+    res.json({ status: 'resumed', sessionId: req.params.id })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // POST /api/cc/sessions/:id/stop
 router.post('/sessions/:id/stop', async (req, res, next) => {
   try {

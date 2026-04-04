@@ -23,27 +23,9 @@ const secretSafety = require('./secretSafetyService')
 
 const activeSessions = new Map()
 
-// Codebase-level lock — prevents two CC sessions from writing to the same repo concurrently.
-// Maps codebaseId → { sessionId, resolve } so the next session can wait or fail fast.
-const _codebaseLocks = new Map()
-
-function acquireCodebaseLock(codebaseId, sessionId) {
-  if (!codebaseId) return true  // no codebase = no lock needed
-  const existing = _codebaseLocks.get(codebaseId)
-  if (existing && existing.sessionId !== sessionId) {
-    return false  // another session holds the lock
-  }
-  _codebaseLocks.set(codebaseId, { sessionId })
-  return true
-}
-
-function releaseCodebaseLock(codebaseId, sessionId) {
-  if (!codebaseId) return
-  const lock = _codebaseLocks.get(codebaseId)
-  if (lock && lock.sessionId === sessionId) {
-    _codebaseLocks.delete(codebaseId)
-  }
-}
+// No codebase-level locking — multiple CC sessions may run against the same
+// repo simultaneously. Claude Code uses git worktrees internally, so parallel
+// sessions don't clobber each other's git state.
 
 // Rate limit tracking — prevents spawning sessions when CLI is rate-limited
 let _lastRateLimitReset = null
@@ -708,15 +690,6 @@ async function startSession(session) {
     triggerSource: session.trigger_source || 'manual',
   })
 
-  // Acquire codebase lock — prevents concurrent sessions from clobbering git state
-  if (!acquireCodebaseLock(session.codebase_id, session.id)) {
-    const msg = `Codebase ${session.codebase_id} is locked by another session — cannot start concurrently`
-    logger.warn(msg, { sessionId: session.id })
-    await updateSessionStatus(session.id, 'error', { error_message: msg })
-    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
-    return
-  }
-
   await updateSessionStatus(session.id, 'running')
   await db`UPDATE cc_sessions SET pipeline_stage = 'context' WHERE id = ${session.id}`
   broadcastToSession(session.id, 'cc:stage', { stage: 'context', progress: 0.1 })
@@ -814,7 +787,6 @@ async function startSession(session) {
       await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${session.id}`
       clearInterval(sessionData.heartbeatTimer)
       activeSessions.delete(session.id)
-      releaseCodebaseLock(session.codebase_id, session.id)
     }, SESSION_TIMEOUT_MS)
   }
 
@@ -836,6 +808,14 @@ async function startSession(session) {
         parsed = JSON.parse(safeLine)
       } catch {
         parsed = { type: 'raw', content: safeLine }
+      }
+
+      // Capture CC CLI's own session ID from the init message so we can --resume later
+      if (parsed.type === 'system' && parsed.session_id && !sessionData.ccCliSessionId) {
+        sessionData.ccCliSessionId = parsed.session_id
+        db`UPDATE cc_sessions SET cc_cli_session_id = ${parsed.session_id} WHERE id = ${session.id}`.catch(err =>
+          logger.debug('Failed to store CC CLI session ID', { error: err.message })
+        )
       }
 
       // Capture result and rate limit events for error extraction
@@ -890,7 +870,6 @@ async function startSession(session) {
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
-    releaseCodebaseLock(session.codebase_id, session.id)
 
     // If stopSession() already handled this session, don't overwrite its status
     // or trigger the oversight pipeline. The human deliberately cancelled it.
@@ -1045,7 +1024,6 @@ async function startSession(session) {
     clearTimeout(sessionData.timeout)
     clearInterval(sessionData.heartbeatTimer)
     activeSessions.delete(session.id)
-    releaseCodebaseLock(session.codebase_id, session.id)
 
     logger.error(`CC session ${session.id} process error`, { error: err.message })
     await updateSessionStatus(session.id, 'error', {
@@ -1060,14 +1038,191 @@ async function startSession(session) {
 
 async function sendMessage(sessionId, content) {
   const sessionData = activeSessions.get(sessionId)
-  if (!sessionData) throw new Error('Session not found or not running')
+
+  // If the process is dead but we have a CLI session ID, auto-resume
+  if (!sessionData || sessionData.process.exitCode !== null || sessionData.process.killed) {
+    return resumeSession(sessionId, content)
+  }
 
   const proc = sessionData.process
-  if (!proc.stdin || !proc.stdin.writable) throw new Error('Session stdin is not writable')
+  if (!proc.stdin || !proc.stdin.writable) {
+    // stdin closed — resume instead of failing
+    return resumeSession(sessionId, content)
+  }
 
   proc.stdin.write(content + '\n')
   await appendLog(sessionId, `[USER] ${content}`)
   broadcastToSession(sessionId, 'cc:output', { type: 'user', content })
+}
+
+// ─── Resume a Completed/Paused Session ──────────────────────────────
+// Spawns a new CC CLI process with --resume to continue the conversation.
+// The user (or cortex) can interject at any time — even after the session
+// has completed — and the full conversation context is preserved by CC.
+
+async function resumeSession(sessionId, message) {
+  // Look up the CC CLI session ID from DB
+  const [row] = await db`
+    SELECT cc_cli_session_id, codebase_id, working_dir
+    FROM cc_sessions WHERE id = ${sessionId}
+  `
+  if (!row) throw new Error(`Session ${sessionId} not found`)
+  if (!row.cc_cli_session_id) throw new Error(`Session ${sessionId} has no CC CLI session ID — cannot resume (was it from before this upgrade?)`)
+
+  // Clean up any stale in-memory state from the previous process
+  const oldData = activeSessions.get(sessionId)
+  if (oldData) {
+    clearTimeout(oldData.timeout)
+    clearInterval(oldData.heartbeatTimer)
+    // Kill old process if somehow still alive
+    try { oldData.process.kill('SIGTERM') } catch {}
+    activeSessions.delete(sessionId)
+  }
+
+  // Resolve working directory (same logic as startSession)
+  let cwd = row.working_dir
+  if (!cwd && row.codebase_id) {
+    const [codebase] = await db`SELECT repo_path FROM codebases WHERE id = ${row.codebase_id}`
+    cwd = codebase?.repo_path
+  }
+  if (!cwd) cwd = process.cwd()
+
+  // Spawn CC CLI with --resume to continue the existing conversation
+  const args = [
+    '--print',
+    '--verbose',
+    '--output-format', 'stream-json',
+    '--resume', row.cc_cli_session_id,
+    ...(MAX_TURNS > 0 ? ['--max-turns', String(MAX_TURNS)] : []),
+    '--dangerously-skip-permissions',
+    '-p', message,
+  ]
+
+  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
+  delete ccEnv.ANTHROPIC_API_KEY
+
+  const proc = spawn(CC_CLI, args, {
+    cwd,
+    env: ccEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+
+  const sessionData = {
+    process: proc,
+    sessionId,
+    startedAt: Date.now(),
+    codebaseId: row.codebase_id,
+    ccCliSessionId: row.cc_cli_session_id,
+    timeout: null,
+    heartbeatTimer: null,
+    stopped: false,
+  }
+  activeSessions.set(sessionId, sessionData)
+
+  // Update DB status back to running
+  await updateSessionStatus(sessionId, 'running')
+  await db`UPDATE cc_sessions SET pipeline_stage = 'executing' WHERE id = ${sessionId}`
+
+  // Log the user message
+  await appendLog(sessionId, `[USER] ${message}`)
+  broadcastToSession(sessionId, 'cc:output', { type: 'user', content: message })
+  broadcastToSession(sessionId, 'cc:stage', { stage: 'executing', progress: 0.5, resumed: true })
+
+  // Heartbeat
+  await db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${sessionId}`
+  sessionData.heartbeatTimer = setInterval(async () => {
+    try { await db`UPDATE cc_sessions SET last_heartbeat_at = now() WHERE id = ${sessionId}` } catch {}
+  }, 60_000)
+  sessionData.heartbeatTimer.unref()
+
+  // Timeout (same as startSession)
+  if (SESSION_TIMEOUT_MS > 0) {
+    sessionData.timeout = setTimeout(() => {
+      logger.warn(`CC resumed session ${sessionId} timed out after ${SESSION_TIMEOUT_MS}ms`)
+      proc.kill('SIGTERM')
+      setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL') }, 10_000)
+      updateSessionStatus(sessionId, 'error', { error_message: 'Resumed session timed out' }).catch(() => {})
+      db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
+      clearInterval(sessionData.heartbeatTimer)
+      activeSessions.delete(sessionId)
+    }, SESSION_TIMEOUT_MS)
+    sessionData.timeout.unref()
+  }
+
+  // Stream stdout
+  let streamResult = null
+  const rl = createInterface({ input: proc.stdout })
+  rl.on('line', async (line) => {
+    try {
+      const safeLine = secretSafety.scrubSecrets(line)
+      await appendLog(sessionId, safeLine)
+      let parsed
+      try { parsed = JSON.parse(safeLine) } catch { parsed = { type: 'raw', content: safeLine } }
+      if (parsed.type === 'result') streamResult = parsed
+      broadcastToSession(sessionId, 'cc:output', parsed)
+    } catch (err) {
+      logger.debug('Error processing resumed CC output line', { error: err.message })
+    }
+  })
+  const rlClosed = new Promise(resolve => rl.on('close', resolve))
+
+  // Stderr
+  const stderrLines = []
+  const stderrRl = createInterface({ input: proc.stderr })
+  stderrRl.on('line', (line) => {
+    if (STDERR_MAX_LINES <= 0) { stderrLines.push(line) }
+    else if (stderrLines.length < STDERR_MAX_LINES) { stderrLines.push(line) }
+    logger.debug(`CC resumed session ${sessionId} stderr: ${line}`)
+  })
+  const stderrRlClosed = new Promise(resolve => stderrRl.on('close', resolve))
+
+  // Close handler
+  let _closeHandled = false
+  proc.on('close', async (code) => {
+    if (_closeHandled) return
+    _closeHandled = true
+    await Promise.race([
+      Promise.all([rlClosed, stderrRlClosed]),
+      new Promise(resolve => setTimeout(resolve, 5000)),
+    ])
+    clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
+    activeSessions.delete(sessionId)
+
+    if (sessionData.stopped) {
+      logger.info(`CC resumed session ${sessionId} close after stop — skipping oversight`)
+      return
+    }
+
+    const success = code === 0 && !streamResult?.is_error
+    const status = success ? 'complete' : 'error'
+    let errorMessage = null
+    if (!success) {
+      if (streamResult?.is_error && streamResult?.result) errorMessage = streamResult.result
+      else if (stderrLines.length > 0) errorMessage = stderrLines.slice(-5).join('\n')
+      else errorMessage = `Exit code ${code}`
+    }
+
+    await updateSessionStatus(sessionId, status, { error_message: errorMessage }).catch(() => {})
+    if (!success) {
+      await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
+    }
+    broadcastToSession(sessionId, 'cc:status', { status, code, resumed: true })
+    logger.info(`CC resumed session ${sessionId} completed`, { code, status })
+  })
+
+  proc.on('error', async (err) => {
+    if (_closeHandled) return
+    _closeHandled = true
+    clearTimeout(sessionData.timeout)
+    clearInterval(sessionData.heartbeatTimer)
+    activeSessions.delete(sessionId)
+    await updateSessionStatus(sessionId, 'error', { error_message: `Resume process error: ${err.message}` }).catch(() => {})
+    await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`.catch(() => {})
+    broadcastToSession(sessionId, 'cc:status', { status: 'error', error: err.message })
+  })
+
+  logger.info(`CC session ${sessionId} resumed with --resume ${row.cc_cli_session_id}`)
 }
 
 // ─── Stop Session ───────────────────────────────────────────────────
@@ -1102,6 +1257,8 @@ async function stopSession(sessionId) {
 }
 
 // ─── Stop All Sessions (graceful shutdown) ─────────────────────────
+// Uses 'paused' status instead of 'stopped' — paused sessions have a
+// cc_cli_session_id and can be auto-resumed when the server restarts.
 
 async function stopAllSessions(reason) {
   const ids = [...activeSessions.keys()]
@@ -1109,8 +1266,7 @@ async function stopAllSessions(reason) {
     const sessionData = activeSessions.get(sessionId)
     if (!sessionData) {
       // No in-memory data — just update DB
-      await updateSessionStatus(sessionId, 'stopped', { error_message: reason })
-      await db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`
+      await updateSessionStatus(sessionId, 'paused', { error_message: reason })
       return
     }
 
@@ -1123,11 +1279,11 @@ async function stopAllSessions(reason) {
 
     const proc = sessionData.process
     // Update DB first — if the main process gets killed before child exits,
-    // the session is already marked 'stopped' (not left as 'running' → orphan)
+    // the session is already marked 'paused' (not left as 'running' → orphan)
     // Parallelize both writes to reduce time spent before killing the child
     await Promise.all([
-      updateSessionStatus(sessionId, 'stopped', { error_message: reason }),
-      db`UPDATE cc_sessions SET pipeline_stage = 'complete' WHERE id = ${sessionId}`,
+      updateSessionStatus(sessionId, 'paused', { error_message: reason }),
+      db`UPDATE cc_sessions SET pipeline_stage = 'executing' WHERE id = ${sessionId}`,
     ])
 
     try { proc.kill('SIGTERM') } catch {}
@@ -1146,7 +1302,7 @@ async function stopAllSessions(reason) {
     })
 
     activeSessions.delete(sessionId)
-    logger.info(`CC session ${sessionId} stopped: ${reason}`)
+    logger.info(`CC session ${sessionId} paused: ${reason}`)
   }))
 }
 
@@ -1166,15 +1322,20 @@ function startWatchdog() {
       const proc = sessionData.process
       // exitCode is non-null once the process has exited
       if (proc.exitCode !== null || proc.killed) {
-        logger.warn(`Watchdog: CC session ${sessionId} child process is dead (exit: ${proc.exitCode}), cleaning up`)
         clearTimeout(sessionData.timeout)
         clearInterval(sessionData.heartbeatTimer)
         activeSessions.delete(sessionId)
+        // If we have a CLI session ID, mark as paused (resumable), not error
+        const hasCliId = !!sessionData.ccCliSessionId
+        const newStatus = hasCliId ? 'paused' : 'error'
+        logger.warn(`Watchdog: CC session ${sessionId} child process is dead (exit: ${proc.exitCode}), marking ${newStatus}`)
         try {
-          await updateSessionStatus(sessionId, 'error', {
-            error_message: `Child process died unexpectedly (exit code: ${proc.exitCode})`,
+          await updateSessionStatus(sessionId, newStatus, {
+            error_message: `Child process died unexpectedly (exit code: ${proc.exitCode})${hasCliId ? ' — resumable' : ''}`,
           })
-          await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`
+          if (!hasCliId) {
+            await db`UPDATE cc_sessions SET pipeline_stage = 'failed' WHERE id = ${sessionId}`
+          }
         } catch (err) {
           logger.debug('Watchdog: failed to update dead session', { sessionId, error: err.message })
         }
@@ -1225,6 +1386,7 @@ function getRateLimitStatus() {
 
 module.exports = {
   startSession,
+  resumeSession,
   sendMessage,
   stopSession,
   stopAllSessions,

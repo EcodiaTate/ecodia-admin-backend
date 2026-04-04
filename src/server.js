@@ -21,24 +21,45 @@ async function cleanupOrphanedSessions() {
   // Sessions still marked 'running'/'initializing' at startup were NOT
   // caught by the graceful SIGTERM handler — they survived a hard kill
   // (OOM, SIGKILL, VPS reboot, kernel upgrade, etc).
+  //
+  // If they have a cc_cli_session_id, mark as 'paused' (resumable via --resume).
+  // Only truly orphan sessions that have no CLI session ID (old sessions or
+  // sessions that died before the init message was received).
+  const resumable = await db`
+    UPDATE cc_sessions
+    SET status = 'paused',
+        error_message = 'Process interrupted — session is resumable'
+    WHERE status IN ('running', 'initializing')
+      AND cc_cli_session_id IS NOT NULL
+      AND (
+        (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
+        OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
+      )
+    RETURNING id, started_at
+  `
+  if (resumable.length > 0) {
+    logger.info(`Marked ${resumable.length} interrupted CC session(s) as paused (resumable via --resume)`, {
+      ids: resumable.map(r => r.id),
+    })
+  }
+
+  // Sessions without a CLI session ID truly are orphaned — no way to resume
   const orphans = await db`
     UPDATE cc_sessions
     SET status = 'error',
-        error_message = 'Session orphaned — process was killed without graceful shutdown',
+        error_message = 'Session orphaned — process was killed without graceful shutdown (no CLI session ID)',
         completed_at = now()
     WHERE status IN ('running', 'initializing')
+      AND cc_cli_session_id IS NULL
       AND (
-        -- Classic check: session started >5min ago (catches startup cleanup)
         (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
-        -- Heartbeat check: last heartbeat >3min ago (catches mid-run deaths)
         OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
       )
-    RETURNING id, started_at, last_heartbeat_at
+    RETURNING id, started_at
   `
   if (orphans.length > 0) {
-    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (hard kill — not caught by SIGTERM/SIGINT handler)`, {
+    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (no CLI session ID — not resumable)`, {
       ids: orphans.map(r => r.id),
-      startedAt: orphans.map(r => r.started_at),
     })
   }
 }
@@ -57,10 +78,10 @@ async function gracefulShutdown(signal) {
     const ccService = require('./services/ccService')
     const activeCount = ccService.getActiveSessionCount()
     if (activeCount > 0) {
-      logger.info(`Gracefully stopping ${activeCount} active CC session(s) before shutdown`)
-      // stopAllSessions kills child processes and marks DB as 'stopped'
+      logger.info(`Pausing ${activeCount} active CC session(s) before shutdown (resumable)`)
+      // stopAllSessions kills child processes and marks DB as 'paused' (resumable)
       await Promise.race([
-        ccService.stopAllSessions('Process restarting — session stopped gracefully'),
+        ccService.stopAllSessions('Process restarting — session paused for resume'),
         new Promise(resolve => setTimeout(resolve, 10000)), // Don't block shutdown >10s (kill_timeout is 12s)
       ])
     }
