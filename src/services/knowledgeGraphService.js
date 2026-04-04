@@ -302,18 +302,30 @@ async function embedStaleNodes(batchSize = 100) {
   // Batch embed via OpenAI
   const embeddings = await getBatchEmbeddings(nodes.map(n => n.text))
 
+  let stored = 0
+  let failed = 0
   for (let i = 0; i < nodes.length; i++) {
     if (embeddings[i]) {
       await runWrite(
         `MATCH (n) WHERE elementId(n) = $nodeId
          SET n.embedding = $embedding, n.embedding_stale = false, n.embedding_text = $text, n:\`__Embedded__\``,
         { nodeId: nodes[i].nodeId, embedding: embeddings[i], text: nodes[i].text }
-      ).catch(err => logger.warn(`Failed to store embedding for ${nodes[i].nodeId}`, { error: err.message }))
+      ).catch(err => {
+        failed++
+        logger.warn(`Failed to store embedding for ${nodes[i].nodeId}`, { error: err.message })
+      })
+      stored++
+    } else {
+      failed++
     }
   }
 
-  logger.info(`Embedded ${nodes.length} stale KG nodes`)
-  return nodes.length
+  if (failed > 0) {
+    logger.warn(`KG embedding: ${stored} stored, ${failed} failed out of ${nodes.length} batch`)
+  } else {
+    logger.info(`Embedded ${stored} stale KG nodes`)
+  }
+  return stored
 }
 
 // ─── Trace-Based Retrieval ───────────────────────────────────────────
