@@ -87,14 +87,16 @@ function start() {
   // Delay first cycle to let the system stabilise after restart
   if (STARTUP_COOLDOWN_MS > 0) {
     logger.info(`AutonomousMaintenanceWorker: startup cooldown — first cycle in ${Math.round(STARTUP_COOLDOWN_MS / 1000)}s`)
-    cycleTimer = setTimeout(async () => {
-      if (!running) return
-      try {
-        await runCycle()
-      } catch (err) {
-        logger.error('AutonomousMaintenanceWorker: first cycle crashed', { error: err.message })
-      }
-      scheduleCycle()  // ALWAYS schedule next cycle, even if first one crashed
+    cycleTimer = setTimeout(() => {
+      console.log('[MAINTENANCE] setTimeout fired — running first cycle')
+      if (!running) { console.log('[MAINTENANCE] not running, aborting'); return }
+      runCycle()
+        .then(() => { console.log('[MAINTENANCE] first cycle done OK') })
+        .catch(err => {
+          console.error('[MAINTENANCE] first cycle crashed:', err.message, err.stack)
+          logger.error('AutonomousMaintenanceWorker: first cycle crashed', { error: err.message })
+        })
+        .finally(() => { scheduleCycle() })
     }, STARTUP_COOLDOWN_MS)
   } else {
     scheduleCycle()
