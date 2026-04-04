@@ -246,12 +246,12 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
 }
 
 async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification, streamSource }) {
-  const ccService = require('./ccService')
+  const bridge = require('./factoryBridge')
 
   // Reject scheduled/automated dispatches when CLI is rate-limited
-  const rlStatus = ccService.getRateLimitStatus()
+  const rlStatus = await bridge.getRateLimitStatus()
   if (rlStatus.limited && (triggeredBy === 'scheduled' || triggerSource === 'scheduled')) {
-    const resetsIn = Math.ceil((rlStatus.resetsAt - new Date()) / 60000)
+    const resetsIn = Math.ceil((new Date(rlStatus.resetsAt) - new Date()) / 60000)
     logger.warn(`Factory dispatch blocked — CLI rate-limited, resets in ${resetsIn}min`, { triggerSource })
     throw new Error(`CLI rate-limited — resets in ${resetsIn}min`)
   }
@@ -298,12 +298,13 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
     },
   })
 
-  // Start async (fire-and-forget)
-  ccService.startSession(session).catch(err => {
-    logger.error(`Factory session ${session.id} failed to start`, { error: err.message })
-    db`UPDATE cc_sessions SET status = 'error', error_message = ${err.message}, completed_at = now(), pipeline_stage = 'failed'
+  // Publish to Redis — factoryRunner picks it up and starts the CC session
+  const published = bridge.publishSessionRequest(session)
+  if (!published) {
+    logger.error(`Factory session ${session.id} failed to publish — no Redis connection`)
+    db`UPDATE cc_sessions SET status = 'error', error_message = 'Failed to publish session request to factory runner (no Redis)', completed_at = now(), pipeline_stage = 'failed'
        WHERE id = ${session.id}`.catch(() => {})
-  })
+  }
 
   return session
 }

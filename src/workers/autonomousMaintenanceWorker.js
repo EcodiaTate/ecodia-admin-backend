@@ -986,10 +986,10 @@ async function actOnDecision(decision, state) {
 
   try {
     // Skip Factory dispatch if CLI is rate-limited — no point spawning sessions that will fail
-    const ccService = require('../services/ccService')
-    const rlStatus = ccService.getRateLimitStatus()
+    const bridge = require('../services/factoryBridge')
+    const rlStatus = await bridge.getRateLimitStatus()
     if (rlStatus.limited) {
-      const resetsIn = Math.ceil((rlStatus.resetsAt - new Date()) / 60000)
+      const resetsIn = Math.ceil((new Date(rlStatus.resetsAt) - new Date()) / 60000)
       logger.debug(`AutonomousMaintenanceWorker: skipping dispatch — CLI rate-limited, resets in ${resetsIn}min`)
       return false
     }

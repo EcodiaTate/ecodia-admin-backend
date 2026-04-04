@@ -7,7 +7,7 @@ const db = require('../config/db')
 const env = require('../config/env')
 const logger = require('../config/logger')
 const { healthCheck: neo4jHealth } = require('../config/neo4j')
-const ccService = require('./ccService')
+const bridge = require('./factoryBridge')
 
 // ═══════════════════════════════════════════════════════════════════════
 // VITAL SIGNS SERVICE — Mutual Health Monitoring
@@ -164,7 +164,7 @@ async function checkSelfHealth() {
   checks.cpu = getCpuUsagePercent()
 
   // CC sessions
-  checks.activeCCSessions = ccService.getActiveSessionCount()
+  checks.activeCCSessions = await bridge.getActiveSessionCount()
 
   // PM2 process state
   checks.pm2Processes = await getPM2Processes()

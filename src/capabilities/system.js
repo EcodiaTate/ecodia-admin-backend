@@ -161,11 +161,12 @@ registry.registerMany([
     handler: async () => {
       const { execFileSync } = require('child_process')
       const db = require('../config/db')
-      const ccService = require('../services/ccService')
+      const bridge = require('../services/factoryBridge')
 
       const health = {
-        activeCCSessions: ccService.getActiveSessionCount(),
-        rateLimitStatus: ccService.getRateLimitStatus(),
+        activeCCSessions: await bridge.getActiveSessionCount(),
+        rateLimitStatus: await bridge.getRateLimitStatus(),
+        factoryRunnerHealth: await bridge.getRunnerHealth(),
       }
 
       // PM2 processes
@@ -310,8 +311,8 @@ registry.registerMany([
       content: { type: 'string', required: true, description: 'Message content to send' },
     },
     handler: async (params) => {
-      const ccService = require('../services/ccService')
-      await ccService.sendMessage(params.sessionId, params.content)
+      const bridge = require('../services/factoryBridge')
+      bridge.publishSendMessage(params.sessionId, params.content)
       return { message: `Message sent to session ${params.sessionId}` }
     },
   },
@@ -327,7 +328,6 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
-      const ccService = require('../services/ccService')
 
       const [session] = await db`
         SELECT cs.*, cb.name AS codebase_name, cb.repo_path
@@ -343,12 +343,14 @@ registry.registerMany([
         ORDER BY id DESC LIMIT 50
       `
 
-      const active = ccService.getActiveSessionInfo(params.sessionId)
+      // Determine if running via heartbeat (session runs in factoryRunner process)
+      const isActive = session.status === 'running' &&
+        session.last_heartbeat_at && (Date.now() - new Date(session.last_heartbeat_at).getTime() < 120_000)
 
       return {
         ...session,
-        isRunning: !!active,
-        runningFor: active?.runningFor || null,
+        isRunning: isActive,
+        runningFor: isActive && session.started_at ? Date.now() - new Date(session.started_at).getTime() : null,
         recentLogs: logs.reverse(),
       }
     },

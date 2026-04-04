@@ -177,21 +177,9 @@ async function deploySession(sessionId) {
         return { status: 'deployed', commitSha, deploymentId }
       }
 
-      // Self-mod: stop active CC sessions BEFORE restarting, so they don't become
-      // orphans. The graceful shutdown handler would try, but the 10s race against
-      // PM2's 12s kill_timeout often loses — especially with long-running CC sessions.
-      if (isSelfMod) {
-        try {
-          const ccService = require('./ccService')
-          const activeCount = ccService.getActiveSessionCount()
-          if (activeCount > 0) {
-            logger.info(`Pre-deploy: draining ${activeCount} active CC session(s) before PM2 restart`)
-            await ccService.stopAllSessions('Stopped for self-modification deployment')
-          }
-        } catch (drainErr) {
-          logger.warn('Pre-deploy: session drain failed, proceeding with restart', { error: drainErr.message })
-        }
-      }
+      // Self-mod: CC sessions now run in the separate ecodia-factory process.
+      // Restarting ecodia-api no longer kills CC sessions — this was the entire
+      // motivation for the factoryRunner extraction. No drain needed.
 
       if (isSelfMod) {
         // Self-mod restart: mark deploy as successful BEFORE restarting, then fire-and-forget.

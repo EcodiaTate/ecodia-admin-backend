@@ -79,12 +79,13 @@ router.post('/sessions', validate(createSessionSchema), async (req, res, next) =
       },
     })
 
-    // Start CC session asynchronously
-    const ccService = require('../services/ccService')
-    ccService.startSession(session).catch(err => {
-      db`UPDATE cc_sessions SET status = 'error', error_message = ${err.message}, completed_at = now()
+    // Publish to factoryRunner via Redis
+    const bridge = require('../services/factoryBridge')
+    const published = bridge.publishSessionRequest(session)
+    if (!published) {
+      db`UPDATE cc_sessions SET status = 'error', error_message = 'Failed to publish to factory runner (no Redis)', completed_at = now()
          WHERE id = ${session.id}`.catch(() => {})
-    })
+    }
 
     res.status(201).json(session)
   } catch (err) {
@@ -139,8 +140,8 @@ const messageSchema = z.object({
 
 router.post('/sessions/:id/message', validate(messageSchema), async (req, res, next) => {
   try {
-    const ccService = require('../services/ccService')
-    await ccService.sendMessage(req.params.id, req.body.content)
+    const bridge = require('../services/factoryBridge')
+    bridge.publishSendMessage(req.params.id, req.body.content)
     res.json({ status: 'ok' })
   } catch (err) {
     next(err)
@@ -156,10 +157,11 @@ router.get('/sessions/:id/pipeline', async (req, res, next) => {
     `
     if (!session) return res.status(404).json({ error: 'Session not found' })
 
-    const ccService = require('../services/ccService')
-    const active = ccService.getActiveSessionInfo(req.params.id)
+    // Active session info now lives in factoryRunner — query via DB heartbeat
+    const isActive = session.pipeline_stage === 'executing' &&
+      session.last_heartbeat_at && (Date.now() - new Date(session.last_heartbeat_at).getTime() < 120_000)
 
-    res.json({ ...session, active })
+    res.json({ ...session, active: isActive ? { sessionId: req.params.id } : null })
   } catch (err) { next(err) }
 })
 
@@ -170,8 +172,8 @@ const resumeSchema = z.object({
 
 router.post('/sessions/:id/resume', validate(resumeSchema), async (req, res, next) => {
   try {
-    const ccService = require('../services/ccService')
-    await ccService.resumeSession(req.params.id, req.body.content)
+    const bridge = require('../services/factoryBridge')
+    bridge.publishResumeSession(req.params.id, req.body.content)
     res.json({ status: 'resumed', sessionId: req.params.id })
   } catch (err) {
     next(err)
@@ -181,8 +183,8 @@ router.post('/sessions/:id/resume', validate(resumeSchema), async (req, res, nex
 // POST /api/cc/sessions/:id/stop
 router.post('/sessions/:id/stop', async (req, res, next) => {
   try {
-    const ccService = require('../services/ccService')
-    await ccService.stopSession(req.params.id)
+    const bridge = require('../services/factoryBridge')
+    bridge.publishStopSession(req.params.id)
 
     const [updated] = await db`
       UPDATE cc_sessions SET status = 'complete', completed_at = now()

@@ -26,74 +26,7 @@ server.on('connection', (conn) => {
   conn.on('close', () => openConnections.delete(conn))
 })
 
-async function cleanupOrphanedSessions() {
-  // Sessions still marked 'running'/'initializing' at startup were NOT
-  // caught by the graceful SIGTERM handler — they survived a hard kill
-  // (OOM, SIGKILL, VPS reboot, kernel upgrade, etc).
-  //
-  // If they have a cc_cli_session_id, mark as 'paused' (resumable via --resume).
-  // Only truly orphan sessions that have no CLI session ID (old sessions or
-  // sessions that died before the init message was received).
-  // 'completing' means the close handler is actively processing — don't touch those
-  const resumable = await db`
-    UPDATE cc_sessions
-    SET status = 'paused',
-        error_message = 'Process interrupted — session is resumable'
-    WHERE status IN ('running', 'initializing')
-      AND cc_cli_session_id IS NOT NULL
-      AND (
-        (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
-        OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
-      )
-    RETURNING id, started_at
-  `
-  if (resumable.length > 0) {
-    logger.info(`Marked ${resumable.length} interrupted CC session(s) as paused (resumable via --resume)`, {
-      ids: resumable.map(r => r.id),
-    })
-  }
-
-  // Sessions without a CLI session ID truly are orphaned — no way to resume
-  const orphans = await db`
-    UPDATE cc_sessions
-    SET status = 'error',
-        error_message = 'Session orphaned — process was killed without graceful shutdown (no CLI session ID)',
-        completed_at = now()
-    WHERE status IN ('running', 'initializing')
-      AND cc_cli_session_id IS NULL
-      AND (
-        (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
-        OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
-      )
-    RETURNING id, started_at
-  `
-  if (orphans.length > 0) {
-    logger.warn(`Marked ${orphans.length} orphaned CC session(s) on startup (no CLI session ID — not resumable)`, {
-      ids: orphans.map(r => r.id),
-    })
-  }
-
-  // Sessions stuck in 'completing' for >10 minutes — the close handler crashed or
-  // the process was killed mid-close. These need cleanup too, but with a longer
-  // window since 'completing' is a legitimate transitional state.
-  const stuckCompleting = await db`
-    UPDATE cc_sessions
-    SET status = 'error',
-        error_message = 'Session stuck in completing state — close handler did not finish',
-        completed_at = now()
-    WHERE status = 'completing'
-      AND (
-        (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '10 minutes')
-        OR (last_heartbeat_at IS NULL AND started_at < now() - interval '15 minutes')
-      )
-    RETURNING id, started_at
-  `
-  if (stuckCompleting.length > 0) {
-    logger.warn(`Cleaned up ${stuckCompleting.length} session(s) stuck in completing state`, {
-      ids: stuckCompleting.map(r => r.id),
-    })
-  }
-}
+// Orphan cleanup has moved to factoryRunner — it owns CC session lifecycle.
 
 // Graceful shutdown — registered at module level so it fires regardless of
 // whether the server has finished starting. PM2 sends SIGTERM on restart/delete
@@ -104,21 +37,13 @@ async function gracefulShutdown(signal) {
   shuttingDown = true
   logger.info(`${signal} received — shutting down`)
 
-  // Stop active CC sessions gracefully so they don't become orphans
+  // CC sessions now run in the separate ecodia-factory process.
+  // No session drain needed — that's the entire point of the separation.
+  // Shutdown the bridge subscriber cleanly.
   try {
-    const ccService = require('./services/ccService')
-    const activeCount = ccService.getActiveSessionCount()
-    if (activeCount > 0) {
-      logger.info(`Pausing ${activeCount} active CC session(s) before shutdown (resumable)`)
-      // stopAllSessions kills child processes and marks DB as 'paused' (resumable)
-      await Promise.race([
-        ccService.stopAllSessions('Process restarting — session paused for resume'),
-        new Promise(resolve => setTimeout(resolve, 30000)), // Don't block shutdown >30s (kill_timeout is 45s)
-      ])
-    }
-  } catch (err) {
-    logger.debug('CC session cleanup on shutdown failed', { error: err.message })
-  }
+    const bridge = require('./services/factoryBridge')
+    await bridge.shutdown()
+  } catch {}
 
   try {
     const maintenance = require('./workers/autonomousMaintenanceWorker')
@@ -187,19 +112,55 @@ process.on('unhandledRejection', (reason) => {
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
 
-  await cleanupOrphanedSessions().catch(err =>
-    logger.error('Orphan cleanup failed on startup', { error: err.message })
-  )
+  // ── Boot: Factory Bridge ──────────────────────────────────────────
+  // Subscribe to Redis channels from factoryRunner for:
+  // 1. Session completions → trigger oversight pipeline
+  // 2. WS broadcast relay → push to connected WebSocket clients
+  try {
+    const bridge = require('./services/factoryBridge')
+    const { broadcastToSession, broadcast } = require('./websocket/wsManager')
 
-  // Run orphan cleanup periodically — catches sessions orphaned by crashes
-  // that happened before the graceful shutdown handlers could fire, or by
-  // other process instances that died without cleanup.
-  const orphanCleanupTimer = setInterval(() => {
-    cleanupOrphanedSessions().catch(err =>
-      logger.debug('Periodic orphan cleanup failed', { error: err.message })
-    )
-  }, 5 * 60 * 1000) // every 5 minutes
-  orphanCleanupTimer.unref()
+    bridge.subscribeMany({
+      // Session completed → trigger oversight pipeline
+      [bridge.CHANNELS.SESSION_COMPLETE]: async (data) => {
+        try {
+          logger.info(`Factory session ${data.sessionId} completed (${data.status}) — triggering oversight`)
+          const oversight = require('./services/factoryOversightService')
+          oversight.runPostSessionPipeline(data.sessionId).catch(err => {
+            logger.error(`Oversight pipeline failed for session ${data.sessionId}`, { error: err.message })
+            db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${data.sessionId}`.catch(() => {})
+            // Clean uncommitted changes
+            if (data.cwd) {
+              try {
+                const { execFileSync } = require('child_process')
+                execFileSync('git', ['checkout', '.'], { cwd: data.cwd, encoding: 'utf-8', timeout: 10_000 })
+                execFileSync('git', ['clean', '-fd'], { cwd: data.cwd, encoding: 'utf-8', timeout: 10_000 })
+              } catch {}
+            }
+          })
+        } catch (err) {
+          logger.error('Failed to handle session completion from factory runner', { error: err.message })
+        }
+      },
+
+      // WS relay — factory runner publishes, we push to connected clients
+      [bridge.CHANNELS.WS_BROADCAST]: (data) => {
+        try {
+          if (data.sessionId) {
+            broadcastToSession(data.sessionId, data.type, data.data)
+          } else {
+            broadcast(data.type, data.data)
+          }
+        } catch (err) {
+          logger.debug('WS relay from factory runner failed', { error: err.message })
+        }
+      },
+    })
+
+    logger.info('Factory bridge subscriptions active (completions + WS relay)')
+  } catch (err) {
+    logger.warn('Failed to initialize factory bridge subscriptions', { error: err.message })
+  }
 
   // ── Boot: Workers ─────────────────────────────────────────────────
   // Workers that have their own PM2 process in ecosystem.config.js are
