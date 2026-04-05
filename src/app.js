@@ -25,6 +25,7 @@ const contextTrackingRoutes = require('./routes/contextTracking')
 const kgExplorerRoutes = require('./routes/kgExplorer')
 const momentumRoutes = require('./routes/momentum')
 const internalCortexStateRoutes = require('./routes/internalCortexState')
+const organismMetricsRoutes = require('./routes/organismMetrics')
 
 const app = express()
 
@@ -72,6 +73,7 @@ app.use('/api/context', contextTrackingRoutes)
 app.use('/kg-explorer', kgExplorerRoutes)
 app.use('/api/momentum', momentumRoutes)
 app.use('/internal/cortex-state', internalCortexStateRoutes)
+app.use('/api/v1/organism/metrics', organismMetricsRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)
