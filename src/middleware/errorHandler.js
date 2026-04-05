@@ -8,8 +8,9 @@ function errorHandler(err, req, res, _next) {
   }
 
   const status = err.status || 500
+  // Always return actual error — single-user admin system, hiding errors helps nobody
   res.status(status).json({
-    error: status === 500 ? 'Internal server error' : err.message,
+    error: err.message || 'Internal server error',
   })
 }
 
