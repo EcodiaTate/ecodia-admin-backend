@@ -423,13 +423,19 @@ async function postStagedTransaction(stagedId) {
   const bankAccount = tx.source_account || '1000'
   const lines = []
 
+  // Guard: if category equals the bank account, the journal would DR/CR the same account — skip
+  if (tx.category === bankAccount) {
+    throw new Error(`Cannot post: category (${tx.category}) is the same as source account (${bankAccount}). This transaction should probably be DISCARD or recategorized.`)
+  }
+
   if (tx.is_personal && !isIncome) {
     // Personal expense on company card: you owe the company
     lines.push({ account_code: '2100', debit_cents: amountAbs, credit_cents: 0 })
     lines.push({ account_code: bankAccount, debit_cents: 0, credit_cents: amountAbs })
   } else if (tx.is_personal && isIncome) {
-    // Personal money into company: company owes you
-    lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
+    // Personal deposit on personal bank: if from company, DR 1000 (company bank) / CR 2100
+    // If just personal transfer, should be DISCARD
+    lines.push({ account_code: '1000', debit_cents: amountAbs, credit_cents: 0 })
     lines.push({ account_code: '2100', debit_cents: 0, credit_cents: amountAbs })
   } else if (isIncome) {
     lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
