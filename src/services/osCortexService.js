@@ -282,11 +282,15 @@ async function runTask(taskId, userMessages, { workspace }) {
   const systemPrompt = await buildSystemPrompt(workspace)
 
   // Reconstruct message history from session (last N turns)
+  // Filter: only valid role+content pairs — drop corrupt or system entries
   const history = (session.history || []).slice(-MAX_HISTORY_TURNS)
+  const validHistory = history
+    .filter(t => t.role && t.content && (t.role === 'user' || t.role === 'assistant'))
+    .map(t => ({ role: t.role, content: typeof t.content === 'string' ? t.content : JSON.stringify(t.content) }))
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...history.map(t => ({ role: t.role, content: t.content })),
-    ...userMessages,
+    ...validHistory,
+    ...userMessages.filter(m => m.role && m.content),
   ]
 
   // Persist user turn
