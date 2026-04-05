@@ -326,7 +326,7 @@ Respond as JSON:
   }))
 }
 
-async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, receivedAt }) {
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, projectCodebaseContext, receivedAt }) {
   // kgContext may already be provided by gmailService — if so, skip retrieval
   const hasExternalContext = !!kgContext
 
@@ -342,6 +342,10 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
 
   const channelsBlock = activeChannelsContext
     ? `\n--- OTHER CHANNELS ---\n${activeChannelsContext}\n--- END ---\n`
+    : ''
+
+  const codebaseBlock = projectCodebaseContext
+    ? `\n--- CLIENT PROJECTS & CODEBASES ---\n${projectCodebaseContext}\n--- END ---\n`
     : ''
 
   const now = new Date()
@@ -361,13 +365,15 @@ Now: ${now.toISOString()}
 Inbox: ${inbox || env.GOOGLE_PRIMARY_ACCOUNT}
 From: ${from}
 Subject: ${subject}${emailAge ? `\nReceived: ${emailAge}` : ''}
-${contextBlock}${pendingBlock}${channelsBlock}
+${contextBlock}${pendingBlock}${channelsBlock}${codebaseBlock}
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 
 Read this email and decide what to do. You have full autonomy — reply, archive, create a task, snooze, ignore, or anything else appropriate. Draft a reply if warranted; leave draftReply null if not. Decide if this needs human attention and why.
 
-If this email is requesting code work (a feature, bug fix, update, deployment, or technical task), set isCodeWorkRequest=true, specify codeWorkType, and write a factoryPrompt — a precise, self-contained instruction that a developer with full codebase access could execute. Include any acceptance criteria, context, or constraints from the email. Leave these null if the email is not about code work.
+If this email is requesting code work (a feature, bug fix, update, deployment, or technical task), set isCodeWorkRequest=true, specify codeWorkType, and write a factoryPrompt. The factoryPrompt must be a precise, self-contained instruction for a coding session. Reference the specific codebase by name if you can determine which one from the project/codebase context above. Include the tech stack, relevant areas of the codebase to look at, acceptance criteria, and any constraints from the email. The factoryPrompt should be detailed enough that a developer unfamiliar with the project could execute it. Leave these null if the email is not about code work.
+
+If the sender has multiple codebases and you can't determine which one applies, set suggestedCodebase to your best guess and surfaceToHuman=true with the reason.
 
 Respond as JSON:
 {
@@ -385,14 +391,54 @@ Respond as JSON:
   "surfaceReason": "...",
   "isCodeWorkRequest": true/false,
   "codeWorkType": "feature|bugfix|update|investigation|null",
-  "factoryPrompt": "precise prompt for a coding session, or null"
+  "factoryPrompt": "precise, codebase-aware prompt for a coding session, or null",
+  "suggestedCodebase": "name of the target codebase, or null"
 }`
 
-  return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {
+  const raw = await callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'gmail',
     contextQuery: hasExternalContext ? null : `${from} ${subject}`,
     skipRetrieval: hasExternalContext, // already have context, don't double-fetch
-  }))
+  })
+
+  let parsed
+  try {
+    parsed = parseJSON(raw)
+  } catch (parseErr) {
+    // Parse failure must not kill the triage pipeline — return safe defaults
+    // so the email at least gets archived/surfaced rather than stuck in 'pending' forever
+    logger.warn('triageEmail: JSON parse failed, using safe defaults', {
+      error: parseErr.message, rawSlice: (raw || '').slice(0, 200),
+    })
+    return {
+      priority: 'medium',
+      summary: `Parse error — manual review needed. Subject: ${subject || 'unknown'}`,
+      autonomousAction: 'archive',
+      reasoning: 'AI response was not valid JSON — surfacing for human review',
+      draftReply: null,
+      shouldCreateTask: false,
+      taskTitle: null,
+      taskDescription: null,
+      taskPriority: null,
+      confidence: 0.3,
+      surfaceToHuman: true,
+      surfaceReason: 'AI triage response was malformed — could not parse as JSON',
+      isCodeWorkRequest: false,
+      codeWorkType: null,
+      factoryPrompt: null,
+      suggestedCodebase: null,
+    }
+  }
+
+  // Validate critical fields — fill in safe defaults for anything missing
+  if (!parsed.priority || typeof parsed.priority !== 'string') parsed.priority = 'medium'
+  if (!parsed.summary || typeof parsed.summary !== 'string') parsed.summary = subject || 'No summary'
+  if (typeof parsed.confidence !== 'number' || isNaN(parsed.confidence)) parsed.confidence = 0.5
+  if (typeof parsed.surfaceToHuman !== 'boolean') parsed.surfaceToHuman = false
+  if (typeof parsed.isCodeWorkRequest !== 'boolean') parsed.isCodeWorkRequest = false
+  if (typeof parsed.shouldCreateTask !== 'boolean') parsed.shouldCreateTask = false
+
+  return parsed
 }
 
 async function draftEmailReply(thread) {

@@ -32,11 +32,14 @@ async function parseAnyBankCSV(csvText) {
   // Parse all rows structurally
   const header = _parseCSVRow(lines[0]).map(h => h.trim())
   const allRows = []
+  // Accept rows with at least 3 columns (date, description, amount minimum)
+  // Rows shorter than header get empty string for missing columns
+  const minCols = Math.min(3, header.length)
   for (let i = 1; i < lines.length; i++) {
     const row = _parseCSVRow(lines[i])
-    if (row.length >= header.length) {
+    if (row.length >= minCols) {
       const obj = {}
-      header.forEach((h, j) => { obj[h] = row[j] })
+      header.forEach((h, j) => { obj[h] = row[j] || '' })
       allRows.push(obj)
     }
   }
@@ -255,12 +258,14 @@ async function deleteRule(id) {
 // ═══════════════════════════════════════════════════════════════════════
 
 const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company.
-These transactions come from the director's PERSONAL bank account. Most are personal spending that has nothing to do with the business.
+These transactions may come from EITHER the company bank account or the director's personal bank account.
 
 CRITICAL DISTINCTION:
-- BUSINESS expenses (software, hosting, domains, advertising, office supplies for Ecodia) → categorize to the right GL account. These create a Director Loan entry (company owes Tate).
+- BUSINESS expenses (software, hosting, domains, advertising, office supplies for Ecodia) → categorize to the right GL account.
+  - If source_account is 2100 (personal bank): this creates a Director Loan entry (company owes the director).
+  - If source_account is 1000 (company bank): normal business expense.
 - PURELY PERSONAL expenses (fuel, food, drinks, tobacco, groceries, personal transfers, pharmacy, entertainment, bars, restaurants) → set account_code to "DISCARD" and is_personal=true. These should NOT enter the books at all.
-- Transfers between Tate's own accounts (SAV, savings) → "DISCARD"
+- Transfers between the director's own accounts (SAV, savings, Up Bank) → "DISCARD"
 - Bank fees (monthly fee, int tran fee) → 5045 Bank Fees (business expense, the account costs money to run)
 - $0.00 transactions (invalid PIN, etc.) → "DISCARD"
 
@@ -293,8 +298,11 @@ async function categorizeTransactions(transactions) {
     else needsAI.push(tx)
   }
 
-  if (needsAI.length) {
-    const aiResults = await _callDeepSeekCategorize(needsAI, rules)
+  // Batch AI calls — max 30 txns per call to avoid exceeding context window
+  const AI_BATCH_SIZE = 30
+  for (let i = 0; i < needsAI.length; i += AI_BATCH_SIZE) {
+    const batch = needsAI.slice(i, i + AI_BATCH_SIZE)
+    const aiResults = await _callDeepSeekCategorize(batch, rules)
     results.push(...aiResults)
   }
 
@@ -329,7 +337,8 @@ async function _callDeepSeekCategorize(transactions, rules) {
   const rulesText = rules.map(r => `  ${r.pattern} → ${r.supplier_name} (${r.account_code})`).join('\n')
   const txText = transactions.map(tx => {
     const dir = tx.amount_cents > 0 ? 'in' : 'out'
-    return `- ref:${tx.source_ref} | ${tx.occurred_at} | $${(Math.abs(tx.amount_cents) / 100).toFixed(2)} ${dir} | ${tx.description}`
+    const src = tx.source_account === '2100' ? 'personal_bank' : 'company_bank'
+    return `- ref:${tx.source_ref} | ${tx.occurred_at} | $${(Math.abs(tx.amount_cents) / 100).toFixed(2)} ${dir} | ${src} | ${tx.description}`
   }).join('\n')
 
   try {
@@ -354,8 +363,11 @@ async function autoCategorize() {
   const results = await categorizeTransactions(pending)
   let categorized = 0
 
+  // Index for O(1) lookup instead of O(n²) find
+  const txByRef = Object.fromEntries(pending.map(t => [t.source_ref, t]))
+
   for (const result of results) {
-    const tx = pending.find(t => t.source_ref === result.source_ref)
+    const tx = txByRef[result.source_ref]
     if (!tx) continue
 
     const confidence = result.confidence || 0
@@ -395,7 +407,8 @@ async function autoCategorize() {
 
     // Auto-post high confidence
     if (confidence >= 0.9) {
-      try { await postStagedTransaction(tx.id) } catch { /* will be posted manually */ }
+      try { await postStagedTransaction(tx.id) }
+      catch (e) { logger.warn('Auto-post failed, will need manual posting', { id: tx.id, error: e.message }) }
     }
   }
 
@@ -411,6 +424,11 @@ async function postStagedTransaction(stagedId) {
   if (!tx) throw new Error('Transaction not found')
   if (!tx.category) throw new Error('Transaction not categorized')
   if (tx.status === 'posted') throw new Error('Already posted')
+  if (tx.category === 'DISCARD') throw new Error('Cannot post DISCARD transaction — this is a personal item that should not enter the books. Use ignore instead.')
+
+  // Validate GL account exists
+  const [acctCheck] = await db`SELECT code FROM gl_accounts WHERE code = ${tx.category}`
+  if (!acctCheck) throw new Error(`GL account ${tx.category} does not exist. Create it first.`)
 
   // Check period is open
   await checkPeriodOpen(tx.occurred_at)
@@ -429,14 +447,23 @@ async function postStagedTransaction(stagedId) {
   }
 
   if (tx.is_personal && !isIncome) {
-    // Personal expense on company card: you owe the company
+    // Personal expense on company card: you owe the company → DR Director Loan / CR Bank
     lines.push({ account_code: '2100', debit_cents: amountAbs, credit_cents: 0 })
     lines.push({ account_code: bankAccount, debit_cents: 0, credit_cents: amountAbs })
   } else if (tx.is_personal && isIncome) {
-    // Personal deposit on personal bank: if from company, DR 1000 (company bank) / CR 2100
-    // If just personal transfer, should be DISCARD
-    lines.push({ account_code: '1000', debit_cents: amountAbs, credit_cents: 0 })
-    lines.push({ account_code: '2100', debit_cents: 0, credit_cents: amountAbs })
+    // Personal income: company paying director back, or salary, etc.
+    // From company bank (1000): DR 2100 / CR 1000 (reduces director loan via company bank)
+    // From personal bank (2100): DR 2100 / CR category (personal income doesn't touch company)
+    // — but personal income on personal bank should usually be DISCARD
+    if (bankAccount === '2100') {
+      // Personal bank: DR director loan (reduce what's owed) / CR the income category
+      lines.push({ account_code: '2100', debit_cents: amountAbs, credit_cents: 0 })
+      lines.push({ account_code: tx.category, debit_cents: 0, credit_cents: amountAbs })
+    } else {
+      // Company bank: director repaying → DR bank / CR director loan
+      lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
+      lines.push({ account_code: '2100', debit_cents: 0, credit_cents: amountAbs })
+    }
   } else if (isIncome) {
     lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
     if (gst > 0) {
@@ -485,27 +512,34 @@ async function postStagedTransaction(stagedId) {
 
 async function getLedgerTransactions(limit = 50, offset = 0) {
   const txs = await db`SELECT * FROM ledger_transactions ORDER BY occurred_at DESC LIMIT ${limit} OFFSET ${offset}`
-  const result = []
-  for (const t of txs) {
-    const lines = await db`
-      SELECT l.*, a.name AS account_name, a.type AS account_type
-      FROM ledger_lines l JOIN gl_accounts a ON a.code = l.account_code
-      WHERE l.tx_id = ${t.id}
-    `
-    result.push({ ...t, lines })
+  if (!txs.length) return []
+
+  const txIds = txs.map(t => t.id)
+  const allLines = await db`
+    SELECT l.*, a.name AS account_name, a.type AS account_type
+    FROM ledger_lines l JOIN gl_accounts a ON a.code = l.account_code
+    WHERE l.tx_id = ANY(${txIds})
+  `
+
+  const linesByTx = {}
+  for (const line of allLines) {
+    if (!linesByTx[line.tx_id]) linesByTx[line.tx_id] = []
+    linesByTx[line.tx_id].push(line)
   }
-  return result
+
+  return txs.map(t => ({ ...t, lines: linesByTx[t.id] || [] }))
 }
 
 async function getTrialBalance(asOf) {
   if (asOf) {
+    // Date filter must be in the ON clause to preserve the LEFT JOIN semantics
     return db`
       SELECT a.code, a.name, a.type,
         COALESCE(SUM(l.debit_cents), 0)::int AS total_debit,
         COALESCE(SUM(l.credit_cents), 0)::int AS total_credit
       FROM gl_accounts a
       LEFT JOIN ledger_lines l ON l.account_code = a.code
-      LEFT JOIN ledger_transactions t ON t.id = l.tx_id AND t.occurred_at <= ${asOf}
+        AND EXISTS (SELECT 1 FROM ledger_transactions t WHERE t.id = l.tx_id AND t.occurred_at <= ${asOf})
       GROUP BY a.code, a.name, a.type
       HAVING COALESCE(SUM(l.debit_cents), 0) > 0 OR COALESCE(SUM(l.credit_cents), 0) > 0
       ORDER BY a.code
@@ -602,26 +636,60 @@ async function getBalanceSheet(asOf) {
       COALESCE(SUM(l.credit_cents), 0)::int AS total_credit
     FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
     JOIN gl_accounts a ON a.code = l.account_code
-    WHERE t.occurred_at <= ${asOf} AND a.type IN ('asset', 'liability')
+    WHERE t.occurred_at <= ${asOf} AND a.type IN ('asset', 'liability', 'equity')
     GROUP BY a.code, a.name, a.type ORDER BY a.code
   `
-  const assets = [], liabilities = []
-  let totalAssets = 0, totalLiabilities = 0
+
+  // Compute current-year earnings (income - expenses not yet closed to retained earnings)
+  // FY runs July-June in AU; determine which FY 'asOf' falls into
+  const asOfDate = new Date(asOf)
+  const fyStartYear = asOfDate.getMonth() >= 6 ? asOfDate.getFullYear() : asOfDate.getFullYear() - 1
+  const fyStart = `${fyStartYear}-07-01`
+
+  const [earningsRow] = await db`
+    SELECT
+      COALESCE(SUM(CASE WHEN a.type = 'income' THEN l.credit_cents - l.debit_cents ELSE 0 END), 0)::int
+      - COALESCE(SUM(CASE WHEN a.type = 'expense' THEN l.debit_cents - l.credit_cents ELSE 0 END), 0)::int
+      AS current_year_earnings
+    FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
+    JOIN gl_accounts a ON a.code = l.account_code
+    WHERE t.occurred_at >= ${fyStart} AND t.occurred_at <= ${asOf}
+      AND a.type IN ('income', 'expense')
+  `
+  const currentYearEarnings = earningsRow?.current_year_earnings || 0
+
+  const assets = [], liabilities = [], equity = []
+  let totalAssets = 0, totalLiabilities = 0, totalEquity = 0
   for (const r of rows) {
     if (r.type === 'asset') {
       const bal = r.total_debit - r.total_credit
       assets.push({ account_code: r.code, account_name: r.name, balance_cents: bal })
       totalAssets += bal
-    } else {
+    } else if (r.type === 'liability') {
       const bal = r.total_credit - r.total_debit
       liabilities.push({ account_code: r.code, account_name: r.name, balance_cents: bal })
       totalLiabilities += bal
+    } else {
+      // Equity: normal balance is credit
+      const bal = r.total_credit - r.total_debit
+      equity.push({ account_code: r.code, account_name: r.name, balance_cents: bal })
+      totalEquity += bal
     }
   }
+
+  // Add current-year earnings as a virtual equity line
+  if (currentYearEarnings !== 0) {
+    equity.push({ account_code: 'CYE', account_name: 'Current Year Earnings', balance_cents: currentYearEarnings })
+    totalEquity += currentYearEarnings
+  }
+
   return {
-    as_of: asOf, assets, liabilities,
-    total_assets_cents: totalAssets, total_liabilities_cents: totalLiabilities,
-    net_position_cents: totalAssets - totalLiabilities,
+    as_of: asOf, assets, liabilities, equity,
+    total_assets_cents: totalAssets,
+    total_liabilities_cents: totalLiabilities,
+    total_equity_cents: totalEquity,
+    net_position_cents: totalAssets - totalLiabilities - totalEquity,
+    balanced: totalAssets === totalLiabilities + totalEquity,
   }
 }
 
@@ -724,14 +792,20 @@ async function searchLedger({ keyword, dateFrom, dateTo, accountCode, limit = 50
     `SELECT * FROM ledger_transactions t ${where} ORDER BY t.occurred_at DESC LIMIT $${params.push(limit)}`,
     params,
   )
-  const result = []
-  for (const t of txs) {
-    const lines = await db`
-      SELECT l.*, a.name AS account_name FROM ledger_lines l
-      JOIN gl_accounts a ON a.code = l.account_code WHERE l.tx_id = ${t.id}`
-    result.push({ ...t, lines })
+  if (!txs.length) return []
+
+  const txIds = txs.map(t => t.id)
+  const allLines = await db`
+    SELECT l.*, a.name AS account_name FROM ledger_lines l
+    JOIN gl_accounts a ON a.code = l.account_code WHERE l.tx_id = ANY(${txIds})`
+
+  const linesByTx = {}
+  for (const line of allLines) {
+    if (!linesByTx[line.tx_id]) linesByTx[line.tx_id] = []
+    linesByTx[line.tx_id].push(line)
   }
-  return result
+
+  return txs.map(t => ({ ...t, lines: linesByTx[t.id] || [] }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -875,25 +949,29 @@ async function performEOFYClose(fyEnd) {
 // AUTO-LEARN SUPPLIER RULES
 // ═══════════════════════════════════════════════════════════════════════
 
-async function autoLearnRule(description, category, isPersonal, source = 'ai_learned') {
-  // Extract a likely supplier pattern from the description
-  const words = description.replace(/[#()\[\]{}]/g, '').split(/\s+/).slice(0, 3)
-  const pattern = words.join('.*').toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, (m) =>
-    ['.*'].includes(m) ? m : '\\' + m
-  )
+async function autoLearnRule(description, category, isPersonal, source = 'ai_learned', gstTreatment = null) {
+  // Extract first 3 meaningful words, escape each for regex, join with .*
+  const words = description.replace(/[#()\[\]{}"']/g, '').split(/\s+/).filter(w => w.length > 1).slice(0, 3)
+  if (words.length === 0) return null
+
+  const escaped = words.map(w => w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const pattern = escaped.join('.*')
   if (pattern.length < 3) return null
 
-  // Check if rule already exists for this pattern
+  // Check if any existing rule already matches this description (not just exact pattern match)
   const existing = await db`SELECT id FROM supplier_rules WHERE pattern = ${pattern}`
   if (existing.length) return null
+
+  // Default GST: personal = no_gst, DISCARD = no_gst, otherwise assume gst_inclusive (AU domestic)
+  const gst = gstTreatment || (isPersonal || category === 'DISCARD' ? 'no_gst' : 'gst_inclusive')
 
   const supplierName = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
   const [rule] = await db`
     INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, gst_treatment, learning_source, tags)
-    VALUES (${pattern}, ${supplierName}, ${category}, ${isPersonal || false}, 'gst_free', ${source}, ${'["auto_learned"]'})
+    VALUES (${pattern}, ${supplierName}, ${category}, ${isPersonal || false}, ${gst}, ${source}, ${'["auto_learned"]'})
     RETURNING id`
 
-  logger.info('Auto-learned supplier rule', { pattern, supplierName, category, source })
+  logger.info('Auto-learned supplier rule', { pattern, supplierName, category, gst, source })
   return rule?.id
 }
 
@@ -936,31 +1014,65 @@ async function reconcileBank(bankBalanceCents, asOfDate, accountCode = '1000') {
 // ═══════════════════════════════════════════════════════════════════════
 
 async function getCashFlowStatement(periodStart, periodEnd) {
-  // Direct method: look at actual cash movements through bank accounts
+  // Direct method: for each journal in the period that touches cash (1000/1100),
+  // sum the counterparty account movements grouped by account type
   const flows = await db`
     SELECT a.code, a.name, a.type,
-      COALESCE(SUM(CASE WHEN l2.account_code IN ('1000','1100') THEN l.debit_cents ELSE 0 END), 0)::int AS cash_in,
-      COALESCE(SUM(CASE WHEN l2.account_code IN ('1000','1100') THEN l.credit_cents ELSE 0 END), 0)::int AS cash_out
+      COALESCE(SUM(l.debit_cents), 0)::int AS total_debit,
+      COALESCE(SUM(l.credit_cents), 0)::int AS total_credit
     FROM ledger_lines l
     JOIN ledger_transactions t ON t.id = l.tx_id
     JOIN gl_accounts a ON a.code = l.account_code
-    JOIN ledger_lines l2 ON l2.tx_id = t.id AND l2.id != l.id
     WHERE t.occurred_at >= ${periodStart} AND t.occurred_at <= ${periodEnd}
       AND l.account_code NOT IN ('1000', '1100')
+      AND EXISTS (
+        SELECT 1 FROM ledger_lines l2
+        WHERE l2.tx_id = t.id AND l2.account_code IN ('1000', '1100')
+      )
     GROUP BY a.code, a.name, a.type`
 
-  const operating = flows.filter(f => ['income', 'expense'].includes(f.type))
-  const financing = flows.filter(f => f.code === '2100') // Director loan
-  const other = flows.filter(f => !['income', 'expense'].includes(f.type) && f.code !== '2100')
+  // For each non-cash account, net = debit - credit tells us the flow direction
+  // Income accounts: credits > debits = cash came in (positive flow)
+  // Expense accounts: debits > credits = cash went out (negative flow)
+  const items = flows.map(f => {
+    let netCashImpact
+    if (f.type === 'income') {
+      netCashImpact = f.total_credit - f.total_debit // positive = cash inflow
+    } else if (f.type === 'expense') {
+      netCashImpact = -(f.total_debit - f.total_credit) // negative = cash outflow
+    } else {
+      // Balance sheet items: debit increases asset/reduces liability = cash outflow
+      netCashImpact = f.total_credit - f.total_debit
+    }
+    return { code: f.code, name: f.name, type: f.type, net_cents: netCashImpact }
+  })
 
-  const sum = (items) => items.reduce((s, i) => s + (i.cash_in - i.cash_out), 0)
+  const operating = items.filter(f => ['income', 'expense'].includes(f.type))
+  const financing = items.filter(f => f.code === '2100') // Director loan
+  const tax = items.filter(f => ['2110', '2120'].includes(f.code)) // GST
+  const other = items.filter(f => !['income', 'expense'].includes(f.type) && f.code !== '2100' && !['2110', '2120'].includes(f.code))
+
+  const sum = (arr) => arr.reduce((s, i) => s + i.net_cents, 0)
+
+  // Also get opening and closing cash balances
+  const [openBal] = await db`
+    SELECT COALESCE(SUM(l.debit_cents - l.credit_cents), 0)::int AS balance
+    FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
+    WHERE l.account_code IN ('1000', '1100') AND t.occurred_at < ${periodStart}`
+  const [closeBal] = await db`
+    SELECT COALESCE(SUM(l.debit_cents - l.credit_cents), 0)::int AS balance
+    FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
+    WHERE l.account_code IN ('1000', '1100') AND t.occurred_at <= ${periodEnd}`
 
   return {
     period: { start: periodStart, end: periodEnd },
+    opening_cash_cents: openBal?.balance || 0,
+    closing_cash_cents: closeBal?.balance || 0,
     operating: { items: operating, net: sum(operating) },
     financing: { items: financing, net: sum(financing) },
+    gst: { items: tax, net: sum(tax) },
     other: { items: other, net: sum(other) },
-    net_cash_flow: sum(flows),
+    net_cash_flow: sum(items),
   }
 }
 
@@ -987,17 +1099,33 @@ async function matchReceiptToTransaction(receiptId) {
   const receipt = await db`SELECT * FROM bk_receipts WHERE id = ${receiptId}`.then(r => r[0])
   if (!receipt || !receipt.amount_cents) return null
 
-  // Try to find a matching staged or ledger transaction by amount + date proximity
-  const candidates = await db`
-    SELECT id, description, amount_cents, occurred_at, 'staged' AS source FROM staged_transactions
-    WHERE ABS(amount_cents) = ${Math.abs(receipt.amount_cents)}
-      AND occurred_at BETWEEN ${receipt.receipt_date}::date - 3 AND ${receipt.receipt_date}::date + 3
+  const absAmount = Math.abs(receipt.amount_cents)
+  const receiptDate = receipt.receipt_date
+
+  // Find staged transactions matching by absolute amount within +/- 5 days
+  const stagedCandidates = await db`
+    SELECT id, description, amount_cents, occurred_at, 'staged' AS source,
+      ABS(occurred_at::date - ${receiptDate}::date) AS date_distance
+    FROM staged_transactions
+    WHERE ABS(amount_cents) = ${absAmount}
+      AND occurred_at BETWEEN ${receiptDate}::date - 5 AND ${receiptDate}::date + 5
       AND receipt_id IS NULL
-    UNION ALL
-    SELECT t.id, t.description, (SELECT SUM(debit_cents) FROM ledger_lines WHERE tx_id = t.id)::int AS amount_cents,
-      t.occurred_at, 'ledger' AS source FROM ledger_transactions t
-    WHERE t.occurred_at BETWEEN ${receipt.receipt_date}::date - 3 AND ${receipt.receipt_date}::date + 3
-    ORDER BY occurred_at`
+    ORDER BY ABS(occurred_at::date - ${receiptDate}::date) ASC
+    LIMIT 5`
+
+  // Find ledger transactions matching — compare against the credit side (what left the bank)
+  const ledgerCandidates = await db`
+    SELECT t.id, t.description, ll.credit_cents AS amount_cents, t.occurred_at, 'ledger' AS source,
+      ABS(t.occurred_at::date - ${receiptDate}::date) AS date_distance
+    FROM ledger_transactions t
+    JOIN ledger_lines ll ON ll.tx_id = t.id AND ll.account_code IN ('1000', '1100') AND ll.credit_cents > 0
+    WHERE ll.credit_cents = ${absAmount}
+      AND t.occurred_at BETWEEN ${receiptDate}::date - 5 AND ${receiptDate}::date + 5
+    ORDER BY ABS(t.occurred_at::date - ${receiptDate}::date) ASC
+    LIMIT 5`
+
+  const candidates = [...stagedCandidates, ...ledgerCandidates]
+    .sort((a, b) => (a.date_distance || 99) - (b.date_distance || 99))
 
   if (candidates.length === 0) return null
 

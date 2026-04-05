@@ -17,7 +17,7 @@ const env = require('../config/env')
 // when needed.
 // ───────────────────────────────────────────────────────────────────
 
-async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
+async function resolveCodebase({ codebaseId, codebaseName, prompt, clientId }) {
   // 1. Explicit ID — only query if it looks like a UUID
   if (codebaseId) {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(codebaseId)
@@ -41,6 +41,34 @@ async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
     const allCodebases = await db`SELECT id, name, language, repo_path FROM codebases ORDER BY name`
     if (allCodebases.length === 0) return null
 
+    // Enrich the AI prompt with client context if available
+    let clientHint = ''
+    if (clientId) {
+      const clientProjects = await db`
+        SELECT p.name AS project_name, cb.name AS codebase_name
+        FROM projects p
+        LEFT JOIN codebases cb ON cb.project_id = p.id
+        WHERE p.client_id = ${clientId} AND p.status = 'active'
+      `.catch(err => { logger.debug('Failed to fetch client projects for codebase resolution', { error: err.message }); return [] })
+      if (clientProjects.length > 0) {
+        clientHint = `\nClient's projects: ${clientProjects.map(p =>
+          `${p.project_name} (codebase: ${p.codebase_name || 'none'})`
+        ).join(', ')}\n`
+      }
+    }
+
+    // Enrich with recent session activity per codebase
+    const activityHints = await db`
+      SELECT cb.name, count(*)::int AS sessions_14d
+      FROM cc_sessions cs
+      JOIN codebases cb ON cs.codebase_id = cb.id
+      WHERE cs.started_at > now() - interval '14 days'
+      GROUP BY cb.name ORDER BY sessions_14d DESC
+    `.catch(err => { logger.debug('Failed to fetch activity hints for codebase resolution', { error: err.message }); return [] })
+    const activityStr = activityHints.length > 0
+      ? `\nRecent activity: ${activityHints.map(a => `${a.name} (${a.sessions_14d} sessions)`).join(', ')}\n`
+      : ''
+
     const codebaseList = allCodebases.map(cb => `- ${cb.name} (${cb.language || 'unknown'}, ${cb.repo_path})`).join('\n')
 
     try {
@@ -51,9 +79,9 @@ async function resolveCodebase({ codebaseId, codebaseName, prompt }) {
 
 Available codebases:
 ${codebaseList}
-
-Task: ${prompt.slice(0, 500)}`,
-      }], { module: 'factory_dispatch', skipRetrieval: true })
+${clientHint}${activityStr}
+Task: ${prompt.slice(0, 800)}`,
+      }], { module: 'factory_dispatch', skipRetrieval: true, temperature: 0.1 })
 
       const resolved = response.trim().toLowerCase().replace(/['"]/g, '')
       if (resolved && resolved !== 'none') {
@@ -239,8 +267,8 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
 
     return { suppress: false }
   } catch (err) {
-    // Never block dispatch on dedup failure — log and allow
-    logger.debug('Dispatch dedup check failed, allowing dispatch', { error: err.message })
+    // Never block dispatch on dedup failure — but log at warn so it's visible
+    logger.warn('Dispatch dedup check failed, allowing dispatch', { error: err.message })
     return { suppress: false }
   }
 }
@@ -302,8 +330,16 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
   const published = bridge.publishSessionRequest(session)
   if (!published) {
     logger.error(`Factory session ${session.id} failed to publish — no Redis connection`)
-    db`UPDATE cc_sessions SET status = 'error', error_message = 'Failed to publish session request to factory runner (no Redis)', completed_at = now(), pipeline_stage = 'failed'
-       WHERE id = ${session.id}`.catch(() => {})
+    await db`
+      UPDATE cc_sessions
+      SET status = 'error',
+          error_message = 'Failed to publish session request to factory runner (no Redis)',
+          completed_at = now(),
+          pipeline_stage = 'failed'
+      WHERE id = ${session.id}
+    `.catch(err => logger.error('Failed to mark unpublished session as error', { sessionId: session.id, error: err.message }))
+    // Return null so callers know dispatch failed (not a valid session)
+    return null
   }
 
   return session
@@ -316,16 +352,42 @@ async function dispatchFromCortex(description, params = {}) {
     codebaseId: params.codebaseId,
     codebaseName: params.codebaseName,
     prompt: description,
+    clientId: params.clientId,
   })
 
-  return createAndStartSession({
+  const session = await createAndStartSession({
     codebaseId,
     prompt: description,
-    triggeredBy: 'cortex',
-    triggerSource: 'cortex',
+    triggeredBy: params.triggeredBy || 'cortex',
+    triggerSource: params.triggerSource || 'cortex',
+    triggerRefId: params.triggerRefId || null,
     projectId: params.projectId || null,
+    clientId: params.clientId || null,
     workingDir: params.workingDir || null,
   })
+
+  // Track in code_requests so Cortex dispatches are visible in the coding workspace
+  // alongside email/CRM dispatches — unified view of all code work
+  if (session) {
+    try {
+      const codeRequestService = require('./codeRequestService')
+      await codeRequestService.createFromCortex({
+        summary: description.slice(0, 200),
+        prompt: description,
+        codebaseId,
+        clientId: params.clientId,
+        projectId: params.projectId,
+        skipDispatch: true,  // Session already created above — don't double-dispatch
+      }).then(cr => {
+        // Link the code request to the session
+        codeRequestService.linkSession(cr.id, session.id)
+      })
+    } catch (crErr) {
+      logger.debug('Failed to create code request from Cortex dispatch (non-blocking)', { error: crErr.message })
+    }
+  }
+
+  return session
 }
 
 // ─── Trigger: CRM Stage Change ──────────────────────────────────────
@@ -400,8 +462,18 @@ or
           sessionId: session.id,
         })
       } catch (crErr) {
-        logger.debug('Failed to create code request from CRM dispatch', { error: crErr.message })
+        logger.warn('Failed to create code request from CRM dispatch', { error: crErr.message, clientId })
       }
+
+      // Log dispatch back to pipeline_events so CRM UI can see it
+      await db`
+        INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
+        VALUES (
+          ${clientId},
+          ${newStage}, ${newStage},
+          ${'Factory session dispatched: ' + (session.id || 'unknown') + ' — ' + (prompt || '').slice(0, 100)}
+        )
+      `.catch(err => logger.debug('Failed to log CRM dispatch to pipeline_events', { error: err.message }))
     }
 
     return session
@@ -588,9 +660,9 @@ Implement the proposed changes.`,
 
   if (session) {
     await _logDispatch('self_modification', session.id, { description: (spec.description || '').slice(0, 200) })
+    const currentCount = await _getSlidingWindowCount('self_modification')
+    logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${currentCount}/${SELF_MOD_DAILY_CAP || 'unlimited'} in 24h window)`)
   }
-
-  logger.info(`Factory self-modification dispatched: ${(spec.description || '').slice(0, 80)} (${windowCount + 1}/${SELF_MOD_DAILY_CAP} in 24h window)`)
 
   return session
 }

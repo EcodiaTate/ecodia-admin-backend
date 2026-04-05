@@ -46,19 +46,31 @@ router.post('/staged/:id/post', async (req, res, next) => {
 router.post('/staged/batch-post', async (_req, res, next) => {
   try {
     const rows = await bk.listStaged('categorized', 500)
-    let posted = 0, errors = []
+    let posted = 0, skipped = 0, errors = []
     for (const row of rows) {
-      if (!row.category) continue
+      if (!row.category || row.category === 'DISCARD') { skipped++; continue }
       try { await bk.postStagedTransaction(row.id); posted++ }
       catch (e) { errors.push({ id: row.id, error: e.message }) }
     }
-    res.json({ posted, errors })
+    res.json({ posted, skipped, errors })
   } catch (err) { next(err) }
 })
 
 router.post('/staged/:id/ignore', async (req, res, next) => {
   try { await bk.markIgnored(req.params.id); res.json({ status: 'ignored' }) }
   catch (err) { next(err) }
+})
+
+router.post('/staged/:id/discard', async (req, res, next) => {
+  try {
+    await bk.updateStaged(req.params.id, { category: 'DISCARD', is_personal: true, status: 'ignored' })
+    // Optionally auto-learn a DISCARD rule
+    if (req.query.learn === 'true') {
+      const tx = await bk.getStaged(req.params.id)
+      if (tx) await bk.autoLearnRule(tx.description, 'DISCARD', true, 'manual_discard').catch(() => {})
+    }
+    res.json({ status: 'discarded' })
+  } catch (err) { next(err) }
 })
 
 // ── Ingest ──

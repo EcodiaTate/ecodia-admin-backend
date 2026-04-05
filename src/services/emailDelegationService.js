@@ -99,7 +99,7 @@ function _looksLikeReceipt(thread, triageResult) {
 }
 
 function _extractAmountFromBody(body) {
-  // Look for dollar amounts — take the largest one (likely the total)
+  // Look for dollar amounts
   const matches = body.match(/\$(\d{1,6}(?:,\d{3})*\.\d{2})/g)
   if (!matches || !matches.length) return null
 
@@ -108,7 +108,19 @@ function _extractAmountFromBody(body) {
     return Math.round(parseFloat(clean) * 100)
   })
 
-  // Return the largest amount (likely the total, not a line item)
+  // Strategy: look for amount near "total" or "charged" keywords
+  const lower = body.toLowerCase()
+  const totalIdx = Math.max(lower.lastIndexOf('total'), lower.lastIndexOf('charged'), lower.lastIndexOf('amount due'))
+  if (totalIdx >= 0) {
+    // Find the first $ amount after the "total" keyword
+    const afterTotal = body.slice(totalIdx)
+    const totalMatch = afterTotal.match(/\$(\d{1,6}(?:,\d{3})*\.\d{2})/)
+    if (totalMatch) {
+      return Math.round(parseFloat(totalMatch[1].replace(/,/g, '')) * 100)
+    }
+  }
+
+  // Fallback: take the largest amount (most likely the total)
   return Math.max(...amounts)
 }
 
@@ -198,11 +210,21 @@ async function delegateToCRM(thread) {
   if (thread.client_id) return null // Already linked
 
   try {
-    // Try to match sender to a CRM client
+    // Try to match sender to a CRM client by any email field
+    const senderEmail = thread.from_email?.toLowerCase()
+    if (!senderEmail) return null
+
+    // Also try matching by domain for company emails
+    const senderDomain = senderEmail.split('@')[1]
     const [client] = await db`
       SELECT id, name FROM clients
-      WHERE email ILIKE ${thread.from_email}
-         OR company_email ILIKE ${thread.from_email}
+      WHERE email ILIKE ${senderEmail}
+         OR company_email ILIKE ${senderEmail}
+         OR EXISTS (
+           SELECT 1 FROM jsonb_array_elements_text(COALESCE(metadata->'emails', '[]'::jsonb)) AS e
+           WHERE lower(e) = ${senderEmail}
+         )
+         OR (company_email IS NOT NULL AND company_email ILIKE ${'%@' + senderDomain} AND ${senderDomain} NOT IN ('gmail.com','outlook.com','hotmail.com','yahoo.com','icloud.com'))
       LIMIT 1`
 
     if (client) {

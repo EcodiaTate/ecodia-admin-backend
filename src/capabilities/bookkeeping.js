@@ -143,6 +143,21 @@ registry.registerMany([
       const totalCredit = params.lines.reduce((s, l) => s + (l.credit_cents || 0), 0)
       if (totalDebit !== totalCredit) throw new Error(`Journal unbalanced: debits=${totalDebit} credits=${totalCredit}`)
       if (params.lines.length < 2) throw new Error('Need at least 2 lines')
+      if (totalDebit === 0) throw new Error('Journal has zero total — nothing to record')
+
+      // Validate date format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(params.occurred_at)) throw new Error(`Invalid date format: ${params.occurred_at}. Use YYYY-MM-DD`)
+
+      // Validate account codes exist
+      const codes = [...new Set(params.lines.map(l => l.account_code))]
+      const validAccounts = await db`SELECT code FROM gl_accounts WHERE code = ANY(${codes})`
+      const validCodes = new Set(validAccounts.map(a => a.code))
+      const invalid = codes.filter(c => !validCodes.has(c))
+      if (invalid.length) throw new Error(`Unknown account codes: ${invalid.join(', ')}. Create them first with bookkeeping_create_account.`)
+
+      // Check period is open
+      const bk = require('../services/bookkeeperService')
+      await bk.checkPeriodOpen(params.occurred_at)
 
       const [tx] = await db`
         INSERT INTO ledger_transactions (occurred_at, description, source_system, source_ref, tags)
@@ -752,6 +767,246 @@ registry.registerMany([
         WHERE ${conditions.join(' AND ')}
         ORDER BY t.occurred_at DESC LIMIT $${values.push(limit)}`, values)
       return { lines: rows, count: rows.length, account_code: params.account_code }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RULE MANAGEMENT: Update existing rules
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_update_rule',
+    description: 'Update an existing supplier categorization rule — change pattern, account, GST treatment, personal flag, etc.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Rule UUID to update' },
+      pattern: { type: 'string', required: false, description: 'New regex pattern' },
+      supplier_name: { type: 'string', required: false, description: 'New supplier display name' },
+      account_code: { type: 'string', required: false, description: 'New GL account code' },
+      is_personal: { type: 'boolean', required: false, description: 'Personal flag' },
+      gst_treatment: { type: 'string', required: false, description: 'gst_inclusive, gst_free, or no_gst' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const { id, ...fields } = params
+      if (Object.keys(fields).length === 0) throw new Error('No fields to update')
+      await db`UPDATE supplier_rules SET ${db(fields, ...Object.keys(fields))} WHERE id = ${id}`
+      return { message: `Rule ${id} updated`, fields }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RECATEGORIZE + REPOST: Fix a posted transaction end-to-end
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_recategorize_posted',
+    description: 'Fix a posted transaction: reverses the old journal entry, updates the staged record with the new category, and re-posts. All-in-one correction flow.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      staged_id: { type: 'string', required: true, description: 'Staged transaction UUID (must be status=posted)' },
+      new_category: { type: 'string', required: true, description: 'New GL account code' },
+      is_personal: { type: 'boolean', required: false, description: 'Update personal flag' },
+      gst_amount_cents: { type: 'number', required: false, description: 'New GST amount (0 for GST-free)' },
+      reason: { type: 'string', required: false, description: 'Reason for recategorization' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const tx = await bk.getStaged(params.staged_id)
+      if (!tx) throw new Error('Staged transaction not found')
+      if (tx.status !== 'posted') throw new Error(`Transaction status is ${tx.status}, expected posted`)
+      if (!tx.ledger_tx_id) throw new Error('No ledger entry linked — cannot reverse')
+
+      // 1. Reverse the old journal
+      const reversalId = await bk.reverseJournalEntry(tx.ledger_tx_id, params.reason || 'Recategorization')
+
+      // 2. Update staged record
+      const updates = { category: params.new_category, status: 'categorized', ledger_tx_id: null }
+      if (params.is_personal !== undefined) updates.is_personal = params.is_personal
+      if (params.gst_amount_cents !== undefined) updates.gst_amount_cents = params.gst_amount_cents
+      await bk.updateStaged(params.staged_id, updates)
+
+      // 3. Re-post
+      const newLedgerId = await bk.postStagedTransaction(params.staged_id)
+
+      return {
+        message: `Recategorized: reversed ${tx.ledger_tx_id}, re-posted as ${newLedgerId}`,
+        reversal_id: reversalId, new_ledger_id: newLedgerId,
+      }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // BULK MANUAL CATEGORIZE: Set category on multiple transactions at once
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_bulk_categorize',
+    description: 'Manually categorize multiple staged transactions at once. Pass an array of {id, category, is_personal?, gst_amount_cents?}. Optionally auto-post after categorizing.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      items: { type: 'array', required: true, description: 'Array of {id, category, is_personal?, gst_amount_cents?}' },
+      auto_post: { type: 'boolean', required: false, description: 'If true, post each transaction after categorizing' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      if (typeof params.items === 'string') params.items = JSON.parse(params.items)
+      let categorized = 0, posted = 0, errors = []
+      for (const item of params.items) {
+        try {
+          const updates = { category: item.category, status: item.category === 'DISCARD' ? 'ignored' : 'categorized' }
+          if (item.is_personal !== undefined) updates.is_personal = item.is_personal
+          if (item.gst_amount_cents !== undefined) updates.gst_amount_cents = item.gst_amount_cents
+          await bk.updateStaged(item.id, updates)
+          categorized++
+          if (params.auto_post && item.category !== 'DISCARD') {
+            try { await bk.postStagedTransaction(item.id); posted++ }
+            catch (e) { errors.push({ id: item.id, phase: 'post', error: e.message }) }
+          }
+        } catch (e) { errors.push({ id: item.id, phase: 'categorize', error: e.message }) }
+      }
+      return { categorized, posted, errors: errors.length ? errors : undefined }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // AGED RECEIVABLES: Who owes money and how old
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_aged_receivables',
+    description: 'Show aged receivables — outstanding amounts in 1200 (Accounts Receivable) broken down by age bucket (current, 30, 60, 90+ days)',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      as_of: { type: 'string', required: false, description: 'Date YYYY-MM-DD (default: today)' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const asOf = params.as_of || new Date().toISOString().slice(0, 10)
+      const rows = await db`
+        SELECT t.id, t.description, t.occurred_at, t.supplier,
+          COALESCE(SUM(l.debit_cents) - SUM(l.credit_cents), 0)::int AS balance,
+          ${asOf}::date - t.occurred_at::date AS days_old
+        FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
+        WHERE l.account_code = '1200' AND t.occurred_at <= ${asOf}
+        GROUP BY t.id, t.description, t.occurred_at, t.supplier
+        HAVING COALESCE(SUM(l.debit_cents) - SUM(l.credit_cents), 0) > 0
+        ORDER BY t.occurred_at ASC`
+
+      const buckets = { current: 0, '30_days': 0, '60_days': 0, '90_plus': 0 }
+      for (const r of rows) {
+        if (r.days_old <= 30) buckets.current += r.balance
+        else if (r.days_old <= 60) buckets['30_days'] += r.balance
+        else if (r.days_old <= 90) buckets['60_days'] += r.balance
+        else buckets['90_plus'] += r.balance
+      }
+
+      return { as_of: asOf, items: rows, buckets, total_outstanding: rows.reduce((s, r) => s + r.balance, 0) }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // SUPPLIER SPEND REPORT: Spend by supplier over a period
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_supplier_spend',
+    description: 'Breakdown spending by supplier for a period — who you are paying and how much',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      period_start: { type: 'string', required: true, description: 'Start date YYYY-MM-DD' },
+      period_end: { type: 'string', required: true, description: 'End date YYYY-MM-DD' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const rows = await db`
+        SELECT t.supplier, COUNT(*)::int AS tx_count,
+          COALESCE(SUM(l.debit_cents), 0)::int AS total_spend_cents
+        FROM ledger_transactions t
+        JOIN ledger_lines l ON l.tx_id = t.id
+        JOIN gl_accounts a ON a.code = l.account_code
+        WHERE t.occurred_at >= ${params.period_start} AND t.occurred_at <= ${params.period_end}
+          AND a.type = 'expense' AND t.supplier IS NOT NULL
+        GROUP BY t.supplier ORDER BY total_spend_cents DESC
+        LIMIT ${params.limit || 50}`
+      return { suppliers: rows, count: rows.length }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // MARK AS DISCARD: Quick way to mark transactions as personal/DISCARD
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_discard_transaction',
+    description: 'Mark a staged transaction as DISCARD (purely personal, does not enter the books). Optionally create a rule to auto-discard similar transactions in future.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Staged transaction UUID' },
+      create_rule: { type: 'boolean', required: false, description: 'If true, auto-learn a DISCARD rule from this transaction' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const tx = await bk.getStaged(params.id)
+      if (!tx) throw new Error('Transaction not found')
+      await bk.updateStaged(params.id, { category: 'DISCARD', is_personal: true, status: 'ignored' })
+      let ruleId = null
+      if (params.create_rule) {
+        ruleId = await bk.autoLearnRule(tx.description, 'DISCARD', true, 'manual_discard')
+      }
+      return { message: `Transaction discarded${ruleId ? ' + rule created' : ''}`, rule_id: ruleId }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DUPLICATE DETECTION: Find potential duplicate transactions
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_find_duplicates',
+    description: 'Find potential duplicate staged transactions — same amount, same date, similar description. Useful after importing from multiple sources.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const rows = await db`
+        SELECT a.id AS id_a, b.id AS id_b,
+          a.description AS desc_a, b.description AS desc_b,
+          a.amount_cents, a.occurred_at, a.source AS source_a, b.source AS source_b
+        FROM staged_transactions a
+        JOIN staged_transactions b ON a.id < b.id
+          AND a.amount_cents = b.amount_cents
+          AND a.occurred_at = b.occurred_at
+          AND a.status NOT IN ('ignored', 'posted') AND b.status NOT IN ('ignored', 'posted')
+        ORDER BY a.occurred_at DESC LIMIT 50`
+      return { potential_duplicates: rows, count: rows.length }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // UNPOST: Reverse a posted staged transaction back to categorized
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_unpost_transaction',
+    description: 'Reverse a posted transaction and set it back to categorized status for re-processing. Creates a reversal journal entry.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Staged transaction UUID (must be status=posted)' },
+      reason: { type: 'string', required: false, description: 'Reason for unposting' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const tx = await bk.getStaged(params.id)
+      if (!tx) throw new Error('Transaction not found')
+      if (tx.status !== 'posted') throw new Error(`Cannot unpost: status is ${tx.status}`)
+      if (!tx.ledger_tx_id) throw new Error('No ledger entry linked')
+
+      const reversalId = await bk.reverseJournalEntry(tx.ledger_tx_id, params.reason || 'Unposted for re-processing')
+      await bk.updateStaged(params.id, { status: 'categorized', ledger_tx_id: null })
+
+      return { message: `Unposted. Reversal: ${reversalId}`, reversal_id: reversalId }
     },
   },
 ])

@@ -183,12 +183,14 @@ async function processThread(gmail, inbox, threadId) {
 async function triagePendingEmails() {
   if (!env.DEEPSEEK_API_KEY) return
 
+  // Use FOR UPDATE SKIP LOCKED to prevent concurrent workers from triaging the same email
   const pending = await db`
     SELECT * FROM email_threads
     WHERE triage_status IN ('pending', 'pending_retry')
       ${MAX_TRIAGE_ATTEMPTS === Infinity ? db`` : db`AND triage_attempts < ${MAX_TRIAGE_ATTEMPTS}`}
     ORDER BY received_at DESC
     LIMIT 10
+    FOR UPDATE SKIP LOCKED
   `
 
   if (pending.length === 0) return
@@ -200,6 +202,42 @@ async function triagePendingEmails() {
         ? (await db`SELECT name, stage FROM clients WHERE id = ${thread.client_id}`)[0]
         : null
 
+      // Pull client's active projects + linked codebases — gives the AI
+      // codebase awareness when deciding if an email is a code request
+      let projectCodebaseContext = null
+      try {
+        if (thread.client_id) {
+          const projectCodebases = await db`
+            SELECT p.name AS project_name, p.description AS project_desc,
+                   cb.name AS codebase_name, cb.language, cb.repo_path,
+                   (SELECT count(*)::int FROM cc_sessions WHERE codebase_id = cb.id
+                    AND started_at > now() - interval '14 days') AS recent_sessions
+            FROM projects p
+            LEFT JOIN codebases cb ON cb.project_id = p.id
+            WHERE p.client_id = ${thread.client_id} AND p.status = 'active'
+          `
+          if (projectCodebases.length > 0) {
+            projectCodebaseContext = projectCodebases.map(pc =>
+              `- Project "${pc.project_name}"${pc.project_desc ? ` (${pc.project_desc.slice(0, 100)})` : ''}: ` +
+              (pc.codebase_name
+                ? `codebase "${pc.codebase_name}" (${pc.language || 'unknown'}, ${pc.repo_path || 'no path'}, ${pc.recent_sessions} sessions last 14d)`
+                : 'no linked codebase')
+            ).join('\n')
+          }
+        } else {
+          // Unknown sender — provide full codebase list so AI can still match
+          const allCodebases = await db`
+            SELECT name, language, repo_path FROM codebases ORDER BY name LIMIT 10
+          `
+          if (allCodebases.length > 0) {
+            projectCodebaseContext = 'Sender not a known client. Available codebases:\n' +
+              allCodebases.map(cb => `- "${cb.name}" (${cb.language || '?'}, ${cb.repo_path || '?'})`).join('\n')
+          }
+        }
+      } catch (ctxErr) {
+        logger.debug('Failed to load project/codebase context for triage', { error: ctxErr.message, threadId: thread.id })
+      }
+
       // Pull knowledge graph context for richer triage
       let kgContext = null
       try {
@@ -209,7 +247,9 @@ async function triagePendingEmails() {
           { maxSeeds: 15, maxDepth: 5, minSimilarity: 0.4 }
         )
         if (ctx.summary) kgContext = ctx.summary
-      } catch { /* KG not available — proceed without */ }
+      } catch (kgErr) {
+        logger.debug('KG context not available for triage', { error: kgErr.message })
+      }
 
       // Pull existing pending actions for this sender — helps the LLM
       // avoid re-surfacing the same topic that's already queued
@@ -222,7 +262,9 @@ async function triagePendingEmails() {
             `- [${p.priority}] "${p.title}" — ${p.summary || 'no summary'}${p.context?.consolidated_count > 1 ? ` (${p.context.consolidated_count} signals consolidated)` : ''}`
           ).join('\n')
         }
-      } catch { /* proceed without */ }
+      } catch (aqErr) {
+        logger.debug('Failed to load pending actions for triage', { error: aqErr.message })
+      }
 
       // Pull active conversations on other channels (Meta Messenger, Instagram, LinkedIn)
       // so the AI knows if this topic is already being handled elsewhere
@@ -232,23 +274,25 @@ async function triagePendingEmails() {
         const senderEmail = thread.from_email
 
         // Check Meta conversations for this person (by name match)
-        const metaConvs = senderName ? await db`
+        // Guard: only search if first name is at least 2 chars to avoid matching everything
+        const firstName = senderName?.split(' ')[0] || ''
+        const metaConvs = firstName.length >= 2 ? await db`
           SELECT mc.participant_name, mc.platform, mc.last_message_at, mc.triage_summary,
             (SELECT message_text FROM meta_messages
              WHERE conversation_id = mc.id ORDER BY created_time DESC LIMIT 1) AS last_message
           FROM meta_conversations mc
           WHERE mc.last_message_at > now() - interval '7 days'
-            AND (mc.participant_name ILIKE ${`%${senderName.split(' ')[0]}%`})
+            AND (mc.participant_name ILIKE ${`%${firstName}%`})
           ORDER BY mc.last_message_at DESC
           LIMIT 3
         ` : []
 
-        // Check LinkedIn DMs for this person
-        const linkedinConvs = senderName ? await db`
+        // Check LinkedIn DMs for this person (same firstName guard)
+        const linkedinConvs = firstName.length >= 2 ? await db`
           SELECT ld.participant_name, ld.last_message_at, ld.last_message_preview
           FROM linkedin_dms ld
           WHERE ld.last_message_at > now() - interval '7 days'
-            AND (ld.participant_name ILIKE ${`%${senderName.split(' ')[0]}%`})
+            AND (ld.participant_name ILIKE ${`%${firstName}%`})
           ORDER BY ld.last_message_at DESC
           LIMIT 2
         `.catch(() => []) : []
@@ -261,7 +305,9 @@ async function triagePendingEmails() {
         if (allChannels.length > 0) {
           activeChannelsContext = allChannels.join('\n')
         }
-      } catch { /* proceed without */ }
+      } catch (chErr) {
+        logger.debug('Failed to load cross-channel context for triage', { error: chErr.message })
+      }
 
       const triage = await deepseekService.triageEmail({
         subject: thread.subject,
@@ -273,6 +319,7 @@ async function triagePendingEmails() {
         kgContext,
         pendingActionsContext,
         activeChannelsContext,
+        projectCodebaseContext,
         receivedAt: thread.received_at,
       })
 
@@ -416,14 +463,20 @@ async function autoAct(thread, triage) {
     // Runs alongside (not instead of) the normal action — an email might need
     // a reply AND a Factory session. The code request service decides whether
     // to auto-dispatch or surface for confirmation based on confidence.
-    if (triage.isCodeWorkRequest && triage.factoryPrompt) {
+    // Validate: isCodeWorkRequest must be truthy AND factoryPrompt must be a
+    // non-empty string (AI can return empty string, "null", or boolean by mistake)
+    const hasCodeWork = triage.isCodeWorkRequest === true
+      && typeof triage.factoryPrompt === 'string'
+      && triage.factoryPrompt.trim().length >= 10
+    if (hasCodeWork) {
       const codeRequestService = require('./codeRequestService')
       await codeRequestService.createFromEmail({
         threadId: thread.id,
         clientId: thread.client_id,
-        summary: triage.summary,
-        factoryPrompt: triage.factoryPrompt,
+        summary: triage.summary || triage.factoryPrompt.slice(0, 200),
+        factoryPrompt: triage.factoryPrompt.trim(),
         codeWorkType: triage.codeWorkType,
+        suggestedCodebase: (typeof triage.suggestedCodebase === 'string' && triage.suggestedCodebase.trim()) || null,
         confidence: typeof triage.confidence === 'number' ? triage.confidence : 0.5,
         surfaceToHuman: triage.surfaceToHuman,
       }).catch(err => logger.warn(`Code request creation failed for ${thread.id}`, { error: err.message }))
@@ -611,4 +664,248 @@ function createRawEmail({ to, from, subject, body, inReplyTo }) {
   return Buffer.from(lines.join('\r\n')).toString('base64url')
 }
 
-module.exports = { pollInbox, sendReply, archiveThread, markRead, trashThread, triagePendingEmails }
+// ─── Extended Actions ────────────────────────────────────────────────────────
+
+async function listThreads({ status, priority, inbox, search, limit = 50, offset = 0 } = {}) {
+  const conditions = []
+  const params = []
+  if (status) conditions.push(`status = $${params.push(status)}`)
+  if (priority) conditions.push(`triage_priority = $${params.push(priority)}`)
+  if (inbox) conditions.push(`inbox = $${params.push(inbox)}`)
+  if (search) conditions.push(`(subject ILIKE '%' || $${params.push(search)} || '%' OR from_email ILIKE '%' || $${params.push(search)} || '%' OR from_name ILIKE '%' || $${params.push(search)} || '%')`)
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
+  return db.unsafe(
+    `SELECT id, gmail_thread_id, subject, from_email, from_name, snippet, triage_priority, triage_summary, triage_action, status, inbox, received_at, client_id
+     FROM email_threads ${where} ORDER BY received_at DESC LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}`,
+    params,
+  )
+}
+
+async function searchThreads(query, limit = 20) {
+  if (!query || query.length < 2) return []
+  return db`
+    SELECT id, gmail_thread_id, subject, from_email, from_name, snippet, triage_priority, status, inbox, received_at
+    FROM email_threads
+    WHERE subject ILIKE ${'%' + query + '%'} OR from_email ILIKE ${'%' + query + '%'}
+       OR from_name ILIKE ${'%' + query + '%'} OR snippet ILIKE ${'%' + query + '%'}
+    ORDER BY received_at DESC LIMIT ${limit}`
+}
+
+async function batchArchive(threadIds) {
+  if (!threadIds?.length) return { archived: 0 }
+  let archived = 0
+  for (const id of threadIds) {
+    try { await archiveThread(id); archived++ }
+    catch (err) { logger.warn(`Batch archive failed for ${id}`, { error: err.message }) }
+  }
+  return { archived, total: threadIds.length }
+}
+
+async function batchTrash(threadIds) {
+  if (!threadIds?.length) return { trashed: 0 }
+  let trashed = 0
+  for (const id of threadIds) {
+    try { await trashThread(id); trashed++ }
+    catch (err) { logger.warn(`Batch trash failed for ${id}`, { error: err.message }) }
+  }
+  return { trashed, total: threadIds.length }
+}
+
+async function labelThread(threadId, labelName) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
+  const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
+  if (!thread) throw new Error('Thread not found')
+
+  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+
+  // Resolve label name to ID (create if it doesn't exist)
+  const labelId = await _resolveOrCreateLabel(gmail, labelName)
+
+  await gmail.users.threads.modify({
+    userId: 'me',
+    id: thread.gmail_thread_id,
+    requestBody: { addLabelIds: [labelId] },
+  })
+
+  // Store in our DB as well
+  const currentLabels = thread.labels || []
+  if (!currentLabels.includes(labelName)) {
+    await db`UPDATE email_threads SET labels = array_append(labels, ${labelName}), updated_at = now() WHERE id = ${threadId}`
+  }
+  return { labeled: true, label: labelName }
+}
+
+async function removeLabel(threadId, labelName) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
+  const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
+  if (!thread) throw new Error('Thread not found')
+
+  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const labelId = await _resolveLabel(gmail, labelName)
+  if (!labelId) return { removed: false, reason: 'Label not found' }
+
+  await gmail.users.threads.modify({
+    userId: 'me',
+    id: thread.gmail_thread_id,
+    requestBody: { removeLabelIds: [labelId] },
+  })
+
+  await db`UPDATE email_threads SET labels = array_remove(labels, ${labelName}), updated_at = now() WHERE id = ${threadId}`
+  return { removed: true, label: labelName }
+}
+
+async function starThread(threadId) {
+  return labelThread(threadId, 'STARRED')
+}
+
+async function unstarThread(threadId) {
+  return removeLabel(threadId, 'STARRED')
+}
+
+async function forwardThread(threadId, toEmail) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
+  const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
+  if (!thread) throw new Error('Thread not found')
+
+  const inbox = thread.inbox || INBOXES[0]
+  const gmail = getGmailClient(inbox)
+
+  const forwardBody = `---------- Forwarded message ----------
+From: ${thread.from_name || thread.from_email} <${thread.from_email}>
+Date: ${thread.received_at}
+Subject: ${thread.subject}
+
+${thread.full_body || thread.snippet || ''}`
+
+  const raw = createRawEmail({
+    to: toEmail,
+    from: inbox,
+    subject: `Fwd: ${thread.subject || ''}`,
+    body: forwardBody,
+  })
+
+  await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+  logger.info(`Forwarded "${thread.subject}" from ${inbox} to ${toEmail}`)
+  return { forwarded: true, to: toEmail }
+}
+
+async function sendNewEmail(inbox, to, subject, body) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
+  const fromInbox = inbox || INBOXES[0]
+  const gmail = getGmailClient(fromInbox)
+
+  const raw = createRawEmail({ to, from: fromInbox, subject, body })
+  const result = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+  logger.info(`New email sent from ${fromInbox} to ${to}: ${subject}`)
+  return { sent: true, messageId: result.data?.id, to, subject }
+}
+
+async function createFollowUpTask(threadId, title, description, priority = 'medium') {
+  const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
+  if (!thread) throw new Error('Thread not found')
+
+  const [task] = await db`
+    INSERT INTO tasks (title, description, source, source_ref_id, client_id, priority, status)
+    VALUES (${title || thread.subject}, ${description || thread.triage_summary || thread.snippet},
+      'gmail', ${thread.id}, ${thread.client_id || null}, ${priority}, 'open')
+    RETURNING id, title`
+
+  logger.info(`Follow-up task created from email`, { taskId: task.id, threadId })
+  return { task_id: task.id, title: task.title }
+}
+
+async function unsubscribe(threadId) {
+  // Check for List-Unsubscribe header, or just trash + label as unsubscribed
+  const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
+  if (!thread) throw new Error('Thread not found')
+
+  // Trash the email
+  await trashThread(threadId)
+
+  // Auto-learn: mark this sender domain for future auto-trash
+  const domain = (thread.from_email || '').split('@')[1]
+  if (domain) {
+    // Store unsubscribe preference
+    await db`
+      INSERT INTO email_sender_prefs (domain, from_email, action, reason, created_at)
+      VALUES (${domain}, ${thread.from_email}, 'trash', 'unsubscribed', now())
+      ON CONFLICT (from_email) DO UPDATE SET action = 'trash', reason = 'unsubscribed', created_at = now()
+    `.catch(() => {
+      // Table might not exist yet — non-blocking
+      logger.debug('email_sender_prefs table not available, skipping sender pref')
+    })
+  }
+
+  logger.info(`Unsubscribed from ${thread.from_email}: ${thread.subject}`)
+  return { unsubscribed: true, from: thread.from_email, domain }
+}
+
+async function getThreadsByClient(clientId, limit = 20) {
+  return db`
+    SELECT id, gmail_thread_id, subject, from_email, from_name, snippet, triage_priority, status, received_at
+    FROM email_threads WHERE client_id = ${clientId}
+    ORDER BY received_at DESC LIMIT ${limit}`
+}
+
+async function getInboxStats() {
+  const [stats] = await db`
+    SELECT
+      count(*) FILTER (WHERE status = 'unread')::int AS unread,
+      count(*) FILTER (WHERE status = 'unread' AND triage_priority = 'urgent')::int AS urgent,
+      count(*) FILTER (WHERE status = 'unread' AND triage_priority = 'high')::int AS high,
+      count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage,
+      count(*) FILTER (WHERE triage_status = 'failed')::int AS failed_triage,
+      count(*) FILTER (WHERE status = 'unread' AND received_at > now() - interval '1 hour')::int AS last_hour,
+      count(DISTINCT from_email) FILTER (WHERE status = 'unread')::int AS unique_senders
+    FROM email_threads
+    WHERE received_at > now() - interval '7 days'`
+
+  // Per-inbox breakdown
+  const perInbox = await db`
+    SELECT inbox, count(*) FILTER (WHERE status = 'unread')::int AS unread,
+      count(*)::int AS total
+    FROM email_threads WHERE received_at > now() - interval '7 days'
+    GROUP BY inbox`
+
+  return { ...stats, per_inbox: perInbox }
+}
+
+async function listLabels(inbox) {
+  if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
+  const gmail = getGmailClient(inbox || INBOXES[0])
+  const res = await gmail.users.labels.list({ userId: 'me' })
+  return (res.data.labels || []).map(l => ({ id: l.id, name: l.name, type: l.type }))
+}
+
+// ─── Label Helpers ──────────────────────────────────────────────────────────
+
+let _labelCache = {}
+
+async function _resolveLabel(gmail, name) {
+  if (_labelCache[name]) return _labelCache[name]
+  const res = await gmail.users.labels.list({ userId: 'me' })
+  const label = (res.data.labels || []).find(l => l.name.toLowerCase() === name.toLowerCase())
+  if (label) { _labelCache[name] = label.id; return label.id }
+  return null
+}
+
+async function _resolveOrCreateLabel(gmail, name) {
+  const existing = await _resolveLabel(gmail, name)
+  if (existing) return existing
+  // System labels can't be created
+  if (['INBOX', 'SENT', 'DRAFT', 'TRASH', 'SPAM', 'STARRED', 'UNREAD', 'IMPORTANT'].includes(name.toUpperCase())) {
+    return name.toUpperCase()
+  }
+  const res = await gmail.users.labels.create({ userId: 'me', requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' } })
+  _labelCache[name] = res.data.id
+  return res.data.id
+}
+
+module.exports = {
+  pollInbox, sendReply, archiveThread, markRead, trashThread, triagePendingEmails,
+  // New
+  listThreads, searchThreads, batchArchive, batchTrash,
+  labelThread, removeLabel, starThread, unstarThread,
+  forwardThread, sendNewEmail, createFollowUpTask, unsubscribe,
+  getThreadsByClient, getInboxStats, listLabels, saveDraftToGmail,
+}

@@ -346,4 +346,53 @@ router.patch('/projects/:id', async (req, res, next) => {
   }
 })
 
+// GET /api/crm/clients/:id/sessions — CC sessions for a client (coding workspace integration)
+router.get('/clients/:id/sessions', async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100)
+    const sessions = await db`
+      SELECT cs.id, cs.initial_prompt, cs.status, cs.pipeline_stage,
+             cs.confidence_score, cs.triggered_by, cs.trigger_source,
+             cs.started_at, cs.completed_at, cs.error_message,
+             cb.name AS codebase_name, p.name AS project_name
+      FROM cc_sessions cs
+      LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+      LEFT JOIN projects p ON cs.project_id = p.id
+      WHERE cs.client_id = ${req.params.id}
+      ORDER BY cs.started_at DESC
+      LIMIT ${limit}
+    `
+    // Also fetch code requests for this client
+    const codeRequests = await db`
+      SELECT id, source, summary, code_work_type, status, confidence, session_id, created_at
+      FROM code_requests
+      WHERE client_id = ${req.params.id}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `
+    res.json({ sessions, codeRequests })
+  } catch (err) { next(err) }
+})
+
+// GET /api/crm/clients/:id/coding-summary — Quick summary for CRM UI
+router.get('/clients/:id/coding-summary', async (req, res, next) => {
+  try {
+    const [stats] = await db`
+      SELECT
+        count(*) FILTER (WHERE status IN ('running', 'initializing'))::int AS active_sessions,
+        count(*) FILTER (WHERE status = 'complete' AND completed_at > now() - interval '30 days')::int AS completed_30d,
+        count(*) FILTER (WHERE status = 'error' AND started_at > now() - interval '30 days')::int AS errors_30d
+      FROM cc_sessions WHERE client_id = ${req.params.id}
+    `
+    const [requests] = await db`
+      SELECT
+        count(*) FILTER (WHERE status = 'pending')::int AS pending,
+        count(*) FILTER (WHERE status = 'dispatched')::int AS active,
+        count(*) FILTER (WHERE status = 'completed')::int AS completed
+      FROM code_requests WHERE client_id = ${req.params.id}
+    `
+    res.json({ sessions: stats, codeRequests: requests })
+  } catch (err) { next(err) }
+})
+
 module.exports = router

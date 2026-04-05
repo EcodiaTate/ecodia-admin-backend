@@ -152,20 +152,113 @@ router.post('/sync', async (req, res, next) => {
 // GET /api/gmail/stats — inbox overview
 router.get('/stats', async (req, res, next) => {
   try {
-    const [stats] = await db`
-      SELECT
-        count(*) FILTER (WHERE status = 'unread')::int AS unread,
-        count(*) FILTER (WHERE triage_priority = 'urgent')::int AS urgent,
-        count(*) FILTER (WHERE triage_priority = 'high')::int AS high,
-        count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage,
-        count(*) FILTER (WHERE triage_status = 'failed')::int AS failed_triage
-      FROM email_threads
-      WHERE status != 'archived'
-    `
-    res.json(stats)
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.getInboxStats())
   } catch (err) {
     next(err)
   }
+})
+
+// GET /api/gmail/search — search threads
+router.get('/search', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    const threads = await gmailService.searchThreads(req.query.q, parseInt(req.query.limit) || 20)
+    res.json({ threads })
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/label — add label
+router.post('/threads/:id/label', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.labelThread(req.params.id, req.body.label))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/unlabel — remove label
+router.post('/threads/:id/unlabel', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.removeLabel(req.params.id, req.body.label))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/star
+router.post('/threads/:id/star', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.starThread(req.params.id))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/unstar
+router.post('/threads/:id/unstar', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.unstarThread(req.params.id))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/forward
+router.post('/threads/:id/forward', async (req, res, next) => {
+  try {
+    if (!req.body.to) return res.status(400).json({ error: 'to is required' })
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.forwardThread(req.params.id, req.body.to))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/followup — create task from email
+router.post('/threads/:id/followup', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.createFollowUpTask(req.params.id, req.body.title, req.body.description, req.body.priority))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/threads/:id/unsubscribe
+router.post('/threads/:id/unsubscribe', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.unsubscribe(req.params.id))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/batch/archive
+router.post('/batch/archive', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    if (typeof req.body.threadIds === 'string') req.body.threadIds = JSON.parse(req.body.threadIds)
+    res.json(await gmailService.batchArchive(req.body.threadIds))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/batch/trash
+router.post('/batch/trash', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    if (typeof req.body.threadIds === 'string') req.body.threadIds = JSON.parse(req.body.threadIds)
+    res.json(await gmailService.batchTrash(req.body.threadIds))
+  } catch (err) { next(err) }
+})
+
+// POST /api/gmail/send — send new email (not reply)
+router.post('/send', async (req, res, next) => {
+  try {
+    const { to, subject, body, inbox } = req.body
+    if (!to || !subject || !body) return res.status(400).json({ error: 'to, subject, and body are required' })
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.sendNewEmail(inbox, to, subject, body))
+  } catch (err) { next(err) }
+})
+
+// GET /api/gmail/labels — list labels
+router.get('/labels', async (req, res, next) => {
+  try {
+    const gmailService = require('../services/gmailService')
+    res.json(await gmailService.listLabels(req.query.inbox))
+  } catch (err) { next(err) }
 })
 
 module.exports = router

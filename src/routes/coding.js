@@ -5,11 +5,14 @@ const db = require('../config/db')
 const router = Router()
 router.use(auth)
 
+const VALID_STATUSES = new Set(['pending', 'confirmed', 'dispatched', 'completed', 'rejected'])
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 // ── Dashboard: workspace snapshot ──
 
 router.get('/dashboard', async (_req, res, next) => {
   try {
-    const [active] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`
+    const [active] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing', 'completing', 'queued')`
     const [pending] = await db`SELECT count(*)::int AS count FROM code_requests WHERE status = 'pending'`
     const [today] = await db`SELECT count(*)::int AS count FROM cc_sessions WHERE status = 'complete' AND completed_at > now() - interval '24 hours'`
     const codebases = await db`SELECT id, name, language, repo_path FROM codebases ORDER BY name`
@@ -22,7 +25,22 @@ router.get('/dashboard', async (_req, res, next) => {
       LEFT JOIN clients c ON cs.client_id = c.id
       ORDER BY cs.started_at DESC LIMIT 10
     `
-    res.json({ activeSessions: active.count, pendingRequests: pending.count, todayCompletions: today.count, codebases, recentSessions })
+    // Include stuck requests so the dashboard can alert
+    const [stuck] = await db`
+      SELECT count(*)::int AS count FROM code_requests
+      WHERE status IN ('confirmed', 'pending')
+        AND session_id IS NULL
+        AND created_at < now() - interval '5 minutes'
+        AND COALESCE(dispatch_attempts, 0) < 3
+    `
+    res.json({
+      activeSessions: active.count,
+      pendingRequests: pending.count,
+      todayCompletions: today.count,
+      stuckRequests: stuck.count,
+      codebases,
+      recentSessions,
+    })
   } catch (err) { next(err) }
 })
 
@@ -30,9 +48,9 @@ router.get('/dashboard', async (_req, res, next) => {
 
 router.get('/requests', async (req, res, next) => {
   try {
-    const status = req.query.status || null
-    const limit = Math.min(parseInt(req.query.limit) || 50, 200)
-    const offset = parseInt(req.query.offset) || 0
+    const status = VALID_STATUSES.has(req.query.status) ? req.query.status : null
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200)
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0)
     const requests = status
       ? await db`
           SELECT cr.*, c.name AS client_name, p.name AS project_name, cb.name AS codebase_name
@@ -51,12 +69,13 @@ router.get('/requests', async (req, res, next) => {
           LEFT JOIN codebases cb ON cr.codebase_id = cb.id
           ORDER BY cr.created_at DESC LIMIT ${limit} OFFSET ${offset}
         `
-    res.json({ requests })
+    res.json({ requests, count: requests.length })
   } catch (err) { next(err) }
 })
 
 router.get('/requests/:id', async (req, res, next) => {
   try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid ID format' })
     const [request] = await db`
       SELECT cr.*, c.name AS client_name, p.name AS project_name, cb.name AS codebase_name
       FROM code_requests cr
@@ -70,11 +89,44 @@ router.get('/requests/:id', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ── Confirm / Reject Code Requests ──
+
+router.post('/requests/:id/confirm', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid ID format' })
+    const codeRequestService = require('../services/codeRequestService')
+    const session = await codeRequestService.confirmAndDispatch(req.params.id, req.body.promptOverride)
+    res.json({ status: 'confirmed', sessionId: session?.id || null })
+  } catch (err) {
+    if (err.message?.includes('not found')) return res.status(404).json({ error: err.message })
+    if (err.message?.includes('Already dispatched')) return res.status(409).json({ error: err.message })
+    next(err)
+  }
+})
+
+router.post('/requests/:id/reject', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid ID format' })
+    const [existing] = await db`SELECT id, status FROM code_requests WHERE id = ${req.params.id}`
+    if (!existing) return res.status(404).json({ error: 'Not found' })
+    if (existing.status === 'dispatched') return res.status(409).json({ error: 'Cannot reject — already dispatched' })
+    if (existing.status === 'completed') return res.status(409).json({ error: 'Cannot reject — already completed' })
+
+    await db`
+      UPDATE code_requests
+      SET status = 'rejected', resolved_at = now(),
+          metadata = metadata || ${JSON.stringify({ rejectionReason: req.body.reason || null })}::jsonb
+      WHERE id = ${req.params.id}
+    `
+    res.json({ status: 'rejected' })
+  } catch (err) { next(err) }
+})
+
 // ── Session Analytics ──
 
 router.get('/analytics', async (req, res, next) => {
   try {
-    const days = Math.min(parseInt(req.query.days) || 7, 90)
+    const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 90)
     const sessions = await db`
       SELECT
         date_trunc('day', started_at) AS day,
@@ -96,6 +148,16 @@ router.get('/analytics', async (req, res, next) => {
       WHERE started_at > now() - make_interval(days => ${days})
     `
     res.json({ days, daily: sessions, totals })
+  } catch (err) { next(err) }
+})
+
+// ── Health check for session observation ──
+
+router.get('/health', async (_req, res, next) => {
+  try {
+    const observation = require('../services/sessionObservationService')
+    const health = await observation.checkSessionHealth()
+    res.json(health)
   } catch (err) { next(err) }
 })
 

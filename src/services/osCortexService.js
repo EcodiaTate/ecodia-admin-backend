@@ -114,8 +114,14 @@ Return ONLY the JSON array, no markdown fences, no prose outside the array.`
     return `${label}: ${JSON.stringify(val)}`
   }).join('\n')
 
-  // Auto-loaded docs
-  const docsBlock = docs.map(d => `[${d.title}]\n${d.content}`).join('\n\n')
+  // Auto-loaded docs — truncate individual docs to prevent prompt bloat
+  const MAX_DOC_CHARS = 3000
+  const docsBlock = docs.map(d => {
+    const content = d.content.length > MAX_DOC_CHARS
+      ? d.content.slice(0, MAX_DOC_CHARS) + '\n... (truncated, use need_doc for full content)'
+      : d.content
+    return `[${d.title}]\n${content}`
+  }).join('\n\n')
 
   // List of OTHER docs available to load on demand
   const loadedKeys = new Set(ws.autoLoadDocs)
@@ -301,8 +307,9 @@ async function runTask(taskId, userMessages, { workspace }) {
   const allBlocks = []
   let rounds = 0
   let taskStatus = 'active'
+  const MAX_ROUNDS = 20 // safety net — prevents infinite loops
 
-  while (Date.now() - startTime < TASK_TIMEOUT_MS) {
+  while (Date.now() - startTime < TASK_TIMEOUT_MS && rounds < MAX_ROUNDS) {
     rounds++
     logger.info(`OS Cortex round ${rounds}`, { taskId, workspace, messageCount: messages.length })
 
@@ -396,10 +403,19 @@ async function runTask(taskId, userMessages, { workspace }) {
       blocks,
     })
 
-    // Feed results back
+    // Feed results back — but cap total message count to prevent context overflow
     const feedbackContent = resultParts.join('\n\n')
     messages.push({ role: 'assistant', content: assistantContent || 'Executing actions...' })
     messages.push({ role: 'user', content: `Action results:\n${feedbackContent}\n\nContinue working or signal done.` })
+
+    // If messages are getting too long, trim oldest non-system messages
+    const MAX_MESSAGES = 40
+    if (messages.length > MAX_MESSAGES) {
+      const system = messages[0] // preserve system prompt
+      const recent = messages.slice(-(MAX_MESSAGES - 1))
+      messages.length = 0
+      messages.push(system, ...recent)
+    }
 
     await persistTurn(taskId, {
       ts: new Date().toISOString(),
