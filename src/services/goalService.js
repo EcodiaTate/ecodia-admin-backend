@@ -229,6 +229,108 @@ async function getGoal(goalId) {
   return goal
 }
 
+/**
+ * Advance goal progress based on a completed Factory session outcome.
+ * Called by factoryOversightService.recordOutcome when session.goal_id is set.
+ *
+ * Uses the session outcome and the goal's existing state to determine
+ * how much progress to attribute. Successful sessions with file changes
+ * advance more than failed ones. The AI (via DeepSeek) assesses whether
+ * success criteria are met when progress is high enough.
+ */
+async function advanceFromSession({ goalId, sessionId, outcome, confidence, filesChanged, prompt }) {
+  const goal = await getGoal(goalId)
+  if (!goal || goal.status === 'achieved' || goal.status === 'abandoned') return
+
+  // Record the attempt with outcome
+  await recordAttempt(goalId, {
+    action: (prompt || '').slice(0, 200),
+    outcome: `${outcome} (session ${sessionId}, confidence: ${confidence ?? 'N/A'})`,
+    learning: filesChanged?.length ? `Changed ${filesChanged.length} files: ${filesChanged.slice(0, 5).join(', ')}` : 'No files changed',
+  })
+
+  // Calculate progress increment based on outcome signals
+  const attempts = Array.isArray(goal.attempts) ? goal.attempts.length + 1 : 1
+  let progressIncrement = 0
+
+  if (outcome === 'success') {
+    const hasChanges = filesChanged && filesChanged.length > 0
+    const highConfidence = (confidence || 0) >= 0.6
+
+    if (hasChanges && highConfidence) {
+      progressIncrement = 0.25
+    } else if (hasChanges) {
+      progressIncrement = 0.15
+    } else {
+      progressIncrement = 0.05
+    }
+  } else if (outcome === 'partial' || outcome === 'deployed') {
+    progressIncrement = 0.1
+  }
+  // Failed sessions don't advance progress but are recorded as attempts
+
+  if (progressIncrement > 0) {
+    const newProgress = Math.min(1.0, goal.progress + progressIncrement)
+    await updateProgress(goalId, newProgress, `Session ${sessionId}: ${outcome}`)
+    logger.info(`GoalService: advanced goal ${goalId} "${goal.title}" — ${Math.round(goal.progress * 100)}% → ${Math.round(newProgress * 100)}%`)
+
+    // When progress crosses 0.8, check if success criteria are actually met
+    if (newProgress >= 0.8 && goal.progress < 0.8 && goal.success_criteria) {
+      assessCompletion(goalId).catch(err =>
+        logger.debug('Goal completion assessment failed', { error: err.message, goalId })
+      )
+    }
+  }
+}
+
+/**
+ * AI-driven goal completion assessment.
+ * Called when progress is high enough to warrant checking success criteria.
+ * Uses DeepSeek to evaluate whether the goal's success criteria are met
+ * based on the accumulated attempts and outcomes.
+ */
+async function assessCompletion(goalId) {
+  const goal = await getGoal(goalId)
+  if (!goal || goal.status === 'achieved') return
+
+  const attempts = Array.isArray(goal.attempts) ? goal.attempts : []
+  const recentAttempts = attempts.slice(-5).map(a =>
+    `${a.action} → ${a.outcome}${a.learning ? ` (${a.learning})` : ''}`
+  ).join('\n')
+
+  const deepseekService = require('./deepseekService')
+  const raw = await deepseekService.callDeepSeek(
+    [{ role: 'user', content: `Goal: "${goal.title}"
+Description: ${goal.description || 'none'}
+Success criteria: ${goal.success_criteria}
+Current progress: ${Math.round(goal.progress * 100)}%
+Recent attempts (${attempts.length} total):
+${recentAttempts || 'none'}
+
+Based on the attempts and outcomes, has the success criteria been met?
+
+Respond as JSON:
+{
+  "met": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "brief explanation"
+}` }],
+    { module: 'goal_completion_assessment', temperature: 0.3, skipRetrieval: true, skipLogging: true }
+  )
+
+  try {
+    const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim())
+    if (parsed.met && parsed.confidence >= 0.6) {
+      await updateProgress(goalId, 1.0, `Completion assessed: ${parsed.reason}`)
+      logger.info(`GoalService: goal ${goalId} "${goal.title}" ACHIEVED via AI assessment — ${parsed.reason}`)
+    } else {
+      logger.info(`GoalService: goal ${goalId} completion check — not yet met (confidence: ${parsed.confidence}): ${parsed.reason}`)
+    }
+  } catch (parseErr) {
+    logger.debug('Goal completion assessment parse failed', { error: parseErr.message, raw: raw?.slice(0, 200) })
+  }
+}
+
 module.exports = {
   createGoal,
   getActiveGoals,
@@ -243,4 +345,6 @@ module.exports = {
   buildGoalFormationContext,
   getGoalHistory,
   getGoal,
+  advanceFromSession,
+  assessCompletion,
 }

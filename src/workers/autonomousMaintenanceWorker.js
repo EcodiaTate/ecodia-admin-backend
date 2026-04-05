@@ -1118,6 +1118,7 @@ async function actOnDecision(decision, state) {
         codebaseId,
         prompt: `${urgencyPrefix}${decision.intent}${contextSuffix}`,
         streamSource: decision.stream || undefined,
+        goalId: decision.goalId || undefined,
       })
     }
 

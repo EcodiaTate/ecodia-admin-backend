@@ -245,7 +245,7 @@ async function _shouldSuppressDispatch({ codebaseId, prompt, triggeredBy }) {
   }
 }
 
-async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification, streamSource }) {
+async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerSource, triggerRefId, projectId, clientId, workingDir, selfModification, streamSource, goalId }) {
   const bridge = require('./factoryBridge')
 
   // Reject scheduled/automated dispatches when CLI is rate-limited
@@ -273,12 +273,12 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
     INSERT INTO cc_sessions (
       codebase_id, initial_prompt, triggered_by, trigger_source,
       trigger_ref_id, project_id, client_id, pipeline_stage, working_dir,
-      self_modification, stream_source
+      self_modification, stream_source, goal_id
     ) VALUES (
       ${codebaseId || null}, ${prompt}, ${triggeredBy || 'manual'},
       ${triggerSource || 'manual'}, ${triggerRefId || null},
       ${projectId || null}, ${clientId || null}, 'queued', ${workingDir || null},
-      ${!!selfModification}, ${streamSource || null}
+      ${!!selfModification}, ${streamSource || null}, ${goalId || null}
     )
     RETURNING *
   `
@@ -438,6 +438,7 @@ async function dispatchFromSchedule(config) {
     triggeredBy: 'scheduled',
     triggerSource: 'scheduled',
     streamSource: config.streamSource,
+    goalId: config.goalId,
   })
 }
 

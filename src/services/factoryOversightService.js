@@ -816,6 +816,24 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
       confidence: details.confidence,
       codebaseName: session.codebase_name,
     })
+
+    // ─── Goal Progress Advancement ────────────────────────────────────
+    // If this session was linked to a goal, advance progress based on outcome.
+    if (session.goal_id) {
+      try {
+        const goalService = require('./goalService')
+        await goalService.advanceFromSession({
+          goalId: session.goal_id,
+          sessionId: session.id,
+          outcome,
+          confidence: details.confidence,
+          filesChanged: session.files_changed,
+          prompt: session.initial_prompt,
+        })
+      } catch (goalErr) {
+        logger.debug('Goal progress advancement failed (non-blocking)', { error: goalErr.message, goalId: session.goal_id })
+      }
+    }
   } catch (err) {
     logger.debug('Failed to record outcome', { error: err.message })
   }
