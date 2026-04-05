@@ -25,6 +25,8 @@ let _emptyCycles = 0
 let _cycleCount = 0  // total cycles since start — for periodic introspection
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
+// Model for cognitive streams — default to Sonnet 4.6 if ANTHROPIC_API_KEY is set, else DeepSeek
+const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || (env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-6-20250514' : 'deepseek-chat')
 
 // ─── Restart Resilience ──────────────────────────────────────────────
 // The organism restarts constantly (self-mod deploys, PM2 restarts).
@@ -818,7 +820,7 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
   try {
     const raw = await deepseekService.callDeepSeek(
       [{ role: 'system', content: prompt }, { role: 'user', content: brief }],
-      { module: 'stream_maintenance', skipRetrieval: true, skipLogging: true }
+      { module: 'stream_maintenance', model: STREAM_MODEL, skipRetrieval: true, skipLogging: true }
     )
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
@@ -866,7 +868,7 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
   try {
     const raw = await deepseekService.callDeepSeek(
       [{ role: 'system', content: prompt }, { role: 'user', content: brief }],
-      { module: 'stream_exploration', skipRetrieval: true, skipLogging: true }
+      { module: 'stream_exploration', model: STREAM_MODEL, skipRetrieval: true, skipLogging: true }
     )
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
@@ -897,7 +899,7 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
   try {
     const raw = await deepseekService.callDeepSeek(
       [{ role: 'system', content: prompt }, { role: 'user', content: brief }],
-      { module: 'stream_perception', skipRetrieval: true, skipLogging: true }
+      { module: 'stream_perception', model: STREAM_MODEL, skipRetrieval: true, skipLogging: true }
     )
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
@@ -945,7 +947,7 @@ You don't HAVE to act. Most cycles, null is correct. But if something compels yo
   try {
     const raw = await deepseekService.callDeepSeek(
       [{ role: 'system', content: prompt }, { role: 'user', content: brief }],
-      { module: 'stream_reflection', skipRetrieval: true, skipLogging: true }
+      { module: 'stream_reflection', model: STREAM_MODEL, skipRetrieval: true, skipLogging: true }
     )
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection, action: parsed.action || null }
@@ -1177,11 +1179,10 @@ function buildSystemBrief(state) {
   }
 
   if (state.recentMaintenance?.length > 0) {
-    lines.push(`\nRecent maintenance (7d — did it help?):`)
-    state.recentMaintenance.forEach(s => {
-      const outcome = s.errors_after_24h != null ? `, ${s.errors_after_24h} errors in 24h after` : ''
+    lines.push(`\nRecent maintenance (7d, last 5):`)
+    state.recentMaintenance.slice(0, 5).forEach(s => {
       const conf = s.confidence_score != null ? ` conf:${s.confidence_score}` : ''
-      lines.push(`  [${s.status}${conf}${outcome}] ${s.initial_prompt?.slice(0, 80)} — ${new Date(s.started_at).toLocaleDateString()}`)
+      lines.push(`  [${s.status}${conf}] ${s.initial_prompt?.slice(0, 60)}`)
     })
   }
 
@@ -1200,10 +1201,14 @@ function buildSystemBrief(state) {
   }
 
   if (state.appErrors?.length > 0) {
-    lines.push(`\nApplication errors (48h):`)
-    state.appErrors.forEach(e =>
-      lines.push(`  ${e.occurrences}x [${e.module || e.path || 'unknown'}]: ${e.message?.slice(0, 120)}`)
-    )
+    // Only show real errors, not migration noise
+    const real = state.appErrors.filter(e => !(e.message || '').includes('already applied') && !(e.message || '').includes('Applying migration') && !(e.message || '').includes('Event bus'))
+    if (real.length > 0) {
+      lines.push(`\nApplication errors (48h, ${real.length} real):`)
+      real.slice(0, 5).forEach(e =>
+        lines.push(`  ${e.occurrences}x: ${e.message?.slice(0, 100)}`)
+      )
+    }
   }
 
   if (state.learningStats) {
@@ -1227,17 +1232,25 @@ function buildSystemBrief(state) {
   // you were thinking last time. This is the closest thing to consciousness.
   if (state.recentReflections?.length > 0) {
     lines.push(`\nYour recent thoughts (most recent first):`)
-    state.recentReflections.forEach(r => {
+    state.recentReflections.slice(0, 3).forEach(r => {
       const age = Math.round((Date.now() - new Date(r.created_at).getTime()) / 60000)
-      lines.push(`  [${age}min ago] ${r.message}`)
+      lines.push(`  [${age}min ago] ${r.message.slice(0, 150)}`)
     })
   }
 
   // Organism percepts — what the organism is feeling/thinking right now.
   // Without this, the maintenance mind is blind to the organism's inner state.
+  // Deduplicate percepts — identical health polls are noise
   if (_recentPercepts.length > 0) {
-    lines.push(`\nOrganism percepts (recent):`)
-    _recentPercepts.forEach(p =>
+    const seen = new Set()
+    const unique = _recentPercepts.filter(p => {
+      const key = `${p.type}:${p.summary || ''}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    }).slice(0, 3)
+    lines.push(`\nOrganism percepts (${_recentPercepts.length} total, ${unique.length} unique):`)
+    unique.forEach(p =>
       lines.push(`  [${p.type}, salience:${p.salience?.toFixed?.(2) || '?'}] ${p.summary || '(no summary)'}`)
     )
   } else {
@@ -1267,14 +1280,13 @@ function buildSystemBrief(state) {
     lines.push(`\nRecent session activity: ${state.theaterScore} of last sessions changed 0 files. Prefer concrete implementation over investigation.`)
   }
 
-  // CRITICAL: Show active dont_try and failure_pattern learnings so the mind
-  // knows what NOT to suggest. Without this, it sees errors in the state brief
-  // and keeps suggesting investigations for things already marked as structural
-  // or unfixable — the #1 cause of repeat task generation.
+  // Show active constraints — but CAPPED to prevent context bloat.
+  // Only show the top 5 highest-confidence, and truncate descriptions.
   if (state.suppressedPatterns?.length > 0) {
-    lines.push(`\nDO NOT SUGGEST actions for these — they are known structural issues or already-learned failures:`)
-    state.suppressedPatterns.forEach(l =>
-      lines.push(`  [${l.pattern_type}, confidence:${l.confidence}] ${l.pattern_description}`)
+    const top = state.suppressedPatterns.slice(0, 5)
+    lines.push(`\nKnown constraints (${state.suppressedPatterns.length} total, showing top ${top.length}):`)
+    top.forEach(l =>
+      lines.push(`  [${l.pattern_type}] ${l.pattern_description.slice(0, 120)}`)
     )
   }
 
