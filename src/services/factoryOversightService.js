@@ -26,6 +26,7 @@ const kgHooks = require('./kgIngestionHooks')
 const env = require('../config/env')
 
 const { execFileSync } = require('child_process')
+const retry = require('../utils/retry')
 
 // ─── Clean working directory after rejected/failed sessions ─────────
 // CC edits files in-place on the VPS. If oversight rejects, those edits
@@ -965,10 +966,13 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
     if (env.OPENAI_API_KEY) {
       try {
         const axios = require('axios')
-        const embResponse = await axios.post(
-          'https://api.openai.com/v1/embeddings',
-          { model: 'text-embedding-3-small', input: parsed.pattern_description.slice(0, 2000) },
-          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        const embResponse = await retry(
+          () => axios.post(
+            'https://api.openai.com/v1/embeddings',
+            { model: 'text-embedding-3-small', input: parsed.pattern_description.slice(0, 2000) },
+            { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+          ),
+          { attempts: 3, delayMs: 1000, backoff: 2, label: 'learning-extraction-embed' }
         )
         const learningVec = embResponse.data.data[0].embedding
         const vecStr = `[${learningVec.join(',')}]`
@@ -1168,10 +1172,13 @@ async function consolidateLearnings() {
 
         const axios = require('axios')
         const texts = unembedded.map(l => `[${l.pattern_type}] ${l.pattern_description.slice(0, 2000)}`)
-        const embResponse = await axios.post(
-          'https://api.openai.com/v1/embeddings',
-          { model: 'text-embedding-3-small', input: texts },
-          { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+        const embResponse = await retry(
+          () => axios.post(
+            'https://api.openai.com/v1/embeddings',
+            { model: 'text-embedding-3-small', input: texts },
+            { headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` } }
+          ),
+          { attempts: 3, delayMs: 1000, backoff: 2, label: 'learning-consolidation-embed' }
         )
         const embeddingsByIndex = new Map(embResponse.data.data.map(d => [d.index, d.embedding]))
 
@@ -1186,7 +1193,7 @@ async function consolidateLearnings() {
 
         hasMore = unembedded.length === batchSize
       } catch (err) {
-        logger.debug('Learning embedding batch failed', { error: err.message })
+        logger.debug('Learning embedding batch failed after retries', { error: err.message })
         hasMore = false
       }
     }

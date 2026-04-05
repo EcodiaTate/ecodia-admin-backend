@@ -197,4 +197,140 @@ router.post('/sessions/:id/stop', async (req, res, next) => {
   }
 })
 
+// GET /api/cc/analytics — Factory performance analytics
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const days = Math.min(parseInt(req.query.days) || 30, 90)
+    const analytics = {}
+
+    await Promise.allSettled([
+      // Overall success rates
+      db`
+        SELECT
+          count(*)::int AS total,
+          count(*) FILTER (WHERE status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE status = 'error')::int AS errored,
+          count(*) FILTER (WHERE deploy_status = 'deployed')::int AS deployed,
+          count(*) FILTER (WHERE deploy_status = 'failed')::int AS deploy_failed,
+          count(*) FILTER (WHERE deploy_status = 'reverted')::int AS reverted,
+          round(avg(confidence_score)::numeric, 3) AS avg_confidence,
+          round(avg(CASE WHEN status = 'complete' THEN confidence_score END)::numeric, 3) AS avg_success_confidence,
+          round(avg(CASE WHEN status = 'error' THEN confidence_score END)::numeric, 3) AS avg_failure_confidence
+        FROM cc_sessions
+        WHERE started_at > now() - make_interval(days => ${days})
+      `.then(([r]) => { analytics.summary = r }),
+
+      // Confidence trend (daily buckets)
+      db`
+        SELECT
+          date_trunc('day', started_at)::date AS day,
+          count(*)::int AS sessions,
+          count(*) FILTER (WHERE status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE status = 'error')::int AS errored,
+          count(*) FILTER (WHERE deploy_status = 'deployed')::int AS deployed,
+          round(avg(confidence_score)::numeric, 3) AS avg_confidence
+        FROM cc_sessions
+        WHERE started_at > now() - make_interval(days => ${days})
+        GROUP BY 1 ORDER BY 1
+      `.then(rows => { analytics.confidenceTrend = rows }),
+
+      // Per-stream breakdown
+      db`
+        SELECT
+          coalesce(stream_source, 'manual') AS stream,
+          count(*)::int AS total,
+          count(*) FILTER (WHERE status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE status = 'error')::int AS errored,
+          count(*) FILTER (WHERE deploy_status = 'deployed')::int AS deployed,
+          round(avg(confidence_score)::numeric, 3) AS avg_confidence,
+          round(avg(CASE WHEN status = 'complete' THEN confidence_score END)::numeric, 3) AS avg_success_confidence
+        FROM cc_sessions
+        WHERE started_at > now() - make_interval(days => ${days})
+        GROUP BY 1 ORDER BY total DESC
+      `.then(rows => { analytics.byStream = rows }),
+
+      // Per-trigger-source breakdown
+      db`
+        SELECT
+          coalesce(trigger_source, 'unknown') AS source,
+          count(*)::int AS total,
+          count(*) FILTER (WHERE status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE status = 'error')::int AS errored,
+          count(*) FILTER (WHERE deploy_status = 'deployed')::int AS deployed,
+          round(avg(confidence_score)::numeric, 3) AS avg_confidence
+        FROM cc_sessions
+        WHERE started_at > now() - make_interval(days => ${days})
+        GROUP BY 1 ORDER BY total DESC
+      `.then(rows => { analytics.byTriggerSource = rows }),
+
+      // Per-codebase breakdown
+      db`
+        SELECT
+          coalesce(cb.name, 'unknown') AS codebase,
+          count(*)::int AS total,
+          count(*) FILTER (WHERE cs.status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE cs.status = 'error')::int AS errored,
+          count(*) FILTER (WHERE cs.deploy_status = 'deployed')::int AS deployed,
+          round(avg(cs.confidence_score)::numeric, 3) AS avg_confidence
+        FROM cc_sessions cs
+        LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+        WHERE cs.started_at > now() - make_interval(days => ${days})
+        GROUP BY 1 ORDER BY total DESC
+      `.then(rows => { analytics.byCodebase = rows }),
+
+      // Pipeline stage distribution (where sessions get stuck/fail)
+      db`
+        SELECT
+          coalesce(pipeline_stage, 'unknown') AS stage,
+          count(*)::int AS total,
+          count(*) FILTER (WHERE status = 'error')::int AS failed_at_stage
+        FROM cc_sessions
+        WHERE started_at > now() - make_interval(days => ${days})
+        GROUP BY 1 ORDER BY total DESC
+      `.then(rows => { analytics.pipelineStages = rows }),
+
+      // Learning effectiveness
+      db`
+        SELECT
+          count(*)::int AS total_learnings,
+          count(*) FILTER (WHERE outcome_status = 'verified_effective')::int AS effective,
+          count(*) FILTER (WHERE outcome_status = 'verified_ineffective')::int AS ineffective,
+          count(*) FILTER (WHERE outcome_status = 'pending')::int AS pending,
+          count(*) FILTER (WHERE pattern_type = 'dont_try')::int AS dont_try,
+          count(*) FILTER (WHERE absorbed_into IS NOT NULL)::int AS consolidated,
+          round(avg(confidence)::numeric, 3) AS avg_learning_confidence
+        FROM factory_learnings
+      `.then(([r]) => { analytics.learnings = r }),
+
+      // Self-modification stats
+      db`
+        SELECT
+          count(*)::int AS total,
+          count(*) FILTER (WHERE status = 'complete')::int AS complete,
+          count(*) FILTER (WHERE deploy_status = 'deployed')::int AS deployed,
+          round(avg(confidence_score)::numeric, 3) AS avg_confidence
+        FROM cc_sessions
+        WHERE self_modification = true
+          AND started_at > now() - make_interval(days => ${days})
+      `.then(([r]) => { analytics.selfModification = r }),
+
+      // Hourly activity heatmap (last 7 days)
+      db`
+        SELECT
+          extract(dow FROM started_at) AS day_of_week,
+          extract(hour FROM started_at) AS hour,
+          count(*)::int AS sessions
+        FROM cc_sessions
+        WHERE started_at > now() - interval '7 days'
+        GROUP BY 1, 2 ORDER BY 1, 2
+      `.then(rows => { analytics.activityHeatmap = rows }),
+    ])
+
+    analytics.period = { days, generated_at: new Date().toISOString() }
+    res.json(analytics)
+  } catch (err) {
+    next(err)
+  }
+})
+
 module.exports = router
