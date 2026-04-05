@@ -432,10 +432,6 @@ registry.registerMany([
   },
 
   // ═══════════════════════════════════════════════════════════════════════
-  // DELETE / BULK: Remove or batch-operate on transactions
-  // ═══════════════════════════════════════════════════════════════════════
-  {
-  // ═══════════════════════════════════════════════════════════════════════
   // REVERSE / CORRECT: Proper accounting corrections
   // ═══════════════════════════════════════════════════════════════════════
   {
@@ -669,6 +665,9 @@ registry.registerMany([
     },
   },
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // DELETE / BULK: Remove or batch-operate on transactions
+  // ═══════════════════════════════════════════════════════════════════════
   {
     name: 'bookkeeping_delete_staged',
     description: 'Delete a staged transaction by ID. Permanently removes it — use ignore if you want to keep it but hide it.',
