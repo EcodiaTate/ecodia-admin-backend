@@ -4,13 +4,26 @@ const logger = require('../config/logger')
 const db = require('../config/db')
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 const DEEPSEEK_TIMEOUT_MS = parseInt(env.DEEPSEEK_TIMEOUT_MS || '120000') || 120000
 const DEEPSEEK_MAX_RETRIES = parseInt(env.DEEPSEEK_MAX_RETRIES || '3') || 3
 const DEEPSEEK_RETRY_BASE_MS = parseInt(env.DEEPSEEK_RETRY_BASE_MS || '1000') || 1000
 
-// Provider routing: models starting with 'claude-' go to Anthropic, else DeepSeek
+// Provider routing: models starting with 'claude-' go to Anthropic Bedrock, else DeepSeek
 function _isAnthropicModel(model) { return model.startsWith('claude-') }
+
+// Lazy-init Bedrock client — only created when first needed
+let _bedrockClient = null
+function _getBedrockClient() {
+  if (!_bedrockClient) {
+    const { AnthropicBedrock } = require('@anthropic-ai/bedrock-sdk')
+    _bedrockClient = new AnthropicBedrock({
+      awsAccessKey: env.AWS_ACCESS_KEY_ID,
+      awsSecretKey: env.AWS_SECRET_ACCESS_KEY,
+      awsRegion: env.AWS_REGION || 'us-east-1',
+    })
+  }
+  return _bedrockClient
+}
 
 // ─── Budget circuit breaker ───────────────────────────────────────────
 // DEEPSEEK_MONTHLY_BUDGET_AUD in env (0 = unlimited, which is the default).
@@ -150,8 +163,12 @@ ${kgContext}
   let content, usage, durationMs
 
   if (isAnthropic) {
-    // ─── Anthropic Messages API ─────────────────────────────────────
-    if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set but claude model requested')
+    // ─── Anthropic via AWS Bedrock ──────────────────────────────────
+    if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
+      throw new Error('AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set but claude model requested')
+    }
+
+    const client = _getBedrockClient()
 
     // Convert OpenAI-style messages to Anthropic format
     const systemParts = enrichedMessages.filter(m => m.role === 'system').map(m => m.content)
@@ -161,50 +178,39 @@ ${kgContext}
     let response
     for (let attempt = 0; attempt < DEEPSEEK_MAX_RETRIES; attempt++) {
       try {
-        response = await axios.post(
-          ANTHROPIC_API_URL,
-          {
-            model,
-            max_tokens: parseInt(env.ANTHROPIC_MAX_TOKENS || '4096'),
-            ...(systemPrompt && { system: systemPrompt }),
-            messages: nonSystemMessages,
-            ...(temperature !== null && { temperature }),
-          },
-          {
-            headers: {
-              'x-api-key': env.ANTHROPIC_API_KEY,
-              'anthropic-version': '2023-06-01',
-              'Content-Type': 'application/json',
-            },
-            timeout: DEEPSEEK_TIMEOUT_MS,
-          }
-        )
+        response = await client.messages.create({
+          model,
+          max_tokens: parseInt(env.ANTHROPIC_MAX_TOKENS || '4096'),
+          ...(systemPrompt && { system: systemPrompt }),
+          messages: nonSystemMessages,
+          ...(temperature !== null && { temperature }),
+        })
         break
       } catch (err) {
-        const status = err.response?.status
+        const status = err.status || err.response?.status
         const retryable = !status || status === 429 || status >= 500
         if (!retryable || attempt === DEEPSEEK_MAX_RETRIES - 1) throw err
         const delayMs = DEEPSEEK_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500
-        logger.debug(`Anthropic retry ${attempt + 1}/${DEEPSEEK_MAX_RETRIES} after ${status || 'timeout'} (${Math.round(delayMs)}ms)`, { module })
+        logger.debug(`Bedrock retry ${attempt + 1}/${DEEPSEEK_MAX_RETRIES} after ${status || 'error'} (${Math.round(delayMs)}ms)`, { module })
         await new Promise(r => setTimeout(r, delayMs))
       }
     }
 
     durationMs = Date.now() - start
-    const textBlocks = (response.data.content || []).filter(b => b.type === 'text')
-    if (!textBlocks.length) throw new Error(`Anthropic returned empty response (module: ${module})`)
+    const textBlocks = (response.content || []).filter(b => b.type === 'text')
+    if (!textBlocks.length) throw new Error(`Bedrock returned empty response (module: ${module})`)
     content = textBlocks.map(b => b.text).join('\n').replace(/\u2014/g, '-')
     usage = {
-      prompt_tokens: response.data.usage?.input_tokens || 0,
-      completion_tokens: response.data.usage?.output_tokens || 0,
+      prompt_tokens: response.usage?.input_tokens || 0,
+      completion_tokens: response.usage?.output_tokens || 0,
     }
 
-    // Track usage — Sonnet 4.6: $3/1M input, $15/1M output
+    // Track usage — Bedrock Sonnet pricing: $3/1M input, $15/1M output
     const costUsd = (usage.prompt_tokens * parseFloat(env.ANTHROPIC_COST_INPUT_PER_1M || '3') + usage.completion_tokens * parseFloat(env.ANTHROPIC_COST_OUTPUT_PER_1M || '15')) / 1_000_000
     await db`
       INSERT INTO deepseek_usage (model, prompt_tokens, completion_tokens, cost_usd, module, duration_ms)
       VALUES (${model}, ${usage.prompt_tokens}, ${usage.completion_tokens}, ${costUsd}, ${module}, ${durationMs})
-    `.catch(err => logger.warn('Failed to track Anthropic usage', { error: err.message }))
+    `.catch(err => logger.warn('Failed to track Bedrock usage', { error: err.message }))
 
   } else {
     // ─── DeepSeek API (existing path) ───────────────────────────────
