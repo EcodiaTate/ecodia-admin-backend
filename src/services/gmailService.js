@@ -305,6 +305,14 @@ async function triagePendingEmails() {
       // Act on the triage result automatically. Only urgent/high need human review.
       await autoAct(thread, triage)
 
+      // ─── DELEGATION: Route to bookkeeping (receipts), factory (dev), CRM ──
+      try {
+        const delegation = require('./emailDelegationService')
+        delegation.delegateEmail(thread, triage).catch(err =>
+          logger.debug('Email delegation failed (non-blocking)', { error: err.message })
+        )
+      } catch { /* delegation service not loaded — non-blocking */ }
+
       // Fire-and-forget KG ingestion of triage results
       kgHooks.onEmailTriaged({
         threadId: thread.id, subject: thread.subject, fromEmail: thread.from_email,
