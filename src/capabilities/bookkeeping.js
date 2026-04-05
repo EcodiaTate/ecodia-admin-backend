@@ -6,21 +6,24 @@ registry.registerMany([
   // ═══════════════════════════════════════════════════════════════════════
   {
     name: 'bookkeeping_ingest_csv',
-    description: 'Parse and ingest a Bank Australia CSV into the bookkeeping staged pipeline. Pass the raw CSV text content. Deduplicates automatically. Auto-categorizes after import.',
+    description: 'Parse and ingest a bank CSV into the bookkeeping staged pipeline. Pass the raw CSV text content. Deduplicates automatically. Auto-categorizes after import. Set source_account to 2100 for personal bank statements (creates director loan entries), or 1000 for company bank.',
     tier: 'write',
     domain: 'bookkeeping',
     params: {
       csvText: { type: 'string', required: true, description: 'Raw CSV file content from any bank — AI auto-detects column format' },
+      source_account: { type: 'string', required: false, description: '1000 = company bank (default), 2100 = personal bank (director loan)' },
     },
     handler: async (params) => {
       const bk = require('../services/bookkeeperService')
+      const sourceAccount = params.source_account || '1000'
       const transactions = await bk.parseAnyBankCSV(params.csvText)
+      for (const tx of transactions) tx.source_account = sourceAccount
       let created = 0, dupes = 0
       for (const tx of transactions) {
         if (await bk.upsertStaged(tx)) created++; else dupes++
       }
       if (created > 0) await bk.autoCategorize()
-      return { message: `Imported ${created} new transactions (${dupes} duplicates skipped, ${transactions.length} total parsed). Auto-categorization ran.`, created, duplicates: dupes }
+      return { message: `Imported ${created} new transactions (${dupes} duplicates skipped, ${transactions.length} total parsed). Source: ${sourceAccount === '2100' ? 'personal bank' : 'company bank'}. Auto-categorization ran.`, created, duplicates: dupes }
     },
   },
   {

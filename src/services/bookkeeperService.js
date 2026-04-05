@@ -188,9 +188,10 @@ async function upsertStaged(tx) {
 
   await db`
     INSERT INTO staged_transactions (source, source_ref, occurred_at, amount_cents, description,
-      long_description, transaction_type, status)
+      long_description, transaction_type, status, source_account)
     VALUES (${tx.source}, ${tx.source_ref}, ${tx.occurred_at}, ${tx.amount_cents},
-      ${tx.description}, ${tx.long_description}, ${tx.transaction_type}, 'pending')
+      ${tx.description}, ${tx.long_description}, ${tx.transaction_type}, 'pending',
+      ${tx.source_account || '1000'})
   `
   return true
 }
@@ -387,16 +388,20 @@ async function postStagedTransaction(stagedId) {
   const gst = tx.gst_amount_cents || 0
   const exGst = amountAbs - gst
   const isIncome = tx.amount_cents > 0
+  // source_account: '1000' = company bank, '2100' = personal bank (director loan)
+  const bankAccount = tx.source_account || '1000'
   const lines = []
 
-  if (tx.is_personal && isIncome) {
-    lines.push({ account_code: '1000', debit_cents: amountAbs, credit_cents: 0 })
-    lines.push({ account_code: '2100', debit_cents: 0, credit_cents: amountAbs })
-  } else if (tx.is_personal && !isIncome) {
+  if (tx.is_personal && !isIncome) {
+    // Personal expense on company card: you owe the company
     lines.push({ account_code: '2100', debit_cents: amountAbs, credit_cents: 0 })
-    lines.push({ account_code: '1000', debit_cents: 0, credit_cents: amountAbs })
+    lines.push({ account_code: bankAccount, debit_cents: 0, credit_cents: amountAbs })
+  } else if (tx.is_personal && isIncome) {
+    // Personal money into company: company owes you
+    lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
+    lines.push({ account_code: '2100', debit_cents: 0, credit_cents: amountAbs })
   } else if (isIncome) {
-    lines.push({ account_code: '1000', debit_cents: amountAbs, credit_cents: 0 })
+    lines.push({ account_code: bankAccount, debit_cents: amountAbs, credit_cents: 0 })
     if (gst > 0) {
       lines.push({ account_code: tx.category, debit_cents: 0, credit_cents: exGst, tax_code: 'GST' })
       lines.push({ account_code: '2120', debit_cents: 0, credit_cents: gst, tax_code: 'GST', tax_amount_cents: gst })
@@ -404,13 +409,14 @@ async function postStagedTransaction(stagedId) {
       lines.push({ account_code: tx.category, debit_cents: 0, credit_cents: amountAbs })
     }
   } else {
+    // Business expense — DR expense, CR bank account
     if (gst > 0) {
       lines.push({ account_code: tx.category, debit_cents: exGst, credit_cents: 0, tax_code: 'Input' })
       lines.push({ account_code: '2110', debit_cents: gst, credit_cents: 0, tax_code: 'Input', tax_amount_cents: gst })
     } else {
       lines.push({ account_code: tx.category, debit_cents: amountAbs, credit_cents: 0 })
     }
-    lines.push({ account_code: '1000', debit_cents: 0, credit_cents: amountAbs })
+    lines.push({ account_code: bankAccount, debit_cents: 0, credit_cents: amountAbs })
   }
 
   // Persist

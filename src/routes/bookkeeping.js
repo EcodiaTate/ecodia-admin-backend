@@ -67,7 +67,11 @@ router.post('/ingest/csv', express.text({ type: '*/*', limit: '10mb' }), async (
   try {
     if (!req.body) return res.status(400).json({ error: 'No CSV data' })
     const csvText = typeof req.body === 'string' ? req.body : req.body.toString('utf-8')
+    // source_account can be passed as query param: ?source_account=2100 for personal bank
+    const sourceAccount = req.query.source_account || '1000'
     const transactions = await bk.parseAnyBankCSV(csvText)
+    // Tag each transaction with the source account
+    for (const tx of transactions) tx.source_account = sourceAccount
     let created = 0, dupes = 0
     for (const tx of transactions) {
       if (await bk.upsertStaged(tx)) created++; else dupes++
