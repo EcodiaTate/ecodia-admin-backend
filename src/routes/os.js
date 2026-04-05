@@ -21,7 +21,11 @@ router.post('/run', async (req, res, next) => {
 
     const result = await osCortex.runTask(taskId || null, messages, { workspace })
     res.json(result)
-  } catch (err) { next(err) }
+  } catch (err) {
+    // Log the full error for debugging — PM2 logs will show it
+    console.error('[OS /run] Error:', err.message, err.status || err.statusCode || '', err.response?.data || '')
+    next(err)
+  }
 })
 
 // ── Workspaces ──
