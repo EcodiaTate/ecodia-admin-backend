@@ -23,12 +23,34 @@ async function buildCortexSystemPrompt() {
     const registry = require('./capabilityRegistry')
     const caps = registry.list({ tier: 'write', enabledOnly: true })
     if (caps.length > 0) {
-      capabilitySection = caps.map(c => {
-        const paramStr = Object.entries(c.params || {})
-          .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.description || v.type || 'any'}`)
-          .join(', ')
-        return `  ${c.name} — ${c.description}${paramStr ? ` (${paramStr})` : ''}`
-      }).join('\n')
+      // Group by domain — show full params for core domains, condensed for large domains
+      const byDomain = {}
+      for (const c of caps) {
+        const d = c.domain || 'general'
+        if (!byDomain[d]) byDomain[d] = []
+        byDomain[d].push(c)
+      }
+
+      const lines = []
+      for (const [domain, domainCaps] of Object.entries(byDomain)) {
+        if (domainCaps.length > 8) {
+          // Large domain (bookkeeping, etc): show names only with one-line descriptions
+          lines.push(`  [${domain}] ${domainCaps.length} capabilities:`)
+          for (const c of domainCaps) {
+            const reqParams = Object.entries(c.params || {}).filter(([, v]) => v.required).map(([k]) => k)
+            lines.push(`    ${c.name}${reqParams.length ? `(${reqParams.join(', ')})` : ''} — ${c.description.split('.')[0]}`)
+          }
+        } else {
+          // Small domain: full detail
+          for (const c of domainCaps) {
+            const paramStr = Object.entries(c.params || {})
+              .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.description || v.type || 'any'}`)
+              .join(', ')
+            lines.push(`  ${c.name} — ${c.description}${paramStr ? ` (${paramStr})` : ''}`)
+          }
+        }
+      }
+      capabilitySection = lines.join('\n')
     }
   } catch { /* registry unavailable */ }
 
