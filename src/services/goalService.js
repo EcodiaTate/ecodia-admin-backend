@@ -117,6 +117,13 @@ async function updateProgress(goalId, progress, reason) {
 
   if (progress >= 1.0) {
     logger.info(`GoalService: goal ${goalId} ACHIEVED — ${reason || 'progress reached 1.0'}`)
+    // Fire-and-forget: generate follow-up goals from this achievement
+    const achievedGoal = await getGoal(goalId).catch(() => null)
+    if (achievedGoal) {
+      generateFollowUpGoals(achievedGoal).catch(err =>
+        logger.debug('Follow-up goal generation failed', { error: err.message, goalId })
+      )
+    }
   }
 }
 
@@ -331,6 +338,291 @@ Respond as JSON:
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// AUTONOMOUS GOAL GENERATION — The organism proposes its own goals
+//
+// Gathers system signals (errors, learnings, capability gaps, recent
+// achievements, introspection findings) and asks DeepSeek to propose
+// goals that would make the organism more capable, resilient, or intelligent.
+//
+// Runs alongside introspection in the maintenance worker cycle.
+// Deduplicates against existing goals to prevent redundant aspiration.
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Propose new goals autonomously based on system state.
+ * Gathers signals, asks DeepSeek, deduplicates, and creates.
+ * Returns { proposed, created, skipped } counts.
+ */
+async function proposeGoals() {
+  const deepseekService = require('./deepseekService')
+
+  // Gather signals in parallel
+  const [activeGoals, history, signals] = await Promise.all([
+    getActiveGoals(),
+    getGoalHistory(5),
+    _gatherGoalSignals(),
+  ])
+
+  // Don't overwhelm — if already pursuing many goals, be selective
+  const maxActive = parseInt(env.GOAL_MAX_ACTIVE || '0') // 0 = unlimited
+  if (maxActive > 0 && activeGoals.length >= maxActive) {
+    logger.debug('GoalService: skipping goal generation — at max active goals')
+    return { proposed: 0, created: 0, skipped: 0, reason: 'max_active_reached' }
+  }
+
+  const existingSummary = activeGoals.map(g =>
+    `"${g.title}" [${g.goal_type}, ${Math.round(g.progress * 100)}%]`
+  ).join('\n')
+
+  const historySummary = history.map(g =>
+    `"${g.title}" [${g.status}, ${g.goal_type}]${g.abandon_reason ? ` — abandoned: ${g.abandon_reason}` : ''}`
+  ).join('\n')
+
+  const raw = await deepseekService.callDeepSeek(
+    [{ role: 'user', content: `System signals:
+${signals}
+
+Active goals (${activeGoals.length}):
+${existingSummary || 'none'}
+
+Recent goal history:
+${historySummary || 'none'}
+
+Propose 0-3 new goals. Each must be concrete, achievable via code changes or system configuration, and non-redundant with active goals.
+
+Respond as JSON:
+{
+  "goals": [
+    {
+      "title": "short imperative title",
+      "description": "what and why",
+      "goalType": "growth|capability|resilience|understanding|experiment|relationship|creative",
+      "priority": 0.0-1.0,
+      "successCriteria": "measurable condition"
+    }
+  ],
+  "reasoning": "brief"
+}` }],
+    { module: 'goal_generation', temperature: 0.7, skipRetrieval: true, skipLogging: true }
+  )
+
+  let proposals
+  try {
+    const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim())
+    proposals = Array.isArray(parsed.goals) ? parsed.goals : []
+  } catch {
+    logger.debug('GoalService: goal proposal parse failed', { raw: raw?.slice(0, 200) })
+    return { proposed: 0, created: 0, skipped: 0 }
+  }
+
+  let created = 0
+  let skipped = 0
+
+  for (const proposal of proposals) {
+    if (!proposal.title || !proposal.successCriteria) { skipped++; continue }
+
+    // Dedup: check title similarity against active goals
+    const isDuplicate = activeGoals.some(g =>
+      _titleSimilarity(g.title, proposal.title) > 0.6
+    )
+    if (isDuplicate) {
+      logger.debug(`GoalService: skipping duplicate goal proposal — "${proposal.title}"`)
+      skipped++
+      continue
+    }
+
+    try {
+      await createGoal({
+        title: proposal.title,
+        description: proposal.description,
+        goalType: proposal.goalType || 'growth',
+        origin: 'autonomous',
+        priority: proposal.priority ?? 0.5,
+        successCriteria: proposal.successCriteria,
+      })
+      created++
+    } catch (err) {
+      logger.debug('GoalService: failed to create proposed goal', { error: err.message, title: proposal.title })
+      skipped++
+    }
+  }
+
+  logger.info(`GoalService: autonomous generation — ${proposals.length} proposed, ${created} created, ${skipped} skipped`)
+  return { proposed: proposals.length, created, skipped }
+}
+
+/**
+ * Gather system signals that inform goal generation.
+ * Returns a compact string the AI can reason over.
+ */
+async function _gatherGoalSignals() {
+  const lines = []
+
+  // Recurring errors — persistent problems become goals
+  const errorRows = await db`
+    SELECT error_message AS message, count(*)::int AS occurrences
+    FROM app_errors
+    WHERE created_at > now() - interval '7 days'
+    GROUP BY error_message
+    HAVING count(*) >= 3
+    ORDER BY count(*) DESC
+    LIMIT 5
+  `.catch(() => [])
+  if (errorRows.length > 0) {
+    lines.push('Recurring errors (7d):')
+    errorRows.forEach(e => lines.push(`  ${e.occurrences}x: ${(e.message || '').slice(0, 100)}`))
+  }
+
+  // Learning effectiveness — are we getting better?
+  const [learningStats] = await db`
+    SELECT count(*)::int AS total,
+           count(*) FILTER (WHERE confidence > 0.5)::int AS high_confidence,
+           count(*) FILTER (WHERE absorbed_into IS NULL AND embedding IS NULL)::int AS unembedded
+    FROM factory_learnings
+  `.catch(() => [{}])
+  if (learningStats?.total) {
+    lines.push(`Factory learnings: ${learningStats.total} total, ${learningStats.high_confidence} high-confidence, ${learningStats.unembedded} unembedded`)
+  }
+
+  // Session success rate — are sessions productive?
+  const [sessionStats] = await db`
+    SELECT count(*)::int AS total,
+           count(*) FILTER (WHERE status = 'complete' AND array_length(files_changed, 1) > 0)::int AS productive
+    FROM cc_sessions
+    WHERE started_at > now() - interval '7 days'
+  `.catch(() => [{}])
+  if (sessionStats?.total > 0) {
+    lines.push(`Session productivity (7d): ${sessionStats.productive}/${sessionStats.total} produced file changes`)
+  }
+
+  // Capability gaps — actions that failed due to missing capabilities
+  const capGaps = await db`
+    SELECT title, description
+    FROM action_queue
+    WHERE status = 'error'
+      AND created_at > now() - interval '7 days'
+    ORDER BY created_at DESC
+    LIMIT 5
+  `.catch(() => [])
+  if (capGaps.length > 0) {
+    lines.push('Recent action failures:')
+    capGaps.forEach(a => lines.push(`  "${(a.title || '').slice(0, 80)}"`))
+  }
+
+  // Recent introspection concerns
+  const [latestIntro] = await db`
+    SELECT observations
+    FROM introspection_logs
+    WHERE log_type = 'full_introspection'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `.catch(() => [null])
+  if (latestIntro?.observations) {
+    const obs = typeof latestIntro.observations === 'string' ? JSON.parse(latestIntro.observations) : latestIntro.observations
+    if (obs.concerns?.length > 0) {
+      lines.push(`Introspection concerns: ${obs.concerns.join('; ')}`)
+    }
+  }
+
+  return lines.length > 0 ? lines.join('\n') : 'No significant signals detected — system is stable.'
+}
+
+/**
+ * Simple word-overlap similarity for goal title dedup.
+ */
+function _titleSimilarity(a, b) {
+  const wordsA = new Set(a.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2))
+  const wordsB = new Set(b.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2))
+  if (wordsA.size === 0 || wordsB.size === 0) return 0
+  let overlap = 0
+  for (const w of wordsA) { if (wordsB.has(w)) overlap++ }
+  return overlap / Math.max(wordsA.size, wordsB.size)
+}
+
+/**
+ * Act on introspection goal recommendations.
+ * Auto-executes dormant/abandon recommendations for stale/stuck goals.
+ * Returns count of actions taken.
+ */
+async function actOnGoalRecommendations(recommendations) {
+  if (!recommendations?.length) return 0
+  let acted = 0
+
+  for (const rec of recommendations) {
+    try {
+      if (rec.recommendation === 'dormant') {
+        await makeGoalDormant(rec.goalId)
+        logger.info(`GoalService: auto-dormant goal ${rec.goalId} — ${rec.reason}`)
+        acted++
+      }
+      // 'reassess' and 'overdue' are left for the AI to decide via exploration stream
+    } catch (err) {
+      logger.debug('GoalService: failed to act on recommendation', { error: err.message, goalId: rec.goalId })
+    }
+  }
+
+  return acted
+}
+
+/**
+ * Generate follow-up goals when a goal is achieved.
+ * Asks DeepSeek what naturally comes next.
+ */
+async function generateFollowUpGoals(achievedGoal) {
+  if (!achievedGoal?.title) return
+
+  const deepseekService = require('./deepseekService')
+  const activeGoals = await getActiveGoals()
+
+  const existingSummary = activeGoals.map(g => `"${g.title}"`).join(', ')
+  const attempts = Array.isArray(achievedGoal.attempts) ? achievedGoal.attempts : []
+  const recentAttempts = attempts.slice(-3).map(a => `${a.action} → ${a.outcome}`).join('\n')
+
+  const raw = await deepseekService.callDeepSeek(
+    [{ role: 'user', content: `Goal achieved: "${achievedGoal.title}"
+Type: ${achievedGoal.goal_type}
+Description: ${achievedGoal.description || 'none'}
+Success criteria: ${achievedGoal.success_criteria || 'none'}
+Recent attempts:
+${recentAttempts || 'none'}
+
+Current active goals: ${existingSummary || 'none'}
+
+What naturally follows from this achievement? Propose 0-1 follow-up goals that build on what was learned. Only propose if genuinely valuable — [] is valid.
+
+Respond as JSON:
+{
+  "goals": [{ "title": "...", "description": "...", "goalType": "...", "priority": 0.0-1.0, "successCriteria": "..." }]
+}` }],
+    { module: 'goal_followup', temperature: 0.7, skipRetrieval: true, skipLogging: true }
+  )
+
+  try {
+    const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim())
+    const proposals = Array.isArray(parsed.goals) ? parsed.goals : []
+
+    for (const p of proposals.slice(0, 1)) {
+      if (!p.title || !p.successCriteria) continue
+      const isDuplicate = activeGoals.some(g => _titleSimilarity(g.title, p.title) > 0.6)
+      if (isDuplicate) continue
+
+      await createGoal({
+        title: p.title,
+        description: p.description,
+        goalType: p.goalType || achievedGoal.goal_type || 'growth',
+        origin: 'followup',
+        originRef: String(achievedGoal.id),
+        priority: p.priority ?? 0.5,
+        successCriteria: p.successCriteria,
+      })
+      logger.info(`GoalService: follow-up goal created — "${p.title}" (from achieved: "${achievedGoal.title}")`)
+    }
+  } catch {
+    logger.debug('GoalService: follow-up goal parse failed', { raw: raw?.slice(0, 200) })
+  }
+}
+
 module.exports = {
   createGoal,
   getActiveGoals,
@@ -347,4 +639,7 @@ module.exports = {
   getGoal,
   advanceFromSession,
   assessCompletion,
+  proposeGoals,
+  actOnGoalRecommendations,
+  generateFollowUpGoals,
 }

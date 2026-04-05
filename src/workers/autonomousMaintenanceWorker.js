@@ -394,10 +394,25 @@ async function runCycle() {
     let outcomeCount = 0
     try { outcomeCount = await verifyOutcomes() } catch {}
 
-    // 8. Periodic introspection + first-boot self-model seeding
+    // 8. Periodic introspection + autonomous goal generation + first-boot self-model seeding
     const _introInterval = parseInt(env.INTROSPECTION_CYCLE_INTERVAL || '10')
     if (_introInterval > 0 && _cycleCount % _introInterval === 0) {
-      try { const is = require('../services/introspectionService'); const r = await is.runFullIntrospection(); logger.info(`Introspection: ${r.overallAssessment} — ${r.concerns.length} concerns, ${r.selfModelUpdates.length} self-model updates`) } catch (err) { logger.debug('Introspection cycle failed', { error: err.message }) }
+      try {
+        const is = require('../services/introspectionService')
+        const gs = require('../services/goalService')
+        const r = await is.runFullIntrospection()
+        logger.info(`Introspection: ${r.overallAssessment} — ${r.concerns.length} concerns, ${r.selfModelUpdates.length} self-model updates`)
+
+        // Act on goal recommendations from introspection (auto-dormant stale goals)
+        if (r.goalReview?.updates?.length > 0) {
+          const acted = await gs.actOnGoalRecommendations(r.goalReview.updates)
+          if (acted > 0) logger.info(`GoalService: acted on ${acted} introspection recommendations`)
+        }
+
+        // Autonomous goal generation — propose new goals from system signals
+        const genResult = await gs.proposeGoals()
+        if (genResult.created > 0) logger.info(`GoalService: autonomous generation created ${genResult.created} new goals`)
+      } catch (err) { logger.debug('Introspection/goal-generation cycle failed', { error: err.message }) }
     }
     if (_cycleCount === 0) { try { const sm = require('../services/selfModelService'); const seeded = await sm.seedIfEmpty(); if (seeded) logger.info('SelfModel: first-boot seed complete') } catch {} }
     _cycleCount++
