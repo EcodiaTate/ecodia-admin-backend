@@ -23,6 +23,7 @@ const metaRoutes = require('./routes/meta')
 const actionQueueRoutes = require('./routes/actionQueue')
 const contextTrackingRoutes = require('./routes/contextTracking')
 const kgExplorerRoutes = require('./routes/kgExplorer')
+const momentumRoutes = require('./routes/momentum')
 
 const app = express()
 
@@ -68,6 +69,7 @@ app.use('/api/meta', metaRoutes)
 app.use('/api/actions', actionQueueRoutes)
 app.use('/api/context', contextTrackingRoutes)
 app.use('/kg-explorer', kgExplorerRoutes)
+app.use('/api/momentum', momentumRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)
