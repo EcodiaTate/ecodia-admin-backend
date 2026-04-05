@@ -395,4 +395,123 @@ router.get('/clients/:id/coding-summary', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ─── Activity Timeline ──────────────────────────────────────────────
+
+router.get('/clients/:id/timeline', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0)
+    const types = req.query.types ? req.query.types.split(',') : undefined
+    const result = await crmService.getClientTimeline(req.params.id, { limit, offset, types })
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// ─── Client Intelligence ────────────────────────────────────────────
+
+router.get('/clients/:id/intelligence', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const intel = await crmService.getClientIntelligence(req.params.id)
+    if (!intel) return res.status(404).json({ error: 'Client not found' })
+    res.json(intel)
+  } catch (err) { next(err) }
+})
+
+// ─── Contacts ───────────────────────────────────────────────────────
+
+router.get('/clients/:id/contacts', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const contacts = await crmService.getContacts(req.params.id)
+    res.json(contacts)
+  } catch (err) { next(err) }
+})
+
+router.post('/clients/:id/contacts', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const contact = await crmService.addContact({ clientId: req.params.id, ...req.body })
+    res.status(201).json(contact)
+  } catch (err) { next(err) }
+})
+
+// ─── Tasks ──────────────────────────────────────────────────────────
+
+router.get('/clients/:id/tasks', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const includeCompleted = req.query.includeCompleted === 'true'
+    const tasks = await crmService.getClientTasks(req.params.id, { includeCompleted })
+    res.json(tasks)
+  } catch (err) { next(err) }
+})
+
+router.post('/tasks/:id/complete', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const task = await crmService.completeTask(req.params.id, 'human')
+    if (!task) return res.status(404).json({ error: 'Task not found or already completed' })
+    res.json(task)
+  } catch (err) { next(err) }
+})
+
+// ─── Search ─────────────────────────────────────────────────────────
+
+router.get('/search', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    const results = await crmService.searchClients(req.query.q)
+    res.json({ results })
+  } catch (err) { next(err) }
+})
+
+// ─── Pipeline Analytics ─────────────────────────────────────────────
+
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    res.json(await crmService.getPipelineAnalytics())
+  } catch (err) { next(err) }
+})
+
+// ─── Revenue ────────────────────────────────────────────────────────
+
+router.get('/revenue', async (req, res, next) => {
+  try {
+    const crmService = require('../services/crmService')
+    res.json(await crmService.getRevenueOverview({ clientId: req.query.clientId }))
+  } catch (err) { next(err) }
+})
+
+// ─── CRM Dashboard ─────────────────────────────────────────────────
+
+router.get('/dashboard', async (req, res, next) => {
+  try {
+    const db = require('../config/db')
+    const crmService = require('../services/crmService')
+
+    const pipeline = await crmService.getPipelineAnalytics()
+    const revenue = await crmService.getRevenueOverview()
+
+    const [taskStats] = await db`
+      SELECT
+        count(*) FILTER (WHERE completed_at IS NULL)::int AS open,
+        count(*) FILTER (WHERE completed_at IS NULL AND due_date < now())::int AS overdue,
+        count(*) FILTER (WHERE completed_at IS NULL AND priority IN ('urgent','high'))::int AS high_priority
+      FROM tasks
+    `
+
+    const recentActivity = await db`
+      SELECT al.*, c.name AS client_name
+      FROM crm_activity_log al
+      JOIN clients c ON al.client_id = c.id
+      ORDER BY al.created_at DESC LIMIT 15
+    `
+
+    res.json({ pipeline, revenue, taskStats, recentActivity })
+  } catch (err) { next(err) }
+})
+
 module.exports = router

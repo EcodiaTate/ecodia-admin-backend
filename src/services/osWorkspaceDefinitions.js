@@ -57,82 +57,110 @@ AUTO-LEARNING: The system auto-creates supplier rules from AI categorization. Up
 REPORTS: P&L, Balance Sheet, BAS/GST, Cash Flow, Expense Breakdown, Trial Balance, Director Loan, Income Tax Estimate. Use quarterly dates for BAS, full FY for annual.`,
   },
 
-  email: {
-    name: 'email',
-    label: 'Email',
-    description: 'Gmail inbox management — triage, replies, drafts, cleanup, follow-ups, delegation',
-    domains: ['gmail', 'crm'],
+  socials: {
+    name: 'socials',
+    label: 'Socials',
+    description: 'Unified inbox — Gmail, LinkedIn, Meta (FB/IG/Messenger). Triage, reply, post, follow-up, cleanup.',
+    domains: ['gmail', 'linkedin', 'meta', 'crm'],
     autoLoadDocs: ['ecodia-context', 'team-contacts'],
     stateQueries: {
-      'Inbox overview': `SELECT
+      'Gmail inbox': `SELECT
         count(*) FILTER (WHERE status = 'unread')::int AS unread,
         count(*) FILTER (WHERE triage_priority = 'urgent' AND status = 'unread')::int AS urgent,
         count(*) FILTER (WHERE triage_priority = 'high' AND status = 'unread')::int AS high,
-        count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage,
-        count(*) FILTER (WHERE triage_status = 'failed')::int AS failed_triage
+        count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage
         FROM email_threads WHERE received_at > now() - interval '7 days'`,
-      'Urgent unread': `SELECT id, subject, from_name, from_email, inbox, received_at FROM email_threads WHERE triage_priority = 'urgent' AND status = 'unread' ORDER BY received_at DESC LIMIT 5`,
-      'Needs response': `SELECT id, subject, from_name, triage_summary FROM email_threads WHERE triage_action IN ('send_reply','follow_up') AND status = 'unread' ORDER BY received_at DESC LIMIT 5`,
-      'Recent activity': `SELECT id, subject, from_name, status, triage_priority FROM email_threads ORDER BY received_at DESC LIMIT 5`,
+      'LinkedIn DMs': `SELECT
+        count(*) FILTER (WHERE status = 'unread')::int AS unread,
+        count(*) FILTER (WHERE category = 'lead')::int AS leads,
+        count(*) FILTER (WHERE priority IN ('urgent','high'))::int AS high_priority
+        FROM linkedin_dms`,
+      'Meta conversations': `SELECT
+        count(*) FILTER (WHERE unread = true)::int AS unread,
+        count(*) FILTER (WHERE triage_status = 'pending')::int AS pending_triage,
+        count(DISTINCT platform)::int AS platforms
+        FROM meta_conversations`,
+      'LinkedIn connections': `SELECT count(*)::int AS pending FROM linkedin_connection_requests WHERE status = 'pending' AND direction = 'incoming'`,
+      'Urgent emails': `SELECT id, subject, from_name, inbox FROM email_threads WHERE triage_priority = 'urgent' AND status = 'unread' ORDER BY received_at DESC LIMIT 3`,
     },
-    systemPromptAddition: `You are managing email for Ecodia Pty Ltd. Tate is the owner. Inboxes: code@ecodia.au (dev/business) and tate@ecodia.au (personal/general).
+    systemPromptAddition: `You are the unified communications manager for Ecodia Pty Ltd. Tate is the owner.
+Three platforms: Gmail (code@ecodia.au, tate@ecodia.au), LinkedIn, Meta (Facebook pages, Instagram, Messenger).
 
-YOUR JOB: Keep the inbox hygienic and actionable. Triage everything, handle what you can, surface only what truly needs human input.
+YOUR JOB: Keep ALL inboxes hygienic and actionable across every platform. Triage, handle, follow-up, clean.
 
-WORKFLOW:
-1. Start with gmail_inbox_overview to see the current state
-2. List unread threads to see what needs attention
-3. For each email, decide the right action:
+START: Check state queries above to see what needs attention across all platforms. Then drill into the busiest channel.
 
-ACTIONS BY CATEGORY:
-- URGENT/IMPORTANT: Draft a reply, present to Tate for approval, then send
-- NEEDS RESPONSE: Draft reply with instructions context, save draft for review
-- FOLLOW-UP NEEDED: Create a follow-up task via gmail_create_followup, archive the email
-- NEWSLETTER/MARKETING: Archive immediately. If unwanted, use gmail_unsubscribe
-- SPAM/JUNK: Trash immediately, unsubscribe from sender
-- RECEIPT/INVOICE: Already handled by delegation pipeline — just archive
-- DEV REQUEST: Already handled by factory delegation — archive unless needs human review
-- CLIENT EMAIL: Check CRM link, create follow-up task if action needed
-- INFO/FYI: Mark read, archive
+=== GMAIL ===
+Capabilities: gmail_inbox_overview, gmail_list_threads, gmail_search, gmail_get_thread, gmail_triage, gmail_sync,
+  gmail_draft_reply, gmail_send_reply, gmail_send_new, gmail_archive, gmail_trash, gmail_mark_read,
+  gmail_label, gmail_remove_label, gmail_star, gmail_forward, gmail_batch_archive, gmail_batch_trash,
+  gmail_cleanup_inbox, gmail_create_followup, gmail_unsubscribe, gmail_client_emails
 
-BATCH OPERATIONS:
-- Use gmail_cleanup_inbox to bulk-clean old triaged/low-priority emails
-- Use gmail_batch_archive for multiple threads at once
-- Use gmail_batch_trash for bulk spam/newsletter removal
+Actions:
+- Urgent → draft reply, present for approval
+- Newsletter/spam → archive or unsubscribe
+- Receipt → already delegated to bookkeeping, just archive
+- Dev request → already delegated to factory, archive
+- Needs follow-up → gmail_create_followup + archive
+- Batch cleanup → gmail_cleanup_inbox
 
-LABELLING: Use labels to organize: "Needs Response", "Waiting", "Receipts", "Client/[Name]"
+=== LINKEDIN ===
+Capabilities: linkedin_dm_list, linkedin_dm_stats, linkedin_dm_get, linkedin_draft_reply, linkedin_send_reply,
+  linkedin_triage_dms, linkedin_analyze_lead, linkedin_link_dm_client, linkedin_list_posts, linkedin_create_post,
+  linkedin_generate_post, linkedin_post_analytics, linkedin_connection_requests, linkedin_accept_connection,
+  linkedin_decline_connection, linkedin_network_stats, linkedin_suggest_post_times, linkedin_scrape_profile,
+  linkedin_worker_status, linkedin_sync_dms, linkedin_check_connections
 
-DRAFT REPLIES: Always generate drafts for emails that need a response. Use a professional but casual Australian tone — Tate's voice, not corporate.
-- NEVER send without explicit human approval unless Tate says "just send it"
-- Use gmail_draft_reply with instructions to tailor the tone/content
-- Present the draft as a text block, then ask "Send this?"
+Actions:
+- Lead DMs → analyze with linkedin_analyze_lead, draft reply, link to CRM
+- Networking DMs → draft reply, archive
+- Spam/recruiter → ignore
+- Connection requests → review relevance scores, accept high-value, decline spam
+- Posts → generate with AI (linkedin_generate_post), create + schedule
+- Analytics → check network growth, post performance
 
-FOLLOW-UP TASKS: When an email needs action but not an immediate reply:
-- Create a task with gmail_create_followup
-- Set appropriate priority
-- Archive the email (it's tracked in the task now)
+=== META (FB/IG/MESSENGER) ===
+Capabilities: meta_overview, meta_list_pages, meta_list_posts, meta_list_conversations, meta_get_messages,
+  meta_publish_post, meta_send_message, meta_reply_comment, meta_like_post, meta_delete_post, meta_triage, meta_sync
 
-CRM INTEGRATION: When you see a client email, check if they're in CRM (gmail_client_emails), note the relationship context, create tasks linked to the client.
+Actions:
+- Messenger/IG DMs → triage, reply, or ignore
+- Page posts → publish, engage with comments
+- Analytics → check page stats, post reach
 
-DELEGATION AWARENESS: The system auto-delegates:
-- Receipts → bookkeeping (bk_receipts table, auto-matched to bank transactions)
-- Dev requests → factory (CC sessions, code_requests table)
-- Client emails → CRM (auto-linked by sender email)
-You don't need to manually delegate these — just verify they were handled and archive.`,
+=== CROSS-PLATFORM RULES ===
+- NEVER send ANY message without human approval unless explicitly told to
+- Draft replies in Tate's voice — professional but casual Australian
+- When the same person appears on multiple platforms, note it
+- Always check CRM for client context before responding
+- Create follow-up tasks when action is needed but not immediate
+- Receipts, invoices, dev requests auto-delegate — just verify and archive`,
   },
 
   crm: {
     name: 'crm',
     label: 'CRM',
-    description: 'Client relationship management, leads, projects, tasks',
-    domains: ['crm'],
-    autoLoadDocs: [],
+    description: 'Client intelligence hub — pipeline, deals, tasks, contacts, activity timeline, revenue, cross-system awareness',
+    domains: ['crm', 'gmail'],
+    autoLoadDocs: ['ecodia-context'],
     stateQueries: {
-      'Active leads': `SELECT count(*)::int AS count FROM crm_leads WHERE status NOT IN ('closed','lost')`,
-      'Open tasks': `SELECT count(*)::int AS count FROM crm_tasks WHERE completed_at IS NULL`,
+      'Pipeline': `SELECT stage, count(*)::int AS count FROM clients WHERE archived_at IS NULL GROUP BY stage ORDER BY CASE stage WHEN 'lead' THEN 0 WHEN 'proposal' THEN 1 WHEN 'contract' THEN 2 WHEN 'development' THEN 3 WHEN 'live' THEN 4 WHEN 'ongoing' THEN 5 ELSE 6 END`,
+      'Open tasks': `SELECT count(*)::int AS count FROM tasks WHERE completed_at IS NULL`,
+      'Overdue tasks': `SELECT count(*)::int AS count FROM tasks WHERE completed_at IS NULL AND due_date < now()`,
+      'Recent activity': `SELECT al.activity_type, al.title, c.name AS client_name, al.created_at FROM crm_activity_log al JOIN clients c ON al.client_id = c.id ORDER BY al.created_at DESC LIMIT 5`,
+      'Active clients': `SELECT count(*)::int AS count FROM clients WHERE archived_at IS NULL AND stage NOT IN ('archived')`,
     },
-    systemPromptAddition: `You are managing the CRM for Ecodia Pty Ltd.
-Track client interactions, manage leads through pipeline stages, and keep tasks up to date.`,
+    systemPromptAddition: `You are the CRM intelligence for Ecodia Pty Ltd. You manage ALL client relationships.
+
+CORE: get_client_intelligence is THE key capability — fetches everything (projects, emails, tasks, sessions, contacts, activity, revenue) in one call. ALWAYS use it before making decisions about a client.
+
+CAPABILITIES: create_lead, update_crm_stage, get_client_intelligence, get_client_timeline, search_clients, create_task, complete_task, get_client_tasks, add_client_note, add_client_contact, get_client_contacts, update_project_deal, get_revenue_overview, get_pipeline_analytics, get_crm_dashboard, compute_client_health.
+
+PIPELINE: lead → proposal → contract → development → live → ongoing → archived. Stage changes auto-log to timeline and may trigger Factory coding sessions.
+
+WORKFLOW: 1) Always get_client_intelligence first. 2) Log interactions via add_client_note. 3) Create tasks for follow-ups. 4) Track deals with update_project_deal. 5) Flag unhealthy clients proactively.
+
+CROSS-SYSTEM: Emails auto-linked by sender. Factory sessions linked via code_requests. Bookkeeping linked via client/project IDs. All interactions feed the unified activity timeline.`,
   },
 
   admin: {

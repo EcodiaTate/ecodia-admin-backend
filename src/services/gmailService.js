@@ -366,6 +366,24 @@ async function triagePendingEmails() {
         triageSummary: triage.summary, triageAction: triage.autonomousAction || triage.suggestedAction, triagePriority: triage.priority,
       }).catch(() => {})
 
+      // Fire-and-forget CRM activity logging for client-linked emails
+      if (thread.client_id) {
+        try {
+          const crmService = require('./crmService')
+          crmService.logActivity({
+            clientId: thread.client_id,
+            activityType: 'email_received',
+            title: `Email: ${thread.subject}`,
+            description: triage.summary,
+            source: 'gmail',
+            sourceRefId: thread.id,
+            sourceRefType: 'email_thread',
+            actor: thread.from_name || thread.from_email,
+            metadata: { priority: triage.priority, action: triage.autonomousAction || triage.suggestedAction },
+          }).catch(() => {})
+        } catch {}
+      }
+
       const triageAction = triage.autonomousAction || triage.suggestedAction
       logger.info(`Triaged [${triage.priority}/${triage.confidence ?? '?'}] → ${triageAction}${triage.surfaceToHuman ? ' (surfaced)' : ''}: ${thread.subject}`)
     } catch (err) {
@@ -435,6 +453,22 @@ async function autoAct(thread, triage) {
       // Actually send the reply — the AI is confident, act on it
       await sendReplyToThread(thread, triage.draftReply)
       await silentArchive(thread)
+      // Log to CRM activity timeline for linked clients
+      if (thread.client_id) {
+        try {
+          const crmService = require('./crmService')
+          await crmService.logActivity({
+            clientId: thread.client_id,
+            activityType: 'email_sent',
+            title: `Reply sent: ${thread.subject}`,
+            description: triage.draftReply.slice(0, 200),
+            source: 'gmail',
+            sourceRefId: thread.id,
+            sourceRefType: 'email_thread',
+            actor: 'ai',
+          })
+        } catch {}
+      }
       logger.info(`Auto-sent reply & archived: ${thread.subject}`)
 
     } else if (action === 'create_task' && triage.shouldCreateTask) {

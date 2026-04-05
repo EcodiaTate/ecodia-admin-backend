@@ -1,6 +1,8 @@
 const registry = require('../services/capabilityRegistry')
 
 registry.registerMany([
+  // ─── Lead & Client Management ──────────────────────────────────────
+
   {
     name: 'create_lead',
     description: 'Create a new CRM client record from lead data — name, company, contact info, source signal',
@@ -12,33 +14,40 @@ registry.registerMany([
       email: { type: 'string', required: false, description: 'Email address' },
       phone: { type: 'string', required: false, description: 'Phone number' },
       linkedinUrl: { type: 'string', required: false, description: 'LinkedIn profile URL' },
-      source: { type: 'string', required: false, description: 'Where this lead came from' },
+      source: { type: 'string', required: false, description: 'Where this lead came from: linkedin, gmail, referral, website, manual' },
       notes: { type: 'string', required: false, description: 'Initial notes or context' },
       leadScore: { type: 'number', required: false, description: 'Lead quality score 0-1' },
     },
     handler: async (params) => {
       const db = require('../config/db')
+      const crmService = require('../services/crmService')
       const notes = params.notes
         ? JSON.stringify([{ content: `${params.notes} [source: ${params.source || 'ai'}]`, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
         : '[]'
       const [client] = await db`
-        INSERT INTO clients (name, company, email, phone, linkedin_url, stage, priority, notes, tags)
+        INSERT INTO clients (name, company, email, phone, linkedin_url, stage, priority, notes, tags, source, first_contact_at)
         VALUES (
-          ${params.name},
-          ${params.company || null},
-          ${params.email || null},
-          ${params.phone || null},
-          ${params.linkedinUrl || null},
-          'lead',
-          ${(params.leadScore || 0) > 0.7 ? 'high' : 'medium'},
-          ${notes}::jsonb,
-          ARRAY[]::text[]
+          ${params.name}, ${params.company || null}, ${params.email || null},
+          ${params.phone || null}, ${params.linkedinUrl || null}, 'lead',
+          ${(params.leadScore || 0) > 0.7 ? 'high' : 'medium'}, ${notes}::jsonb,
+          ARRAY[]::text[], ${params.source || 'manual'}, now()
         )
         RETURNING id, name
       `
+
+      await crmService.logActivity({
+        clientId: client.id,
+        activityType: 'lead_created',
+        title: `New lead: ${client.name}`,
+        description: params.notes,
+        source: params.source || 'manual',
+        actor: 'ai',
+      })
+
       return { message: `Lead created: ${client.name}`, clientId: client.id }
     },
   },
+
   {
     name: 'update_crm_stage',
     description: 'Move a CRM client to a new pipeline stage — lead, proposal, contract, development, live, ongoing, archived',
@@ -51,35 +60,47 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
+      const crmService = require('../services/crmService')
 
-      // Read current stage before update (needed for pipeline_events)
       const [current] = await db`SELECT name, stage FROM clients WHERE id = ${params.clientId}`
       if (!current) throw new Error(`Client ${params.clientId} not found`)
 
-      await db`
-        UPDATE clients SET stage = ${params.stage}, updated_at = now()
-        WHERE id = ${params.clientId}
-      `
-
-      // Record the transition in pipeline_events (feeds KG and CRM triage)
+      await db`UPDATE clients SET stage = ${params.stage}, updated_at = now() WHERE id = ${params.clientId}`
       await db`
         INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
         VALUES (${params.clientId}, ${current.stage}, ${params.stage}, ${params.note || null})
       `
 
-      // If a note was provided, append it to the client notes array
       if (params.note) {
         const note = JSON.stringify([{ content: params.note, createdAt: new Date().toISOString(), source: 'ai' }])
         await db`
-          UPDATE clients
-          SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
+          UPDATE clients SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
           WHERE id = ${params.clientId}
         `
       }
 
+      await crmService.logActivity({
+        clientId: params.clientId,
+        activityType: 'stage_changed',
+        title: `Stage: ${current.stage} → ${params.stage}`,
+        description: params.note,
+        source: 'crm',
+        actor: 'ai',
+        metadata: { from: current.stage, to: params.stage },
+      })
+
+      // Fire KG hook
+      try {
+        const kgHooks = require('../services/kgIngestionHooks')
+        kgHooks.onClientUpdated({ client: { ...current, id: params.clientId }, previousStage: current.stage }).catch(() => {})
+      } catch {}
+
       return { message: `${current.name} moved from ${current.stage} to ${params.stage}` }
     },
   },
+
+  // ─── Task Management ───────────────────────────────────────────────
+
   {
     name: 'create_task',
     description: 'Create a task — anything that needs doing, tied to a client or project or free-standing',
@@ -96,8 +117,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
-      // source must be one of: gmail|linkedin|crm|manual|cc|cortex
-      // Capabilities are called by Cortex or the action queue — default to 'cortex'
+      const crmService = require('../services/crmService')
       const validSources = ['gmail', 'linkedin', 'crm', 'manual', 'cc', 'cortex']
       const source = validSources.includes(params.source) ? params.source : 'cortex'
       const [task] = await db`
@@ -107,12 +127,62 @@ registry.registerMany([
                 ${params.priority || 'medium'}, ${params.dueDate || null})
         RETURNING id, title
       `
+
+      if (params.clientId) {
+        await crmService.logActivity({
+          clientId: params.clientId,
+          projectId: params.projectId,
+          activityType: 'task_created',
+          title: `Task: ${task.title}`,
+          description: params.description,
+          source,
+          sourceRefId: task.id,
+          sourceRefType: 'task',
+          actor: 'ai',
+        })
+      }
+
       return { message: `Task created: ${task.title}`, taskId: task.id }
     },
   },
+
+  {
+    name: 'complete_task',
+    description: 'Mark a task as completed',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      taskId: { type: 'string', required: true, description: 'Task UUID' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const task = await crmService.completeTask(params.taskId, 'ai')
+      if (!task) return { error: 'Task not found or already completed' }
+      return { message: `Task completed: ${task.title}` }
+    },
+  },
+
+  {
+    name: 'get_client_tasks',
+    description: 'Get open tasks for a client, sorted by priority and due date',
+    tier: 'read',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      includeCompleted: { type: 'boolean', required: false, description: 'Include completed tasks (default: false)' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const tasks = await crmService.getClientTasks(params.clientId, { includeCompleted: params.includeCompleted })
+      return { tasks, count: tasks.length }
+    },
+  },
+
+  // ─── Notes & Communication ─────────────────────────────────────────
+
   {
     name: 'add_client_note',
-    description: 'Add a note to a CRM client record',
+    description: 'Add a note to a CRM client record — logged to activity timeline',
     tier: 'write',
     domain: 'crm',
     params: {
@@ -122,13 +192,255 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
+      const crmService = require('../services/crmService')
       const note = JSON.stringify([{ content: params.content, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
       await db`
-        UPDATE clients
-        SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
+        UPDATE clients SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
         WHERE id = ${params.clientId}
       `
+
+      await crmService.logActivity({
+        clientId: params.clientId,
+        activityType: 'note_added',
+        title: 'Note added',
+        description: params.content.slice(0, 200),
+        source: params.source || 'cortex',
+        actor: 'ai',
+      })
+
       return { message: `Note added to client ${params.clientId}` }
+    },
+  },
+
+  // ─── Intelligence & Timeline ───────────────────────────────────────
+
+  {
+    name: 'get_client_intelligence',
+    description: 'Get comprehensive client intelligence — projects, emails, tasks, sessions, activity timeline, revenue, contacts. The full picture.',
+    tier: 'read',
+    domain: 'crm',
+    priority: 'critical',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      return crmService.getClientIntelligence(params.clientId)
+    },
+  },
+
+  {
+    name: 'get_client_timeline',
+    description: 'Get the unified activity timeline for a client — every interaction from every channel',
+    tier: 'read',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+      types: { type: 'string', required: false, description: 'Comma-separated activity types to filter' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const types = params.types ? params.types.split(',').map(t => t.trim()) : undefined
+      return crmService.getClientTimeline(params.clientId, { limit: params.limit || 50, types })
+    },
+  },
+
+  // ─── Contact Management ────────────────────────────────────────────
+
+  {
+    name: 'add_client_contact',
+    description: 'Add a contact person to a client — supports multiple stakeholders per client',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      name: { type: 'string', required: true, description: 'Contact name' },
+      role: { type: 'string', required: false, description: 'Role: decision_maker, technical, billing, general' },
+      email: { type: 'string', required: false, description: 'Contact email' },
+      phone: { type: 'string', required: false, description: 'Contact phone' },
+      linkedinUrl: { type: 'string', required: false, description: 'LinkedIn URL' },
+      isPrimary: { type: 'boolean', required: false, description: 'Set as primary contact' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const contact = await crmService.addContact(params)
+      return { message: `Contact added: ${contact.name}`, contactId: contact.id }
+    },
+  },
+
+  {
+    name: 'get_client_contacts',
+    description: 'List all contacts for a client',
+    tier: 'read',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const contacts = await crmService.getContacts(params.clientId)
+      return { contacts }
+    },
+  },
+
+  // ─── Revenue & Deals ───────────────────────────────────────────────
+
+  {
+    name: 'get_revenue_overview',
+    description: 'Get revenue overview — pipeline value, realized revenue, outstanding invoices, by stage',
+    tier: 'read',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: false, description: 'Filter by client (omit for global)' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      return crmService.getRevenueOverview({ clientId: params.clientId })
+    },
+  },
+
+  {
+    name: 'update_project_deal',
+    description: 'Update deal/contract information on a project — value, contract date, payment status, invoice ref',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      projectId: { type: 'string', required: true, description: 'Project UUID' },
+      dealValue: { type: 'number', required: false, description: 'Deal value in AUD' },
+      contractDate: { type: 'string', required: false, description: 'Contract date (ISO)' },
+      estimatedHours: { type: 'number', required: false, description: 'Estimated hours' },
+      paymentStatus: { type: 'string', required: false, description: 'none|invoiced|partial|paid|overdue' },
+      invoiceRef: { type: 'string', required: false, description: 'Invoice reference' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const crmService = require('../services/crmService')
+      const updates = {}
+      if (params.dealValue != null) updates.deal_value_aud = params.dealValue
+      if (params.contractDate) updates.contract_date = params.contractDate
+      if (params.estimatedHours != null) updates.estimated_hours = params.estimatedHours
+      if (params.paymentStatus) updates.payment_status = params.paymentStatus
+      if (params.invoiceRef) updates.invoice_ref = params.invoiceRef
+
+      if (Object.keys(updates).length === 0) return { error: 'No fields to update' }
+
+      const [project] = await db`
+        UPDATE projects SET ${db(updates, ...Object.keys(updates))}, updated_at = now()
+        WHERE id = ${params.projectId}
+        RETURNING id, name, client_id
+      `
+      if (!project) return { error: 'Project not found' }
+
+      if (project.client_id) {
+        await crmService.logActivity({
+          clientId: project.client_id,
+          projectId: project.id,
+          activityType: params.paymentStatus === 'paid' ? 'payment_received' : 'deal_updated',
+          title: `Deal updated: ${project.name}`,
+          description: Object.entries(updates).map(([k, v]) => `${k}: ${v}`).join(', '),
+          source: 'crm',
+          actor: 'ai',
+        })
+
+        // Update client total revenue when payment received
+        if (params.paymentStatus === 'paid' && params.dealValue) {
+          await db`
+            UPDATE clients SET total_revenue_aud = COALESCE(total_revenue_aud, 0) + ${params.dealValue}, updated_at = now()
+            WHERE id = ${project.client_id}
+          `.catch(() => {})
+        }
+      }
+
+      return { message: `Project ${project.name} deal updated` }
+    },
+  },
+
+  // ─── Pipeline Analytics ────────────────────────────────────────────
+
+  {
+    name: 'get_pipeline_analytics',
+    description: 'Get pipeline analytics — clients by stage, deal values, velocity, recent stage changes',
+    tier: 'read',
+    domain: 'crm',
+    params: {},
+    handler: async () => {
+      const crmService = require('../services/crmService')
+      return crmService.getPipelineAnalytics()
+    },
+  },
+
+  // ─── Search & Discovery ────────────────────────────────────────────
+
+  {
+    name: 'search_clients',
+    description: 'Search clients by name, company, email, or contact person',
+    tier: 'read',
+    domain: 'crm',
+    params: {
+      query: { type: 'string', required: true, description: 'Search query' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      const results = await crmService.searchClients(params.query)
+      return { results, count: results.length }
+    },
+  },
+
+  // ─── Health Scoring ────────────────────────────────────────────────
+
+  {
+    name: 'compute_client_health',
+    description: 'Compute and update the health score for a client based on recent activity',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: true, description: 'Client UUID' },
+    },
+    handler: async (params) => {
+      const crmService = require('../services/crmService')
+      return crmService.computeClientHealth(params.clientId)
+    },
+  },
+
+  // ─── CRM Dashboard ────────────────────────────────────────────────
+
+  {
+    name: 'get_crm_dashboard',
+    description: 'Get a full CRM snapshot — pipeline by stage, open tasks, overdue items, recent activity, revenue overview',
+    tier: 'read',
+    domain: 'crm',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const crmService = require('../services/crmService')
+
+      const pipeline = await crmService.getPipelineAnalytics()
+      const revenue = await crmService.getRevenueOverview()
+
+      const [taskStats] = await db`
+        SELECT
+          count(*) FILTER (WHERE completed_at IS NULL)::int AS open,
+          count(*) FILTER (WHERE completed_at IS NULL AND due_date < now())::int AS overdue,
+          count(*) FILTER (WHERE completed_at IS NULL AND priority IN ('urgent','high'))::int AS high_priority
+        FROM tasks
+      `
+
+      const recentActivity = await db`
+        SELECT al.*, c.name AS client_name
+        FROM crm_activity_log al
+        JOIN clients c ON al.client_id = c.id
+        ORDER BY al.created_at DESC LIMIT 15
+      `
+
+      const unhealthyClients = await db`
+        SELECT id, name, company, stage, health_score, last_contact_at
+        FROM clients
+        WHERE archived_at IS NULL AND health_score IS NOT NULL AND health_score < 0.4
+        ORDER BY health_score ASC LIMIT 5
+      `
+
+      return { pipeline, revenue, taskStats, recentActivity, unhealthyClients }
     },
   },
 ])

@@ -313,6 +313,24 @@ async function createAndStartSession({ codebaseId, prompt, triggeredBy, triggerS
 
   logger.info(`Factory dispatch: ${triggerSource} → session ${session.id}`, { codebaseId, triggeredBy })
 
+  // Log to CRM activity timeline for client-linked sessions
+  if (clientId) {
+    try {
+      const crmService = require('./crmService')
+      crmService.logActivity({
+        clientId,
+        projectId: projectId || null,
+        activityType: 'session_dispatched',
+        title: `Coding session: ${(prompt || '').slice(0, 80)}`,
+        source: triggerSource || 'factory',
+        sourceRefId: session.id,
+        sourceRefType: 'cc_session',
+        actor: 'system',
+        metadata: { triggeredBy, codebaseId },
+      }).catch(() => {})
+    } catch {}
+  }
+
   // Broadcast session creation to all clients
   const { broadcast } = require('../websocket/wsManager')
   broadcast('cc:session_created', {
