@@ -205,6 +205,15 @@ ${kgContext}
       completion_tokens: response.usage?.output_tokens || 0,
     }
 
+    // Detect truncation — Anthropic uses 'end_turn' for complete, 'max_tokens' for truncated
+    if (response.stop_reason === 'max_tokens') {
+      logger.warn(`Bedrock response truncated by max_tokens (module: ${module})`, {
+        contentLength: content.length,
+        completionTokens: usage.completion_tokens,
+        maxTokensSetting: parseInt(env.ANTHROPIC_MAX_TOKENS || '4096'),
+      })
+    }
+
     // Track usage — Bedrock Sonnet pricing: $3/1M input, $15/1M output
     const costUsd = (usage.prompt_tokens * parseFloat(env.ANTHROPIC_COST_INPUT_PER_1M || '3') + usage.completion_tokens * parseFloat(env.ANTHROPIC_COST_OUTPUT_PER_1M || '15')) / 1_000_000
     await db`
@@ -219,7 +228,7 @@ ${kgContext}
       try {
         response = await axios.post(
           DEEPSEEK_API_URL,
-          { model, messages: enrichedMessages, ...(temperature !== null && { temperature }) },
+          { model, messages: enrichedMessages, max_tokens: parseInt(env.DEEPSEEK_MAX_TOKENS || '8192'), ...(temperature !== null && { temperature }) },
           {
             headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
             timeout: DEEPSEEK_TIMEOUT_MS,
@@ -243,6 +252,15 @@ ${kgContext}
       throw new Error(`DeepSeek returned empty response (module: ${module})`)
     }
     content = choices[0].message.content.replace(/\u2014/g, '-')
+
+    // Detect truncation — if finish_reason is 'length', the response was cut short by max_tokens
+    const finishReason = choices[0].finish_reason
+    if (finishReason === 'length') {
+      logger.warn(`DeepSeek response truncated by max_tokens (module: ${module})`, {
+        contentLength: content.length,
+        completionTokens: usage?.completion_tokens,
+      })
+    }
 
     // Track usage
     await db`

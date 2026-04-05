@@ -1403,17 +1403,38 @@ function parseBlocks(raw) {
     } catch { /* fall through */ }
   }
 
-  // 3. JSON array embedded in surrounding prose — find the outermost [ ... ]
+  // 3. JSON array embedded in surrounding prose — find [{"type": pattern
+  //    Using indexOf('[') is too greedy — prose like "my [response]:" grabs the wrong bracket.
+  //    Instead, look for [{ which is the actual start of a JSON blocks array.
+  const jsonArrayStart = raw.indexOf('[{')
+  if (jsonArrayStart !== -1) {
+    const lastBracket = raw.lastIndexOf(']')
+    if (lastBracket > jsonArrayStart) {
+      try {
+        const parsed = JSON.parse(raw.slice(jsonArrayStart, lastBracket + 1))
+        if (isBlockArray(parsed)) return parsed
+      } catch { /* fall through */ }
+    }
+  }
+
+  // 3b. Fallback: try any outermost [ ... ] pair (handles edge cases)
   const firstBracket = raw.indexOf('[')
   const lastBracket = raw.lastIndexOf(']')
-  if (firstBracket !== -1 && lastBracket > firstBracket) {
+  if (firstBracket !== -1 && lastBracket > firstBracket && firstBracket !== jsonArrayStart) {
     try {
       const parsed = JSON.parse(raw.slice(firstBracket, lastBracket + 1))
       if (isBlockArray(parsed)) return parsed
     } catch { /* fall through */ }
   }
 
-  // 4. Last resort: wrap as text
+  // 4. Last resort: wrap as text — log so we can diagnose parsing failures
+  logger.warn('Cortex parseBlocks: all JSON extraction strategies failed — wrapping as raw text', {
+    rawLength: raw.length,
+    rawPreview: raw.slice(0, 300),
+    rawTail: raw.slice(-200),
+    hasOpenBracket: raw.includes('['),
+    hasOpenBrace: raw.includes('{'),
+  })
   return [{ type: 'text', content: raw }]
 }
 
