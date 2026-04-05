@@ -329,7 +329,7 @@ async function _callDeepSeekCategorize(transactions, rules) {
       { role: 'user', content: `Categorize:\n${txText}` },
     ], { module: 'bookkeeping', skipRetrieval: true, skipLogging: true })
 
-    let text = result.content || ''
+    let text = typeof result === 'string' ? result : (result.content || '')
     if (text.includes('```')) { text = text.split('```')[1]; if (text.startsWith('json')) text = text.slice(4); text = text.trim() }
     return JSON.parse(text)
   } catch (err) {
@@ -339,7 +339,7 @@ async function _callDeepSeekCategorize(transactions, rules) {
 }
 
 async function autoCategorize() {
-  const pending = await listStaged('pending', 20)
+  const pending = await listStaged('pending', 500)
   if (!pending.length) return { categorized: 0 }
 
   const results = await categorizeTransactions(pending)
