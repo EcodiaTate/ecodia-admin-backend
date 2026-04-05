@@ -427,4 +427,95 @@ registry.registerMany([
       return await bk.getGSTSummary(start, end)
     },
   },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DELETE / BULK: Remove or batch-operate on transactions
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_delete_staged',
+    description: 'Delete a staged transaction by ID. Permanently removes it — use ignore if you want to keep it but hide it.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Staged transaction UUID' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const res = await db`DELETE FROM staged_transactions WHERE id = ${params.id} RETURNING id`
+      if (!res.length) throw new Error(`Staged transaction ${params.id} not found`)
+      return { message: `Deleted staged transaction ${params.id}` }
+    },
+  },
+  {
+    name: 'bookkeeping_delete_staged_bulk',
+    description: 'Delete multiple staged transactions matching filters. Use with care — this permanently removes them.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      ids: { type: 'array', required: false, description: 'Array of UUIDs to delete' },
+      status: { type: 'string', required: false, description: 'Delete all with this status (e.g. "ignored")' },
+      keyword: { type: 'string', required: false, description: 'Delete all matching this keyword in description' },
+      date_from: { type: 'string', required: false, description: 'Delete from this date onwards' },
+      date_to: { type: 'string', required: false, description: 'Delete up to this date' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      if (params.ids && params.ids.length) {
+        const res = await db`DELETE FROM staged_transactions WHERE id = ANY(${params.ids}) RETURNING id`
+        return { message: `Deleted ${res.length} staged transactions`, deleted: res.length }
+      }
+      const conditions = []
+      const values = []
+      if (params.status) { conditions.push(`status = $${values.push(params.status)}`); }
+      if (params.keyword) { conditions.push(`description ILIKE '%' || $${values.push(params.keyword)} || '%'`); }
+      if (params.date_from) { conditions.push(`occurred_at >= $${values.push(params.date_from)}`); }
+      if (params.date_to) { conditions.push(`occurred_at <= $${values.push(params.date_to)}`); }
+      if (!conditions.length) throw new Error('Must provide ids, status, keyword, or date range')
+      const res = await db.unsafe(`DELETE FROM staged_transactions WHERE ${conditions.join(' AND ')} RETURNING id`, values)
+      return { message: `Deleted ${res.length} staged transactions`, deleted: res.length }
+    },
+  },
+  {
+    name: 'bookkeeping_delete_ledger_entry',
+    description: 'Delete a posted ledger entry and all its lines by ID. Use for corrections — this reverses the journal entry.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Ledger transaction UUID' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      // Lines cascade-delete via FK
+      const res = await db`DELETE FROM ledger_transactions WHERE id = ${params.id} RETURNING id`
+      if (!res.length) throw new Error(`Ledger entry ${params.id} not found`)
+      return { message: `Deleted ledger entry ${params.id} and all its lines` }
+    },
+  },
+  {
+    name: 'bookkeeping_get_account_transactions',
+    description: 'Get all ledger lines for a specific GL account, with their parent journal entry details. Good for seeing everything in an account.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      account_code: { type: 'string', required: true, description: 'GL account code (e.g. "5010")' },
+      date_from: { type: 'string', required: false, description: 'Start date YYYY-MM-DD' },
+      date_to: { type: 'string', required: false, description: 'End date YYYY-MM-DD' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const conditions = [`l.account_code = $1`]
+      const values = [params.account_code]
+      if (params.date_from) conditions.push(`t.occurred_at >= $${values.push(params.date_from)}`)
+      if (params.date_to) conditions.push(`t.occurred_at <= $${values.push(params.date_to)}`)
+      const limit = params.limit || 50
+      const rows = await db.unsafe(`
+        SELECT l.id, l.debit_cents, l.credit_cents, l.memo, l.tax_code,
+               t.id AS tx_id, t.occurred_at, t.description, t.source_system
+        FROM ledger_lines l JOIN ledger_transactions t ON t.id = l.tx_id
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY t.occurred_at DESC LIMIT $${values.push(limit)}`, values)
+      return { lines: rows, count: rows.length, account_code: params.account_code }
+    },
+  },
 ])
