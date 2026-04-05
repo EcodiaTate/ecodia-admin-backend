@@ -47,6 +47,33 @@ router.get('/briefing', async (req, res, next) => {
   }
 })
 
+// POST /api/cortex/do — multi-turn chat with auto-execution
+// Cortex proposes actions → they auto-execute �� results fed back → Cortex continues.
+// Lean mode auto-detected from content. Pass lean: true to force.
+router.post('/do', async (req, res, next) => {
+  try {
+    const { messages, sessionId, ambientEvents, lean, maxRounds } = req.body
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array is required' })
+    }
+
+    for (const msg of messages) {
+      if (!msg.role || !msg.content) {
+        return res.status(400).json({ error: 'Each message must have role and content' })
+      }
+    }
+
+    const result = await cortexService.chatAndExecute(messages, {
+      sessionId, ambientEvents, lean, maxRounds: maxRounds || 5,
+    })
+    res.json(result)
+  } catch (err) {
+    logger.error('Cortex do failed', { error: err.message })
+    next(err)
+  }
+})
+
 // POST /api/cortex/action — execute an approved action
 router.post('/action', async (req, res, next) => {
   try {

@@ -129,12 +129,19 @@ async function getLoadBriefing() {
   return result
 }
 
+async function chatAndExecute(messages, opts) {
+  const result = await cortexService.chatAndExecute(messages, opts)
+  result.blocks = await filterBlocks(result.blocks)
+  return result
+}
+
 // ─── Pass-through exports ────────────────────────────────────────────
 // Everything else delegates directly to cortexService — we only wrap
 // the methods that produce output blocks.
 
 module.exports = {
   chat,
+  chatAndExecute,
   getLoadBriefing,
   executeAction: cortexService.executeAction,
   persistExchange: cortexService.persistExchange,

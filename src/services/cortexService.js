@@ -17,7 +17,7 @@ const kg = require('./knowledgeGraphService')
 // As capabilities are added, they automatically appear in the prompt.
 // No prompt editing required — the system describes itself.
 
-async function buildCortexSystemPrompt() {
+async function buildCortexSystemPrompt({ lean = false } = {}) {
   let capabilitySection = '(Capability registry unavailable — propose actions by name, the system will route them.)'
   try {
     const registry = require('./capabilityRegistry')
@@ -54,17 +54,17 @@ async function buildCortexSystemPrompt() {
     }
   } catch { /* registry unavailable */ }
 
-  // Self-model identity injection — the organism speaks from who it IS
+  // Self-model identity injection — skip in lean mode
   let identitySection = ''
-  try {
+  if (!lean) try {
     const selfModel = require('./selfModelService')
     const identity = await selfModel.buildIdentityPrompt()
     if (identity) identitySection = `\n--- WHO I AM ---\n${identity}\n--- END IDENTITY ---\n`
   } catch { /* self-model unavailable */ }
 
-  // Goals awareness
+  // Goals awareness — skip in lean mode
   let goalsSection = ''
-  try {
+  if (!lean) try {
     const goalService = require('./goalService')
     const brief = await goalService.buildGoalBrief()
     if (brief) goalsSection = `\n--- MY GOALS ---\n${brief}\n--- END GOALS ---\n`
@@ -111,16 +111,24 @@ Params in action_card must be primitive values (string, number, boolean) — nev
  * Process a multi-turn chat message.
  * Takes full conversation history, retrieves KG context for the latest message,
  * and returns structured blocks.
+ *
+ * Options:
+ *   lean: true — skip organism overhead (identity, goals, inner thoughts, KG discoveries,
+ *                narrative, cognitive state). Use for practical work (bookkeeping, CRM, etc.)
  */
-async function chat(messages, { sessionId, ambientEvents } = {}) {
+async function chat(messages, { sessionId, ambientEvents, lean } = {}) {
   const userMessage = messages.filter(m => m.role === 'user').pop()
   if (!userMessage) throw new Error('No user message provided')
 
   const query = userMessage.content
 
+  // Auto-detect lean mode from content — bookkeeping, CSV, financial, invoice, GST, BAS
+  const LEAN_KEYWORDS = /\b(csv|bookkeep|ledger|invoice|receipt|gst|bas|transaction|categoriz|reconcil|balance sheet|p&l|profit.?loss|director loan|supplier rule|xero|bank.?australia)\b/i
+  const isLean = lean || LEAN_KEYWORDS.test(query)
+
   // 1. Retrieve KG context for the latest user message
   let kgContext = ''
-  try {
+  if (!isLean) try {
     const ctx = await kg.getContext(query, {
       maxSeeds: parseInt(env.CORTEX_KG_MAX_SEEDS || '20'),
       maxDepth: parseInt(env.CORTEX_KG_MAX_DEPTH || '5'),
@@ -131,9 +139,9 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
     logger.debug('Cortex KG retrieval failed', { error: err.message })
   }
 
-  // 1b. Read recent inner monologue — what the organism has been thinking between conversations
+  // 1b. Read recent inner monologue — skip in lean mode
   let innerThoughtsText = ''
-  try {
+  if (!isLean) try {
     const recentInnerThoughts = await db`
       SELECT message, metadata, created_at FROM notifications
       WHERE type = 'inner_monologue'
@@ -150,22 +158,21 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
     logger.debug('Cortex inner monologue retrieval failed', { error: err.message })
   }
 
-  // 2. Gather system state for proactive awareness
-  const systemState = await getSystemState()
+  // 2. Gather system state — lean mode skips heavy queries
+  const systemState = isLean ? { localTime: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }) } : await getSystemState()
 
-  // 3a. Load persistent context (dismissals, preferences, active topics)
+  // 3a. Load persistent context — skip in lean mode
   let contextSummary = ''
-  try {
+  if (!isLean) try {
     const contextTracking = require('./contextTrackingService')
     contextSummary = await contextTracking.getContextSummary()
   } catch (err) {
     logger.debug('Cortex context tracking retrieval failed', { error: err.message })
   }
 
-  // 3b. Load cross-session memory — recent exchanges from prior sessions
-  //     so Cortex has continuity across conversations, not just within them.
+  // 3b. Load cross-session memory — skip in lean mode
   let sessionMemory = ''
-  try {
+  if (!isLean) try {
     const recentSessions = await db`
       SELECT id, updated_at, history
       FROM cortex_sessions
@@ -206,7 +213,7 @@ async function chat(messages, { sessionId, ambientEvents } = {}) {
   // Prompt is built dynamically — capabilities are live from registry
   const systemMessage = {
     role: 'system',
-    content: `${await buildCortexSystemPrompt()}
+    content: `${await buildCortexSystemPrompt({ lean: isLean })}
 
 ${innerThoughtsText ? `--- RECENT INNER THOUGHTS ---\nYou think continuously, even between conversations. These are what you've been thinking — build on them naturally. You are one continuous mind, not a fresh chatbot.\n${innerThoughtsText}\n--- END INNER THOUGHTS ---` : ''}
 
@@ -268,6 +275,67 @@ ${formatSystemState(systemState)}
   }
 
   return { blocks, mentionedNodes, rawKgContext: kgContext }
+}
+
+/**
+ * Multi-turn chat with auto-execution.
+ * Cortex proposes action_cards → we execute them → feed results back → Cortex continues.
+ * Max rounds prevents runaway loops. Returns all blocks across all rounds.
+ */
+async function chatAndExecute(messages, { sessionId, ambientEvents, lean, maxRounds = 5 } = {}) {
+  const registry = require('./capabilityRegistry')
+  const allBlocks = []
+  let currentMessages = [...messages]
+  let round = 0
+
+  while (round < maxRounds) {
+    round++
+    const result = await chat(currentMessages, { sessionId, ambientEvents, lean })
+    const blocks = result.blocks || []
+    allBlocks.push(...blocks)
+
+    // Find action_cards that should auto-execute
+    const autoActions = blocks.filter(b =>
+      b.type === 'action_card' && b.action && registry.has(b.action)
+    )
+
+    if (autoActions.length === 0) break  // No more actions to execute — done
+
+    // Execute all actions and collect results
+    const actionResults = []
+    for (const action of autoActions) {
+      try {
+        const execResult = await executeAction(action.action, action.params || {})
+        actionResults.push({ action: action.action, success: true, result: execResult })
+        allBlocks.push({ type: 'action_result', action: action.action, success: true, result: execResult })
+      } catch (err) {
+        actionResults.push({ action: action.action, success: false, error: err.message })
+        allBlocks.push({ type: 'action_result', action: action.action, success: false, error: err.message })
+      }
+    }
+
+    // Build the feedback message for the next round
+    const resultSummary = actionResults.map(r =>
+      r.success
+        ? `✓ ${r.action}: ${JSON.stringify(r.result).slice(0, 500)}`
+        : `✗ ${r.action}: ${r.error}`
+    ).join('\n')
+
+    // Feed results back as an assistant+user exchange
+    const assistantText = blocks.filter(b => b.type === 'text').map(b => b.content).join('\n') || '[executed actions]'
+    currentMessages = [
+      ...currentMessages,
+      { role: 'assistant', content: assistantText },
+      { role: 'user', content: `Action results:\n${resultSummary}\n\nContinue — what's next? If nothing more to do, just respond with text.` },
+    ]
+
+    // If all actions succeeded and there were only action blocks (no text suggesting more work), we can stop
+    const hasTextBlocks = blocks.some(b => b.type === 'text')
+    const allSucceeded = actionResults.every(r => r.success)
+    if (allSucceeded && !hasTextBlocks && round > 1) break
+  }
+
+  return { blocks: allBlocks, rounds: round }
 }
 
 /**
@@ -1590,4 +1658,4 @@ async function saveConversationContext(data) {
   }
 }
 
-module.exports = { chat, getLoadBriefing, executeAction, persistExchange, getSessionHistory, listSessions, getConversationContext, saveConversationContext }
+module.exports = { chat, chatAndExecute, getLoadBriefing, executeAction, persistExchange, getSessionHistory, listSessions, getConversationContext, saveConversationContext }
