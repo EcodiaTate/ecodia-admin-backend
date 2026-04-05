@@ -99,6 +99,28 @@ Organism code: ~/organism/ (Python/FastAPI).
 Frontend: deployed on Vercel, not on VPS.
 Use run_shell_command for VPS operations. Default cwd is /home/tate.`,
   },
+
+  coding: {
+    name: 'coding',
+    label: 'Coding',
+    description: 'Auto-developer workspace — CC sessions, code requests, codebase management, deployments',
+    domains: ['factory', 'crm', 'system'],
+    autoLoadDocs: [],
+    stateQueries: {
+      'Active sessions': `SELECT count(*)::int AS count FROM cc_sessions WHERE status IN ('running', 'initializing')`,
+      'Pending code requests': `SELECT count(*)::int AS count FROM code_requests WHERE status = 'pending'`,
+      'Recent completions (24h)': `SELECT count(*)::int AS count FROM cc_sessions WHERE status = 'complete' AND completed_at > now() - interval '24 hours'`,
+      'Recent sessions': `SELECT id, initial_prompt, status, pipeline_stage, confidence_score, started_at FROM cc_sessions ORDER BY started_at DESC LIMIT 5`,
+      'Codebases': `SELECT name, language FROM codebases ORDER BY name`,
+    },
+    systemPromptAddition: `You are the auto-developer for Ecodia Pty Ltd.
+
+CAPABILITIES: Use start_cc_session to dispatch coding work. Use resume_cc_session to continue a completed session. Use get_factory_status to see running sessions. Use get_code_requests to see pending work from email/CRM. Use confirm_code_request to approve and dispatch pending requests. Use start_parallel_cc_sessions for decomposed parallel work. Use list_codebases to see registered repos.
+
+CODE REQUESTS arrive from email triage and CRM pipeline. Review pending requests and dispatch them. For complex requests, decompose into parallel sub-tasks.
+
+SESSION LIFECYCLE: Sessions run through the oversight pipeline automatically (review → validate → deploy → monitor). You can intervene by resuming sessions with follow-up instructions.`,
+  },
 }
 
 function getWorkspace(name) {

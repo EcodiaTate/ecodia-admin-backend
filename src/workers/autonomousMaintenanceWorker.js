@@ -709,6 +709,14 @@ async function readSystemState() {
     (async () => { try { const sm = require('../services/selfModelService'); state.selfAssessmentBrief = await sm.buildSelfAssessmentBrief() } catch { state.selfAssessmentBrief = null } })(),
     (async () => { try { const is = require('../services/introspectionService'); state.introspectionBrief = await is.buildIntrospectionBrief() } catch { state.introspectionBrief = null } })(),
 
+    // ─── Session Health + Pending Code Requests ────────────────────────
+    (async () => {
+      try {
+        const obs = require('../services/sessionObservationService')
+        state.sessionHealthBrief = await obs.buildSessionHealthBrief()
+      } catch { state.sessionHealthBrief = null }
+    })(),
+
     // ─── THEATER DETECTION ──────────────────────────────────────────────
     // Count consecutive recent sessions that changed ZERO files.
     // This is the smoking gun for diagnostic theater: the system dispatches
@@ -1217,6 +1225,10 @@ function buildSystemBrief(state) {
         lines.push(`  ${e.occurrences}x: ${e.message?.slice(0, 100)}`)
       )
     }
+  }
+
+  if (state.sessionHealthBrief) {
+    lines.push(`\nSession health:\n${state.sessionHealthBrief}`)
   }
 
   if (state.learningStats) {

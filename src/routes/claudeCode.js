@@ -13,14 +13,19 @@ router.get('/sessions', async (req, res, next) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 200)
     const offset = parseInt(req.query.offset) || 0
     const status = req.query.status
+    const clientId = req.query.clientId
+    const codebaseId = req.query.codebaseId
 
     const sessions = await db`
-      SELECT cs.*, p.name AS project_name, c.name AS client_name
+      SELECT cs.*, p.name AS project_name, c.name AS client_name, cb.name AS codebase_name
       FROM cc_sessions cs
       LEFT JOIN projects p ON cs.project_id = p.id
       LEFT JOIN clients c ON cs.client_id = c.id
+      LEFT JOIN codebases cb ON cs.codebase_id = cb.id
       WHERE 1=1
         ${status ? db`AND cs.status = ${status}` : db``}
+        ${clientId ? db`AND cs.client_id = ${clientId}` : db``}
+        ${codebaseId ? db`AND cs.codebase_id = ${codebaseId}` : db``}
       ORDER BY cs.started_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `
@@ -29,6 +34,8 @@ router.get('/sessions', async (req, res, next) => {
       SELECT count(*)::int FROM cc_sessions
       WHERE 1=1
         ${status ? db`AND status = ${status}` : db``}
+        ${clientId ? db`AND client_id = ${clientId}` : db``}
+        ${codebaseId ? db`AND codebase_id = ${codebaseId}` : db``}
     `
 
     res.json({ sessions, total: count })

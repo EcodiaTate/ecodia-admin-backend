@@ -411,6 +411,23 @@ async function autoAct(thread, triage) {
       await silentArchive(thread)
       logger.info(`Auto-archived [${priority}/${action}]: ${thread.subject}`)
     }
+
+    // ── CODE WORK PATH: email requests code changes ──
+    // Runs alongside (not instead of) the normal action — an email might need
+    // a reply AND a Factory session. The code request service decides whether
+    // to auto-dispatch or surface for confirmation based on confidence.
+    if (triage.isCodeWorkRequest && triage.factoryPrompt) {
+      const codeRequestService = require('./codeRequestService')
+      await codeRequestService.createFromEmail({
+        threadId: thread.id,
+        clientId: thread.client_id,
+        summary: triage.summary,
+        factoryPrompt: triage.factoryPrompt,
+        codeWorkType: triage.codeWorkType,
+        confidence: typeof triage.confidence === 'number' ? triage.confidence : 0.5,
+        surfaceToHuman: triage.surfaceToHuman,
+      }).catch(err => logger.warn(`Code request creation failed for ${thread.id}`, { error: err.message }))
+    }
   } catch (err) {
     logger.error(`Auto-act failed for ${thread.id}`, { error: err.message })
   }

@@ -367,6 +367,8 @@ ${(body || snippet || '').slice(0, 3000)}
 
 Read this email and decide what to do. You have full autonomy — reply, archive, create a task, snooze, ignore, or anything else appropriate. Draft a reply if warranted; leave draftReply null if not. Decide if this needs human attention and why.
 
+If this email is requesting code work (a feature, bug fix, update, deployment, or technical task), set isCodeWorkRequest=true, specify codeWorkType, and write a factoryPrompt — a precise, self-contained instruction that a developer with full codebase access could execute. Include any acceptance criteria, context, or constraints from the email. Leave these null if the email is not about code work.
+
 Respond as JSON:
 {
   "priority": "...",
@@ -380,7 +382,10 @@ Respond as JSON:
   "taskPriority": "...",
   "confidence": 0.0-1.0,
   "surfaceToHuman": true/false,
-  "surfaceReason": "..."
+  "surfaceReason": "...",
+  "isCodeWorkRequest": true/false,
+  "codeWorkType": "feature|bugfix|update|investigation|null",
+  "factoryPrompt": "precise prompt for a coding session, or null"
 }`
 
   return parseJSON(await callDeepSeek([{ role: 'user', content: prompt }], {

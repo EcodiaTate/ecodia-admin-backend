@@ -27,6 +27,7 @@ const domains = [
   './context',
   './growth',
   './bookkeeping',
+  './coding',
 ]
 
 for (const domain of domains) {

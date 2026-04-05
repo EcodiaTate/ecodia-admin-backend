@@ -64,4 +64,64 @@ registry.registerMany([
       return { message: 'Vercel build triggered', result }
     },
   },
+  {
+    name: 'resume_cc_session',
+    description: 'Resume a completed or paused CC session with a follow-up message — continues the conversation with full context preserved',
+    tier: 'write',
+    domain: 'factory',
+    priority: 'critical',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID to resume' },
+      message: { type: 'string', required: true, description: 'Follow-up message or instruction' },
+    },
+    handler: async (params) => {
+      const bridge = require('../services/factoryBridge')
+      bridge.publishResumeSession(params.sessionId, params.message)
+      return { message: 'Session resume requested', sessionId: params.sessionId }
+    },
+  },
+  {
+    name: 'send_cc_message',
+    description: 'Send a message to a running CC session — for real-time intervention or guidance',
+    tier: 'write',
+    domain: 'factory',
+    priority: 'critical',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID' },
+      message: { type: 'string', required: true, description: 'Message to send' },
+    },
+    handler: async (params) => {
+      const bridge = require('../services/factoryBridge')
+      bridge.publishSendMessage(params.sessionId, params.message)
+      return { message: 'Message sent to session', sessionId: params.sessionId }
+    },
+  },
+  {
+    name: 'get_cc_session_details',
+    description: 'Get detailed information about a specific CC session including logs, pipeline stage, and files changed',
+    tier: 'read',
+    domain: 'factory',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const [session] = await db`
+        SELECT cs.*, cb.name AS codebase_name, c.name AS client_name, p.name AS project_name
+        FROM cc_sessions cs
+        LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+        LEFT JOIN clients c ON cs.client_id = c.id
+        LEFT JOIN projects p ON cs.project_id = p.id
+        WHERE cs.id = ${params.sessionId}
+      `
+      if (!session) throw new Error(`Session not found: ${params.sessionId}`)
+
+      const logs = await db`
+        SELECT chunk, created_at FROM cc_session_logs
+        WHERE session_id = ${params.sessionId}
+        ORDER BY created_at DESC LIMIT 50
+      `
+      return { session, recentLogs: logs.reverse() }
+    },
+  },
 ])

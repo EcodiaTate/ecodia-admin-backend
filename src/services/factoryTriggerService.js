@@ -376,15 +376,35 @@ or
       return null
     }
 
-    return createAndStartSession({
+    const prompt = parsed.prompt || `Client ${clientName || 'Unknown'} moved from ${previousStage} to ${newStage}. Project: ${project?.name || 'Unknown'}. Take appropriate action.`
+    const session = await createAndStartSession({
       codebaseId: project?.codebase_id || null,
-      prompt: parsed.prompt || `Client ${clientName || 'Unknown'} moved from ${previousStage} to ${newStage}. Project: ${project?.name || 'Unknown'}. Take appropriate action.`,
+      prompt,
       triggeredBy: 'crm_stage',
       triggerSource: 'crm_stage',
       triggerRefId: clientId,
       projectId: project?.id || null,
       clientId,
     })
+
+    // Track as a code request for the coding workspace
+    if (session) {
+      try {
+        const codeRequestService = require('./codeRequestService')
+        await codeRequestService.createFromCRM({
+          clientId,
+          projectId: project?.id,
+          codebaseId: project?.codebase_id,
+          summary: `CRM stage change: ${previousStage} → ${newStage} (${clientName || 'Unknown'})`,
+          prompt,
+          sessionId: session.id,
+        })
+      } catch (crErr) {
+        logger.debug('Failed to create code request from CRM dispatch', { error: crErr.message })
+      }
+    }
+
+    return session
   } catch (err) {
     logger.warn('AI CRM dispatch decision failed, skipping', { error: err.message })
     return null
@@ -687,10 +707,41 @@ Make the changes. Run tests. Ensure nothing breaks.`,
   })
 }
 
+// ─── Dispatch from Email Code Request ────────────────────────────────
+//
+// Called by codeRequestService when an email triage detects code work.
+// Resolves project/codebase from client context, dispatches through
+// the standard dedup + oversight pipeline.
+
+async function dispatchFromEmail({ codeRequestId, prompt, clientId, projectId, codebaseId, threadId }) {
+  const resolvedCodebase = codebaseId || await resolveCodebase({ prompt })
+
+  let resolvedProject = projectId
+  if (!resolvedProject && clientId) {
+    const [project] = await db`
+      SELECT p.id FROM projects p
+      WHERE p.client_id = ${clientId} AND p.status = 'active'
+      ORDER BY p.created_at DESC LIMIT 1
+    `
+    resolvedProject = project?.id || null
+  }
+
+  return createAndStartSession({
+    codebaseId: resolvedCodebase,
+    prompt,
+    triggeredBy: 'email',
+    triggerSource: 'gmail',
+    triggerRefId: threadId || codeRequestId,
+    projectId: resolvedProject,
+    clientId,
+  })
+}
+
 module.exports = {
   resolveCodebase,
   dispatchFromCortex,
   dispatchFromCRM,
+  dispatchFromEmail,
   dispatchFromSimula,
   dispatchFromThymos,
   dispatchFromSchedule,
