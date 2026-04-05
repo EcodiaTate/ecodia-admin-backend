@@ -9,8 +9,8 @@ const WORKSPACES = {
     name: 'bookkeeping',
     label: 'Bookkeeping',
     description: 'Double-entry bookkeeping, bank imports, categorization, GST, BAS, reports',
-    domains: ['bookkeeping'],
-    autoLoadDocs: ['chart-of-accounts', 'supplier-rules', 'gst-rules'],
+    domains: ['bookkeeping', 'crm'],
+    autoLoadDocs: ['chart-of-accounts', 'supplier-rules', 'gst-rules', 'ecodia-context'],
     stateQueries: {
       'Pending transactions': `SELECT count(*)::int AS count FROM staged_transactions WHERE status = 'pending'`,
       'Uncategorized': `SELECT count(*)::int AS count FROM staged_transactions WHERE status = 'pending' AND category IS NULL`,
@@ -39,11 +39,22 @@ SEARCH: Use bookkeeping_search_staged/bookkeeping_search_ledger to find specific
 
 QUESTIONS: Use question blocks to ask the human when unsure about categorization. Don't guess on ambiguous items — ask.
 
-IMPORTANT — WHEN TO CREATE ENTRIES:
-- Only create journal entries for transactions that are ALREADY on the bank statement (imported via CSV or Xero).
-- If someone tells you about a spend that hasn't hit the bank yet, just acknowledge it. It'll come through on the next CSV import.
-- Don't create manual journal entries for things like "I just bought X" unless they explicitly ask you to create a manual entry.
-- The normal flow is: CSV import → categorize → post. Manual journals are for adjustments only.`,
+WHEN TO CREATE ENTRIES:
+- Only create journal entries for transactions ALREADY on the bank statement (imported via CSV or Xero).
+- Verbal mentions of spending get acknowledged, not journaled.
+- Manual journals are for adjustments, corrections, and EOFY closing only.
+
+CORRECTIONS: Never delete posted ledger entries. Use bookkeeping_reverse_entry to create a reversing journal.
+
+PERIOD LOCKING: After lodging BAS or closing EOFY, lock the period with bookkeeping_lock_period.
+
+RECEIPTS: Save receipts with bookkeeping_save_receipt. System auto-matches to bank transactions by amount + date.
+
+CRM INTEGRATION: Link transactions to clients/projects with bookkeeping_link_to_client. View all financial activity for a client or project.
+
+AUTO-LEARNING: The system auto-creates supplier rules from AI categorization. Update supplier-rules doc for manual rules.
+
+REPORTS: P&L, Balance Sheet, BAS/GST, Cash Flow, Expense Breakdown, Trial Balance, Director Loan, Income Tax Estimate. Use quarterly dates for BAS, full FY for annual.`,
   },
 
   email: {

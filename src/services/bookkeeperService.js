@@ -365,6 +365,12 @@ async function autoCategorize() {
     })
     categorized++
 
+    // Auto-learn supplier rule from AI categorization (confidence > 0.8)
+    if (confidence >= 0.8 && result.supplier_name && !result.reasoning?.startsWith('Matched rule:')) {
+      try { await autoLearnRule(tx.description, result.account_code, result.is_personal, 'ai_learned') }
+      catch { /* non-critical */ }
+    }
+
     // Auto-post high confidence
     if (confidence >= 0.9) {
       try { await postStagedTransaction(tx.id) } catch { /* will be posted manually */ }
@@ -383,6 +389,9 @@ async function postStagedTransaction(stagedId) {
   if (!tx) throw new Error('Transaction not found')
   if (!tx.category) throw new Error('Transaction not categorized')
   if (tx.status === 'posted') throw new Error('Already posted')
+
+  // Check period is open
+  await checkPeriodOpen(tx.occurred_at)
 
   const amountAbs = Math.abs(tx.amount_cents)
   const gst = tx.gst_amount_cents || 0
@@ -697,6 +706,331 @@ async function searchLedger({ keyword, dateFrom, dateTo, accountCode, limit = 50
   return result
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// REVERSING ENTRIES — proper accounting correction
+// ═══════════════════════════════════════════════════════════════════════
+
+async function reverseJournalEntry(txId, reason) {
+  const [original] = await db`SELECT * FROM ledger_transactions WHERE id = ${txId}`
+  if (!original) throw new Error(`Ledger entry ${txId} not found`)
+
+  const originalLines = await db`SELECT * FROM ledger_lines WHERE tx_id = ${txId}`
+  if (!originalLines.length) throw new Error('No lines to reverse')
+
+  const [reversal] = await db`
+    INSERT INTO ledger_transactions (occurred_at, description, source_system, source_ref, tags, supplier)
+    VALUES (${new Date().toISOString().slice(0, 10)}, ${'REVERSAL: ' + original.description + (reason ? ' — ' + reason : '')},
+      'manual', ${'reversal:' + txId}, ${'["reversal"]'}, ${original.supplier})
+    RETURNING id`
+
+  for (const line of originalLines) {
+    await db`
+      INSERT INTO ledger_lines (tx_id, account_code, debit_cents, credit_cents, tax_code, tax_amount_cents, memo)
+      VALUES (${reversal.id}, ${line.account_code}, ${line.credit_cents}, ${line.debit_cents},
+        ${line.tax_code}, ${line.tax_amount_cents}, ${'Reversal of ' + txId})`
+  }
+
+  await logAudit('ledger_transaction', txId, 'reversed', 'system', { original_id: txId }, { reversal_id: reversal.id, reason })
+  return reversal.id
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUDIT LOG
+// ════════════════════════════════════════════════════���══════════════════
+
+async function logAudit(entityType, entityId, action, changedBy = 'system', oldValues = null, newValues = null) {
+  try {
+    await db`INSERT INTO audit_log (entity_type, entity_id, action, changed_by, old_values, new_values)
+      VALUES (${entityType}, ${String(entityId)}, ${action}, ${changedBy},
+        ${oldValues ? JSON.stringify(oldValues) : null}::jsonb,
+        ${newValues ? JSON.stringify(newValues) : null}::jsonb)`
+  } catch (err) {
+    logger.warn('Audit log write failed', { error: err.message })
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PERIOD LOCKING
+// ═══════════════════════════════════════════════════════════════════════
+
+async function checkPeriodOpen(date) {
+  const locked = await db`
+    SELECT status FROM accounting_periods
+    WHERE ${date} BETWEEN period_start AND period_end AND status != 'open'`
+  if (locked.length > 0) {
+    throw new Error(`Cannot post to locked period containing ${date}. Period is ${locked[0].status}.`)
+  }
+}
+
+async function lockPeriod(start, end, lockedBy = 'tate') {
+  await db`
+    INSERT INTO accounting_periods (period_start, period_end, status, locked_at, locked_by)
+    VALUES (${start}, ${end}, 'locked', now(), ${lockedBy})
+    ON CONFLICT (period_start, period_end) DO UPDATE SET status = 'locked', locked_at = now(), locked_by = ${lockedBy}`
+  await logAudit('accounting_period', `${start}:${end}`, 'locked', lockedBy)
+}
+
+async function unlockPeriod(start, end) {
+  await db`
+    UPDATE accounting_periods SET status = 'open', locked_at = null
+    WHERE period_start = ${start} AND period_end = ${end}`
+}
+
+async function listPeriods() {
+  return db`SELECT * FROM accounting_periods ORDER BY period_start DESC`
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// EOFY CLOSING
+// ═══════════════════════════════════════════════════════════════════════
+
+async function performEOFYClose(fyEnd) {
+  // Check if already closed
+  const existing = await db`SELECT id FROM ledger_transactions WHERE source_ref = ${'eofy_close:' + fyEnd}`
+  if (existing.length) throw new Error(`FY ending ${fyEnd} already closed`)
+
+  const fyStart = `${parseInt(fyEnd.slice(0, 4)) - 1}-07-01`
+
+  // Get all income and expense totals for the FY
+  const accounts = await db`
+    SELECT a.code, a.type,
+      COALESCE(SUM(l.debit_cents), 0)::int AS total_debit,
+      COALESCE(SUM(l.credit_cents), 0)::int AS total_credit
+    FROM gl_accounts a
+    JOIN ledger_lines l ON l.account_code = a.code
+    JOIN ledger_transactions t ON t.id = l.tx_id
+    WHERE a.type IN ('income', 'expense')
+      AND t.occurred_at >= ${fyStart} AND t.occurred_at <= ${fyEnd}
+    GROUP BY a.code, a.type
+    HAVING COALESCE(SUM(l.debit_cents), 0) != 0 OR COALESCE(SUM(l.credit_cents), 0) != 0`
+
+  if (!accounts.length) throw new Error('No income/expense activity found for this FY')
+
+  const lines = []
+  let netToRetained = 0
+
+  for (const a of accounts) {
+    const balance = a.total_debit - a.total_credit
+    if (balance === 0) continue
+    // Zero out the account: if balance is positive (debit heavy), credit it; vice versa
+    if (balance > 0) {
+      lines.push({ account_code: a.code, debit_cents: 0, credit_cents: balance })
+      netToRetained += balance
+    } else {
+      lines.push({ account_code: a.code, debit_cents: Math.abs(balance), credit_cents: 0 })
+      netToRetained -= Math.abs(balance)
+    }
+  }
+
+  // Net goes to Retained Earnings
+  if (netToRetained > 0) {
+    lines.push({ account_code: '3100', debit_cents: netToRetained, credit_cents: 0 })
+  } else {
+    lines.push({ account_code: '3100', debit_cents: 0, credit_cents: Math.abs(netToRetained) })
+  }
+
+  const [tx] = await db`
+    INSERT INTO ledger_transactions (occurred_at, description, source_system, source_ref, tags)
+    VALUES (${fyEnd}, ${'EOFY Close — FY ' + fyStart.slice(0, 4) + '/' + fyEnd.slice(0, 4)}, 'manual', ${'eofy_close:' + fyEnd}, ${'["eofy"]'})
+    RETURNING id`
+
+  for (const line of lines) {
+    await db`INSERT INTO ledger_lines (tx_id, account_code, debit_cents, credit_cents)
+      VALUES (${tx.id}, ${line.account_code}, ${line.debit_cents}, ${line.credit_cents})`
+  }
+
+  await logAudit('eofy_close', tx.id, 'created', 'system', null, { fyEnd, lineCount: lines.length })
+  return { ledger_tx_id: tx.id, accounts_closed: accounts.length, net_to_retained: netToRetained }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUTO-LEARN SUPPLIER RULES
+// ═══════════════════════════════════════════════════════════════════════
+
+async function autoLearnRule(description, category, isPersonal, source = 'ai_learned') {
+  // Extract a likely supplier pattern from the description
+  const words = description.replace(/[#()\[\]{}]/g, '').split(/\s+/).slice(0, 3)
+  const pattern = words.join('.*').toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, (m) =>
+    ['.*'].includes(m) ? m : '\\' + m
+  )
+  if (pattern.length < 3) return null
+
+  // Check if rule already exists for this pattern
+  const existing = await db`SELECT id FROM supplier_rules WHERE pattern = ${pattern}`
+  if (existing.length) return null
+
+  const supplierName = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
+  const [rule] = await db`
+    INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, gst_treatment, learning_source, tags)
+    VALUES (${pattern}, ${supplierName}, ${category}, ${isPersonal || false}, 'gst_free', ${source}, ${'["auto_learned"]'})
+    RETURNING id`
+
+  logger.info('Auto-learned supplier rule', { pattern, supplierName, category, source })
+  return rule?.id
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BANK RECONCILIATION
+// ═══════════════════════════════════════════════════════════════════════
+
+async function reconcileBank(bankBalanceCents, asOfDate, accountCode = '1000') {
+  const [ledger] = await db`
+    SELECT COALESCE(SUM(l.debit_cents) - SUM(l.credit_cents), 0)::int AS balance
+    FROM ledger_lines l
+    JOIN ledger_transactions t ON t.id = l.tx_id
+    WHERE l.account_code = ${accountCode} AND t.occurred_at <= ${asOfDate}`
+
+  const ledgerBalance = ledger?.balance || 0
+  const difference = bankBalanceCents - ledgerBalance
+
+  await db`
+    INSERT INTO bank_reconciliation (account_code, as_of_date, bank_balance, ledger_balance, difference, status)
+    VALUES (${accountCode}, ${asOfDate}, ${bankBalanceCents}, ${ledgerBalance}, ${difference},
+      ${difference === 0 ? 'reconciled' : 'unreconciled'})`
+
+  // Find unmatched items
+  const unposted = await db`
+    SELECT count(*)::int AS count FROM staged_transactions
+    WHERE source_account = ${accountCode} AND status IN ('pending', 'categorized', 'flagged')
+      AND occurred_at <= ${asOfDate}`
+
+  return {
+    bank_balance_cents: bankBalanceCents,
+    ledger_balance_cents: ledgerBalance,
+    difference_cents: difference,
+    reconciled: difference === 0,
+    unposted_transactions: unposted[0]?.count || 0,
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CASH FLOW STATEMENT
+// ═══════════════════════════════════════════════════════════════════════
+
+async function getCashFlowStatement(periodStart, periodEnd) {
+  // Direct method: look at actual cash movements through bank accounts
+  const flows = await db`
+    SELECT a.code, a.name, a.type,
+      COALESCE(SUM(CASE WHEN l2.account_code IN ('1000','1100') THEN l.debit_cents ELSE 0 END), 0)::int AS cash_in,
+      COALESCE(SUM(CASE WHEN l2.account_code IN ('1000','1100') THEN l.credit_cents ELSE 0 END), 0)::int AS cash_out
+    FROM ledger_lines l
+    JOIN ledger_transactions t ON t.id = l.tx_id
+    JOIN gl_accounts a ON a.code = l.account_code
+    JOIN ledger_lines l2 ON l2.tx_id = t.id AND l2.id != l.id
+    WHERE t.occurred_at >= ${periodStart} AND t.occurred_at <= ${periodEnd}
+      AND l.account_code NOT IN ('1000', '1100')
+    GROUP BY a.code, a.name, a.type`
+
+  const operating = flows.filter(f => ['income', 'expense'].includes(f.type))
+  const financing = flows.filter(f => f.code === '2100') // Director loan
+  const other = flows.filter(f => !['income', 'expense'].includes(f.type) && f.code !== '2100')
+
+  const sum = (items) => items.reduce((s, i) => s + (i.cash_in - i.cash_out), 0)
+
+  return {
+    period: { start: periodStart, end: periodEnd },
+    operating: { items: operating, net: sum(operating) },
+    financing: { items: financing, net: sum(financing) },
+    other: { items: other, net: sum(other) },
+    net_cash_flow: sum(flows),
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RECEIPT MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+
+async function saveReceipt(receipt) {
+  const [row] = await db`
+    INSERT INTO bk_receipts (source_email, email_message_id, email_subject, email_from, email_date,
+      gmail_thread_id, supplier_name, receipt_date, amount_cents, total_amount_cents,
+      gst_amount_cents, receipt_number, file_path, file_type, status)
+    VALUES (${receipt.source_email || null}, ${receipt.email_message_id || null}, ${receipt.email_subject || null},
+      ${receipt.email_from || null}, ${receipt.email_date || null}, ${receipt.gmail_thread_id || null},
+      ${receipt.supplier_name || null}, ${receipt.receipt_date || null}, ${receipt.amount_cents || null},
+      ${receipt.total_amount_cents || null}, ${receipt.gst_amount_cents || null},
+      ${receipt.receipt_number || null}, ${receipt.file_path || null}, ${receipt.file_type || null},
+      'extracted')
+    RETURNING *`
+  return row
+}
+
+async function matchReceiptToTransaction(receiptId) {
+  const receipt = await db`SELECT * FROM bk_receipts WHERE id = ${receiptId}`.then(r => r[0])
+  if (!receipt || !receipt.amount_cents) return null
+
+  // Try to find a matching staged or ledger transaction by amount + date proximity
+  const candidates = await db`
+    SELECT id, description, amount_cents, occurred_at, 'staged' AS source FROM staged_transactions
+    WHERE ABS(amount_cents) = ${Math.abs(receipt.amount_cents)}
+      AND occurred_at BETWEEN ${receipt.receipt_date}::date - 3 AND ${receipt.receipt_date}::date + 3
+      AND receipt_id IS NULL
+    UNION ALL
+    SELECT t.id, t.description, (SELECT SUM(debit_cents) FROM ledger_lines WHERE tx_id = t.id)::int AS amount_cents,
+      t.occurred_at, 'ledger' AS source FROM ledger_transactions t
+    WHERE t.occurred_at BETWEEN ${receipt.receipt_date}::date - 3 AND ${receipt.receipt_date}::date + 3
+    ORDER BY occurred_at`
+
+  if (candidates.length === 0) return null
+
+  const best = candidates[0]
+  if (best.source === 'staged') {
+    await db`UPDATE staged_transactions SET receipt_id = ${receiptId} WHERE id = ${best.id}`
+    await db`UPDATE bk_receipts SET matched_staged_id = ${best.id}, status = 'matched', match_confidence = 0.9 WHERE id = ${receiptId}`
+  } else {
+    await db`UPDATE bk_receipts SET matched_ledger_id = ${best.id}, status = 'matched', match_confidence = 0.9 WHERE id = ${receiptId}`
+  }
+
+  return { matched_to: best.id, source: best.source, description: best.description }
+}
+
+async function listReceipts(status, limit = 50) {
+  if (status) return db`SELECT * FROM bk_receipts WHERE status = ${status} ORDER BY created_at DESC LIMIT ${limit}`
+  return db`SELECT * FROM bk_receipts ORDER BY created_at DESC LIMIT ${limit}`
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRM LINKING
+// ═══════════════════════════════════════════════════════════════════════
+
+async function linkTransactionToClient(txId, clientId, projectId, table = 'staged') {
+  if (table === 'staged') {
+    await db`UPDATE staged_transactions SET client_id = ${clientId || null}, project_id = ${projectId || null} WHERE id = ${txId}`
+  } else {
+    await db`UPDATE ledger_transactions SET client_id = ${clientId || null}, project_id = ${projectId || null} WHERE id = ${txId}`
+  }
+  return { linked: true }
+}
+
+async function getClientTransactions(clientId, limit = 50) {
+  const staged = await db`SELECT *, 'staged' AS source FROM staged_transactions WHERE client_id = ${clientId} ORDER BY occurred_at DESC LIMIT ${limit}`
+  const ledger = await db`SELECT *, 'ledger' AS source FROM ledger_transactions WHERE client_id = ${clientId} ORDER BY occurred_at DESC LIMIT ${limit}`
+  return { staged, ledger }
+}
+
+async function getProjectTransactions(projectId, limit = 50) {
+  const staged = await db`SELECT *, 'staged' AS source FROM staged_transactions WHERE project_id = ${projectId} ORDER BY occurred_at DESC LIMIT ${limit}`
+  const ledger = await db`SELECT *, 'ledger' AS source FROM ledger_transactions WHERE project_id = ${projectId} ORDER BY occurred_at DESC LIMIT ${limit}`
+  return { staged, ledger }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INCOME TAX ESTIMATE
+// ═══════════════════════════════════════════════════════════════════════
+
+async function getIncomeTaxEstimate(fyStart, fyEnd) {
+  const pnl = await getPnLReport(fyStart, fyEnd)
+  const taxableIncome = pnl.net_profit_cents
+  // Australian small business company tax rate: 25%
+  const taxCents = Math.max(0, Math.round(taxableIncome * 0.25))
+  return {
+    taxable_income_cents: taxableIncome,
+    tax_rate: 0.25,
+    estimated_tax_cents: taxCents,
+    period: { start: fyStart, end: fyEnd },
+  }
+}
+
 module.exports = {
   parseAnyBankCSV, upsertStaged, listStaged, getStaged, updateStaged,
   markPosted, markIgnored, getStagedCounts,
@@ -708,4 +1042,14 @@ module.exports = {
   getDirectorLoanBalance, getGSTSummary,
   importXeroTransactions,
   searchStaged, searchLedger,
+  // New
+  reverseJournalEntry, logAudit,
+  checkPeriodOpen, lockPeriod, unlockPeriod, listPeriods,
+  performEOFYClose,
+  autoLearnRule,
+  reconcileBank,
+  getCashFlowStatement,
+  saveReceipt, matchReceiptToTransaction, listReceipts,
+  linkTransactionToClient, getClientTransactions, getProjectTransactions,
+  getIncomeTaxEstimate,
 }

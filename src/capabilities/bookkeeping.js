@@ -435,6 +435,241 @@ registry.registerMany([
   // DELETE / BULK: Remove or batch-operate on transactions
   // ═══════════════════════════════════════════════════════════════════════
   {
+  // ═══════════════════════════════════════════════════════════════════════
+  // REVERSE / CORRECT: Proper accounting corrections
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_reverse_entry',
+    description: 'Create a reversing journal entry for a posted ledger transaction. This is the proper way to correct errors — never delete posted entries. Creates a new entry with debits/credits swapped.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      id: { type: 'string', required: true, description: 'Ledger transaction UUID to reverse' },
+      reason: { type: 'string', required: false, description: 'Why this entry is being reversed' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const reversalId = await bk.reverseJournalEntry(params.id, params.reason)
+      return { message: `Reversal created`, reversal_id: reversalId, original_id: params.id }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PERIOD LOCKING: Prevent changes to closed periods
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_lock_period',
+    description: 'Lock an accounting period to prevent posting. Use after BAS lodgement or EOFY.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      period_start: { type: 'string', required: true, description: 'Period start YYYY-MM-DD' },
+      period_end: { type: 'string', required: true, description: 'Period end YYYY-MM-DD' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      await bk.lockPeriod(params.period_start, params.period_end)
+      return { message: `Period ${params.period_start} to ${params.period_end} locked` }
+    },
+  },
+  {
+    name: 'bookkeeping_unlock_period',
+    description: 'Unlock a previously locked accounting period. Use with caution.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      period_start: { type: 'string', required: true, description: 'Period start YYYY-MM-DD' },
+      period_end: { type: 'string', required: true, description: 'Period end YYYY-MM-DD' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      await bk.unlockPeriod(params.period_start, params.period_end)
+      return { message: `Period ${params.period_start} to ${params.period_end} unlocked` }
+    },
+  },
+  {
+    name: 'bookkeeping_list_periods',
+    description: 'List all accounting periods and their lock status',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {},
+    handler: async () => {
+      const bk = require('../services/bookkeeperService')
+      return { periods: await bk.listPeriods() }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // EOFY: End of Financial Year closing
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_eofy_close',
+    description: 'Perform end of financial year closing. Zeros out all income and expense accounts, rolls net profit into Retained Earnings (3100). Run once per FY after all transactions are posted.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      fy_end: { type: 'string', required: true, description: 'Last day of the financial year YYYY-MM-DD (e.g. 2025-06-30)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.performEOFYClose(params.fy_end)
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RECONCILIATION
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_reconcile_bank',
+    description: 'Compare ledger bank balance against actual bank balance as of a date. Finds discrepancies and unmatched items.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      bank_balance_cents: { type: 'number', required: true, description: 'Actual bank balance in cents as shown on statement' },
+      as_of_date: { type: 'string', required: true, description: 'Date YYYY-MM-DD' },
+      account_code: { type: 'string', required: false, description: 'GL account code (default 1000)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.reconcileBank(params.bank_balance_cents, params.as_of_date, params.account_code || '1000')
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CASH FLOW + TAX
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_cash_flow',
+    description: 'Generate cash flow statement for a period — operating, financing, and other cash movements',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      period_start: { type: 'string', required: true, description: 'Start date YYYY-MM-DD' },
+      period_end: { type: 'string', required: true, description: 'End date YYYY-MM-DD' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.getCashFlowStatement(params.period_start, params.period_end)
+    },
+  },
+  {
+    name: 'bookkeeping_income_tax_estimate',
+    description: 'Estimate company income tax (25% for AU small business Pty Ltd) based on net profit for a financial year',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      fy_start: { type: 'string', required: true, description: 'FY start YYYY-MM-DD (e.g. 2024-07-01)' },
+      fy_end: { type: 'string', required: true, description: 'FY end YYYY-MM-DD (e.g. 2025-06-30)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.getIncomeTaxEstimate(params.fy_start, params.fy_end)
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RECEIPTS
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_list_receipts',
+    description: 'List captured receipts from Gmail/email. Shows supplier, amount, date, match status.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      status: { type: 'string', required: false, description: 'Filter: extracted, matched, unmatched, ignored' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const receipts = await bk.listReceipts(params.status, params.limit || 50)
+      return { receipts, count: receipts.length }
+    },
+  },
+  {
+    name: 'bookkeeping_match_receipt',
+    description: 'Try to auto-match a receipt to a bank transaction by amount and date proximity',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      receipt_id: { type: 'string', required: true, description: 'Receipt UUID' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const match = await bk.matchReceiptToTransaction(params.receipt_id)
+      if (!match) return { message: 'No matching transaction found', matched: false }
+      return { message: `Matched to ${match.source} transaction: ${match.description}`, ...match, matched: true }
+    },
+  },
+  {
+    name: 'bookkeeping_save_receipt',
+    description: 'Save a receipt manually or from email. Provide supplier, amount, date. Will auto-match to transactions.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      supplier_name: { type: 'string', required: true, description: 'Supplier name' },
+      amount_cents: { type: 'number', required: true, description: 'Total amount in cents' },
+      receipt_date: { type: 'string', required: true, description: 'Receipt date YYYY-MM-DD' },
+      email_subject: { type: 'string', required: false, description: 'Email subject if from inbox' },
+      email_from: { type: 'string', required: false, description: 'Sender email' },
+      gmail_thread_id: { type: 'string', required: false, description: 'Gmail thread ID for linking' },
+      receipt_number: { type: 'string', required: false, description: 'Invoice/receipt number' },
+      gst_amount_cents: { type: 'number', required: false, description: 'GST component in cents' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const receipt = await bk.saveReceipt(params)
+      const match = await bk.matchReceiptToTransaction(receipt.id)
+      return { receipt_id: receipt.id, matched: !!match, match_detail: match }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CRM LINKING
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_link_to_client',
+    description: 'Link a transaction (staged or ledger) to a CRM client and/or project. Connects bookkeeping to the business pipeline.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      tx_id: { type: 'string', required: true, description: 'Transaction UUID' },
+      client_id: { type: 'string', required: false, description: 'CRM client UUID' },
+      project_id: { type: 'string', required: false, description: 'CRM project UUID' },
+      table: { type: 'string', required: false, description: 'staged or ledger (default: staged)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.linkTransactionToClient(params.tx_id, params.client_id, params.project_id, params.table || 'staged')
+    },
+  },
+  {
+    name: 'bookkeeping_client_transactions',
+    description: 'Get all transactions linked to a CRM client — shows both staged and posted entries',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      client_id: { type: 'string', required: true, description: 'CRM client UUID' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.getClientTransactions(params.client_id)
+    },
+  },
+  {
+    name: 'bookkeeping_project_transactions',
+    description: 'Get all transactions linked to a CRM project — shows both staged and posted entries',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      project_id: { type: 'string', required: true, description: 'CRM project UUID' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      return await bk.getProjectTransactions(params.project_id)
+    },
+  },
+
+  {
     name: 'bookkeeping_delete_staged',
     description: 'Delete a staged transaction by ID. Permanently removes it — use ignore if you want to keep it but hide it.',
     tier: 'write',
@@ -480,18 +715,17 @@ registry.registerMany([
   },
   {
     name: 'bookkeeping_delete_ledger_entry',
-    description: 'Delete a posted ledger entry and all its lines by ID. Use for corrections — this reverses the journal entry.',
+    description: 'Reverse a posted ledger entry by creating a counter-entry. Preserves audit trail. For genuine data-entry mistakes only.',
     tier: 'write',
     domain: 'bookkeeping',
     params: {
-      id: { type: 'string', required: true, description: 'Ledger transaction UUID' },
+      id: { type: 'string', required: true, description: 'Ledger transaction UUID to reverse' },
+      reason: { type: 'string', required: false, description: 'Reason for reversal' },
     },
     handler: async (params) => {
-      const db = require('../config/db')
-      // Lines cascade-delete via FK
-      const res = await db`DELETE FROM ledger_transactions WHERE id = ${params.id} RETURNING id`
-      if (!res.length) throw new Error(`Ledger entry ${params.id} not found`)
-      return { message: `Deleted ledger entry ${params.id} and all its lines` }
+      const bk = require('../services/bookkeeperService')
+      const reversalId = await bk.reverseJournalEntry(params.id, params.reason || 'Corrected via delete')
+      return { message: `Reversed ledger entry ${params.id}`, reversal_id: reversalId }
     },
   },
   {
