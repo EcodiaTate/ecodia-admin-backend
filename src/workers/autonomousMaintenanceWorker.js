@@ -26,7 +26,7 @@ let _cycleCount = 0  // total cycles since start — for periodic introspection
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
 // Model for cognitive streams — default to Sonnet 4.6 via Bedrock if AWS creds set, else DeepSeek
-const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || (env.AWS_ACCESS_KEY_ID ? 'claude-sonnet-4-6-20250514' : 'deepseek-chat')
+const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || (env.AWS_ACCESS_KEY_ID ? 'us.anthropic.claude-sonnet-4-20250514-v1:0' : 'deepseek-chat')
 
 // ─── Restart Resilience ──────────────────────────────────────────────
 // The organism restarts constantly (self-mod deploys, PM2 restarts).

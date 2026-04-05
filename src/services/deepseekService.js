@@ -8,8 +8,8 @@ const DEEPSEEK_TIMEOUT_MS = parseInt(env.DEEPSEEK_TIMEOUT_MS || '120000') || 120
 const DEEPSEEK_MAX_RETRIES = parseInt(env.DEEPSEEK_MAX_RETRIES || '3') || 3
 const DEEPSEEK_RETRY_BASE_MS = parseInt(env.DEEPSEEK_RETRY_BASE_MS || '1000') || 1000
 
-// Provider routing: models starting with 'claude-' go to Anthropic Bedrock, else DeepSeek
-function _isAnthropicModel(model) { return model.startsWith('claude-') }
+// Provider routing: claude models go to Anthropic Bedrock, else DeepSeek
+function _isAnthropicModel(model) { return model.startsWith('claude-') || model.includes('anthropic.claude') }
 
 // Lazy-init Bedrock client — only created when first needed
 let _bedrockClient = null
