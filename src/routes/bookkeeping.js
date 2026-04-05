@@ -67,7 +67,7 @@ router.post('/ingest/csv', express.text({ type: '*/*', limit: '10mb' }), async (
   try {
     if (!req.body) return res.status(400).json({ error: 'No CSV data' })
     const csvText = typeof req.body === 'string' ? req.body : req.body.toString('utf-8')
-    const transactions = bk.parseBankAustraliaCSV(csvText)
+    const transactions = await bk.parseAnyBankCSV(csvText)
     let created = 0, dupes = 0
     for (const tx of transactions) {
       if (await bk.upsertStaged(tx)) created++; else dupes++

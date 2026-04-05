@@ -10,11 +10,11 @@ registry.registerMany([
     tier: 'write',
     domain: 'bookkeeping',
     params: {
-      csvText: { type: 'string', required: true, description: 'Raw CSV file content (Bank Australia format)' },
+      csvText: { type: 'string', required: true, description: 'Raw CSV file content from any bank — AI auto-detects column format' },
     },
     handler: async (params) => {
       const bk = require('../services/bookkeeperService')
-      const transactions = bk.parseBankAustraliaCSV(params.csvText)
+      const transactions = await bk.parseAnyBankCSV(params.csvText)
       let created = 0, dupes = 0
       for (const tx of transactions) {
         if (await bk.upsertStaged(tx)) created++; else dupes++

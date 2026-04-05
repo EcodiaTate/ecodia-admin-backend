@@ -9,10 +9,15 @@ const logger = require('../config/logger')
 const deepseek = require('./deepseekService')
 
 // ═══════════════════════════════════════════════════════════════════════
-// CSV PARSING
+// CSV PARSING — AI-powered, handles any bank format
 // ═══════════════════════════════════════════════════════════════════════
 
-function parseBankAustraliaCSV(csvText) {
+/**
+ * AI-parse any bank CSV. Sends the first ~15 rows to DeepSeek to figure out
+ * which columns map to date, description, and amount, then applies that
+ * mapping to every row. No hardcoded column names.
+ */
+async function parseAnyBankCSV(csvText) {
   if (!csvText || typeof csvText !== 'string') {
     logger.warn('Bookkeeper CSV: received empty or non-string input', { type: typeof csvText, length: csvText?.length })
     return []
@@ -24,42 +29,93 @@ function parseBankAustraliaCSV(csvText) {
     return []
   }
 
+  // Parse all rows structurally
   const header = _parseCSVRow(lines[0]).map(h => h.trim())
-  logger.info('Bookkeeper CSV: parsed headers', { headers: header, lineCount: lines.length })
-  const transactions = []
-
+  const allRows = []
   for (let i = 1; i < lines.length; i++) {
     const row = _parseCSVRow(lines[i])
-    if (row.length < header.length) {
-      if (lines[i].trim()) logger.debug('Bookkeeper CSV: skipping short row', { row: i, cols: row.length, expected: header.length })
-      continue
+    if (row.length >= header.length) {
+      const obj = {}
+      header.forEach((h, j) => { obj[h] = row[j] })
+      allRows.push(obj)
     }
+  }
 
-    const obj = {}
-    header.forEach((h, j) => { obj[h] = row[j] })
+  if (allRows.length === 0) {
+    logger.warn('Bookkeeper CSV: no data rows parsed', { headers: header })
+    return []
+  }
 
-    const debit = parseFloat(obj['Debit amount'] || '0')
-    const credit = parseFloat(obj['Credit amount'] || '0')
-    const amountCents = debit ? -Math.abs(Math.round(debit * 100)) : Math.abs(Math.round(credit * 100))
-    if (amountCents === 0) {
-      if (i <= 3) logger.debug('Bookkeeper CSV: row has zero amount', { row: i, debitRaw: obj['Debit amount'], creditRaw: obj['Credit amount'], keys: Object.keys(obj) })
-      continue
+  // Send sample to AI to figure out column mapping
+  const sample = allRows.slice(0, Math.min(8, allRows.length))
+  const mappingPrompt = `You are a bank CSV parser. Given these headers and sample rows, return a JSON mapping object.
+
+Headers: ${JSON.stringify(header)}
+Sample rows:
+${sample.map((r, i) => `Row ${i + 1}: ${JSON.stringify(r)}`).join('\n')}
+
+Return ONLY a JSON object with these fields:
+{
+  "date_col": "the column name containing the transaction date",
+  "description_col": "the column name containing the transaction description",
+  "amount_col": "the column name containing the amount (if single column with +/-)",
+  "debit_col": "column for debits (if separate debit/credit columns, else null)",
+  "credit_col": "column for credits (if separate debit/credit columns, else null)",
+  "date_format": "DMY" or "MDY" or "YMD",
+  "amount_is_signed": true if negative means debit and positive means credit,
+  "amount_strip": "characters to strip from amount values like $ signs"
+}
+
+Rules:
+- If amount is a single column (positive/negative or with $), use amount_col and set debit_col/credit_col to null
+- If there are separate debit/credit columns, set amount_col to null
+- Look at the actual data values, not just headers
+- Return ONLY the JSON, no markdown, no explanation`
+
+  let mapping
+  try {
+    const aiResult = await deepseek.callDeepSeek([{ role: 'user', content: mappingPrompt }], {
+      module: 'bookkeeping',
+      skipRetrieval: true,
+      skipLogging: true,
+      temperature: 0,
+    })
+    const raw = aiResult.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    mapping = JSON.parse(raw)
+    logger.info('Bookkeeper CSV: AI column mapping', { mapping, headers: header })
+  } catch (err) {
+    logger.error('Bookkeeper CSV: AI mapping failed, attempting heuristic fallback', { error: err.message })
+    mapping = _heuristicMapping(header)
+  }
+
+  // Apply mapping to all rows
+  const transactions = []
+  for (const obj of allRows) {
+    // Parse amount
+    let amountCents = 0
+    if (mapping.amount_col) {
+      const raw = (obj[mapping.amount_col] || '').replace(/[$,\s]/g, '')
+      const val = parseFloat(raw)
+      if (!isNaN(val)) amountCents = Math.round(val * 100)
+    } else if (mapping.debit_col || mapping.credit_col) {
+      const debit = parseFloat((obj[mapping.debit_col] || '0').replace(/[$,\s]/g, ''))
+      const credit = parseFloat((obj[mapping.credit_col] || '0').replace(/[$,\s]/g, ''))
+      amountCents = !isNaN(debit) && debit ? -Math.abs(Math.round(debit * 100))
+        : !isNaN(credit) && credit ? Math.abs(Math.round(credit * 100)) : 0
     }
+    if (amountCents === 0) continue
 
-    let occurredAt = null
-    const dateStr = (obj['Effective date'] || '').trim()
-    if (dateStr.includes('/')) {
-      const [d, m, y] = dateStr.split('/')
-      occurredAt = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-    } else {
-      occurredAt = dateStr
-    }
-    if (!occurredAt) {
-      if (i <= 3) logger.debug('Bookkeeper CSV: row has no date', { row: i, dateRaw: obj['Effective date'], keys: Object.keys(obj) })
-      continue
-    }
+    // Parse date
+    const dateStr = (obj[mapping.date_col] || '').trim()
+    const occurredAt = _normalizeDate(dateStr, mapping.date_format || 'DMY')
+    if (!occurredAt) continue
 
-    const raw = `${dateStr}${obj['Debit amount'] || ''}${obj['Credit amount'] || ''}${obj['Description'] || ''}${obj['Reference no'] || ''}`
+    // Description
+    const description = (obj[mapping.description_col] || '').trim()
+    if (!description) continue
+
+    // Dedup hash from date + amount + description
+    const raw = `${dateStr}${amountCents}${description}`
     const sourceRef = `csv:${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
 
     transactions.push({
@@ -67,13 +123,46 @@ function parseBankAustraliaCSV(csvText) {
       source_ref: sourceRef,
       occurred_at: occurredAt,
       amount_cents: amountCents,
-      description: (obj['Description'] || '').trim(),
-      long_description: (obj['Long description'] || '').trim() || null,
-      transaction_type: (obj['Transaction type'] || '').trim() || null,
+      description,
+      long_description: null,
+      transaction_type: null,
     })
   }
 
+  logger.info('Bookkeeper CSV: parsed transactions', { count: transactions.length, totalRows: allRows.length })
   return transactions
+}
+
+/** Heuristic fallback if AI mapping fails */
+function _heuristicMapping(headers) {
+  const lower = headers.map(h => h.toLowerCase())
+  return {
+    date_col: headers[lower.findIndex(h => h.includes('date'))] || headers[0],
+    description_col: headers[lower.findIndex(h => h.includes('desc') || h.includes('narr') || h.includes('transaction'))] || headers[1],
+    amount_col: headers[lower.findIndex(h => h === 'amount' || h.includes('amount'))] || null,
+    debit_col: headers[lower.findIndex(h => h.includes('debit'))] || null,
+    credit_col: headers[lower.findIndex(h => h.includes('credit'))] || null,
+    date_format: 'DMY',
+    amount_is_signed: true,
+    amount_strip: '$,',
+  }
+}
+
+/** Normalize any date string to YYYY-MM-DD */
+function _normalizeDate(dateStr, format) {
+  if (!dateStr) return null
+  // Try slash-separated
+  const parts = dateStr.split(/[\/\-.]/)
+  if (parts.length === 3) {
+    let d, m, y
+    if (format === 'DMY') { [d, m, y] = parts }
+    else if (format === 'MDY') { [m, d, y] = parts }
+    else { [y, m, d] = parts }
+    // Handle 2-digit year
+    if (y.length === 2) y = (parseInt(y) > 50 ? '19' : '20') + y
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  }
+  return null
 }
 
 function _parseCSVRow(line) {
@@ -563,7 +652,7 @@ async function importXeroTransactions() {
 }
 
 module.exports = {
-  parseBankAustraliaCSV, upsertStaged, listStaged, getStaged, updateStaged,
+  parseAnyBankCSV, upsertStaged, listStaged, getStaged, updateStaged,
   markPosted, markIgnored, getStagedCounts,
   getAllRules, createRule, deleteRule,
   categorizeTransactions, autoCategorize,
