@@ -83,6 +83,90 @@ Write a briefing. Present tense, direct prose, specific details — names, dates
   }
 })
 
+// GET /api/kg/search?q=term — search nodes by name (fuzzy)
+router.get('/search', async (req, res, next) => {
+  try {
+    const { q, limit } = req.query
+    if (!q) return res.status(400).json({ error: 'Missing query parameter q' })
+    const { runQuery } = require('../config/neo4j')
+    const maxResults = Math.min(parseInt(limit) || 30, 100)
+    const records = await runQuery(
+      `MATCH (n)
+       WHERE toLower(n.name) CONTAINS toLower($q)
+       RETURN n.name AS name, labels(n) AS labels, n.description AS description, n.importance AS importance
+       ORDER BY CASE WHEN toLower(n.name) = toLower($q) THEN 0 ELSE 1 END, n.importance DESC
+       LIMIT ${maxResults}`,
+      { q }
+    )
+    res.json(records.map(r => ({
+      name: r.get('name'),
+      labels: r.get('labels') || [],
+      description: r.get('description') || null,
+      importance: r.get('importance') ?? null,
+    })))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/kg/node/:name/graph?depth=1 — neighborhood as graph data (nodes + edges)
+router.get('/node/:name/graph', async (req, res, next) => {
+  try {
+    const depth = Math.min(parseInt(req.query.depth) || 1, 3)
+    const { runQuery } = require('../config/neo4j')
+
+    // Query 1: get center node + neighbors
+    const nodeRecords = await runQuery(
+      `MATCH (center) WHERE toLower(center.name) = toLower($name)
+       OPTIONAL MATCH (center)-[*1..${depth}]-(connected)
+       WITH center, collect(DISTINCT connected) AS neighbors
+       RETURN center.name AS centerName, labels(center) AS centerLabels,
+              center.description AS centerDesc, center.importance AS centerImp,
+              [n IN neighbors WHERE n.name IS NOT NULL |
+                {name: n.name, labels: labels(n), description: n.description, importance: n.importance}
+              ] AS neighbors`,
+      { name: req.params.name }
+    )
+
+    if (nodeRecords.length === 0) return res.status(404).json({ error: 'Node not found' })
+
+    const rec = nodeRecords[0]
+    const nodesMap = new Map()
+    nodesMap.set(rec.get('centerName'), {
+      name: rec.get('centerName'),
+      labels: rec.get('centerLabels') || [],
+      description: rec.get('centerDesc') || null,
+      importance: rec.get('centerImp') ?? null,
+      isCenter: true,
+    })
+    for (const n of rec.get('neighbors') || []) {
+      if (n.name && !nodesMap.has(n.name)) nodesMap.set(n.name, n)
+    }
+
+    // Query 2: get edges between all nodes in the set
+    const nodeNames = [...nodesMap.keys()]
+    const edgeRecords = await runQuery(
+      `MATCH (a)-[r]->(b)
+       WHERE a.name IN $names AND b.name IN $names
+       RETURN DISTINCT a.name AS source, b.name AS target, type(r) AS type`,
+      { names: nodeNames }
+    )
+
+    const edges = edgeRecords.map(r => ({
+      source: r.get('source'),
+      target: r.get('target'),
+      type: r.get('type'),
+    }))
+
+    res.json({
+      nodes: [...nodesMap.values()],
+      edges,
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/kg/consolidation/stats — consolidation health
 router.get('/consolidation/stats', async (req, res, next) => {
   try {
