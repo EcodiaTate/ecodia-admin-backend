@@ -98,9 +98,12 @@ CC sessions flow through: execute → DeepSeek review → validate (test/lint/ty
 | Hardcoding DeepSeek KG retrieval params in callDeepSeek | Use `DEEPSEEK_KG_MAX_SEEDS`, `DEEPSEEK_KG_MAX_DEPTH`, `DEEPSEEK_KG_MIN_SIMILARITY` env vars |
 | Hardcoding KG ingestion throttle rate to non-zero | `KG_MAX_INGESTIONS_PER_MIN=0` (unlimited). Use `KG_INGESTION_DEDUP_WINDOW_MS`, `KG_INGESTION_DEDUP_MAP_SIZE` for dedup tuning |
 | Hardcoding action queue auto-suppression threshold | `ACTION_QUEUE_SUPPRESSION_THRESHOLD=0` (disabled). Use `ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE` for priority downgrade tuning |
+| Hardcoding Cortex enqueue dismiss-rate gate | Use `CORTEX_ENQUEUE_DISMISS_RATE_GATE` (default 0.8), `CORTEX_ENQUEUE_MIN_DECISIONS` (default 3) env vars |
 | Hardcoding parallel CC session caps (`.slice(0, 5)`) | Use `CC_MAX_PARALLEL_SESSIONS` (0 = unlimited) |
 | Hardcoding database query result limits in capabilities | Use `CAPABILITY_QUERY_DATABASE_RESULT_LIMIT` (0 = unlimited) |
 | Capping KG consolidation plan phases (`.slice(0, 8)`) | Let the ConsolidationDirector return all phases it deems necessary |
+| Making stale integration polling conditional on `allDecisions.length === 0` | External perception is mandatory, not advisory. Use `INTEGRATION_STALE_THRESHOLD_MS` and unconditional poll injection |
+| Hardcoding integration stale threshold | Use `INTEGRATION_STALE_THRESHOLD_MS` env var (default 900000 = 15min) |
 
 ---
 

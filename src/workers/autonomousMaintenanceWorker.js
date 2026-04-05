@@ -304,15 +304,28 @@ async function runCycle() {
 
     logger.info(`AutonomousMaintenanceWorker: streams returned ${allDecisions.length} decision(s) (${Object.entries(streamCounts).map(([k, v]) => `${k}:${v}`).join(', ')})`)
 
-    // 2b. Even if streams returned nothing, ensure stale integrations get polled.
-    if (allDecisions.length === 0 && state.integrationStaleness) {
-      for (const [name, staleness] of Object.entries(state.integrationStaleness)) {
-        if (typeof staleness === 'string' && staleness.includes('never')) {
-          const pollName = `poll_${name}`
-          if (pollRegistry.has(pollName)) {
-            allDecisions.push({ intent: pollName, type: 'poll', urgency: 'low', reason: `${name} never polled — heartbeat`, stream: 'fallback' })
-          }
-        }
+    // 2b. Unconditionally inject poll decisions for stale integrations.
+    //     External perception is MANDATORY, not advisory. Polls are cheap (no Factory session)
+    //     and must not be crowded out by internal reflection/maintenance decisions.
+    //     This is the structural fix for the sealed-loop pathology: the system was
+    //     drifting toward navel-gazing because internal work was always "more interesting"
+    //     than polling, and this fallback only fired when allDecisions was empty (never).
+    const staleThresholdMs = parseInt(env.INTEGRATION_STALE_THRESHOLD_MS || '900000') // 15 min default
+    const _integrationPollMap = { gmail: 'poll_gmail', google_drive: 'poll_drive', vercel: 'poll_vercel', meta: 'poll_meta' }
+    if (state.integrationStaleness) {
+      for (const [name] of Object.entries(state.integrationStaleness)) {
+        const lastPoll = _lastPolled[name]
+        const isStale = !lastPoll || (Date.now() - lastPoll) > staleThresholdMs
+        if (!isStale) continue
+
+        const pollName = _integrationPollMap[name] || `poll_${name}`
+        if (!pollRegistry.has(pollName)) continue
+
+        // Don't duplicate if a stream already decided to poll this
+        const alreadyRequested = allDecisions.some(d => d.intent === pollName)
+        if (alreadyRequested) continue
+
+        allDecisions.unshift({ intent: pollName, type: 'poll', urgency: 'medium', reason: `${name} stale (>${Math.round(staleThresholdMs / 60000)}min) — mandatory external perception`, stream: 'staleness_guard' })
       }
     }
 
@@ -1220,9 +1233,20 @@ function buildSystemBrief(state) {
   }
 
   if (state.integrationStaleness) {
-    const stale = Object.entries(state.integrationStaleness)
-      .map(([k, v]) => `${k}: ${v === null ? 'never polled' : `${v}min ago`}`)
-      .join(', ')
+    // Values are already formatted strings ("5 min ago" or "never (stale)") — don't double-format
+    const staleEntries = Object.entries(state.integrationStaleness)
+    const stale = staleEntries.map(([k, v]) => `${k}: ${v}`).join(', ')
+
+    // Escalate language when integrations are critically stale — the AI must feel the urgency
+    const staleThresholdMs = parseInt(env.INTEGRATION_STALE_THRESHOLD_MS || '900000') // 15 min default
+    const criticallyStale = staleEntries.filter(([k]) => {
+      const lastPoll = _lastPolled[k]
+      return !lastPoll || (Date.now() - lastPoll) > staleThresholdMs
+    })
+
+    if (criticallyStale.length > 0) {
+      lines.push(`\nSTALE WARNING: ${criticallyStale.map(([k, v]) => `${k} (${v})`).join(', ')} — external perception is degrading. Poll these BEFORE internal reflection tasks.`)
+    }
     lines.push(`\nIntegration staleness: ${stale}`)
     lines.push(`(To poll an integration, return type: "poll" and intent: one of: poll_gmail, poll_drive, extract_drive, embed_drive, poll_vercel, poll_meta, expire_queue, retry_failed_actions)`)
   }
@@ -1533,4 +1557,14 @@ async function verifyOutcomes() {
   }
 }
 
-module.exports = { start, stop, runCycle, registerPoll }
+function getIntegrationStaleness() {
+  const now = Date.now()
+  const result = {}
+  for (const key of ['gmail', 'google_drive', 'vercel', 'meta']) {
+    const last = _lastPolled[key]
+    result[key] = last ? { lastPolledAt: last, minutesAgo: Math.round((now - last) / 60000) } : { lastPolledAt: null, minutesAgo: null }
+  }
+  return result
+}
+
+module.exports = { start, stop, runCycle, registerPoll, getIntegrationStaleness }

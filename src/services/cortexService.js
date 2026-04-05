@@ -394,6 +394,51 @@ async function autoEnqueueUrgentActions(blocks) {
     logger.debug('Context tracking filter failed — proceeding unfiltered', { error: err.message })
   }
 
+  // Relevance gate: suppress action types that have been consistently dismissed.
+  // Queries decision history per (source=cortex, action_type) and drops cards
+  // whose dismiss rate exceeds CORTEX_ENQUEUE_DISMISS_RATE_GATE.
+  const dismissRateGate = parseFloat(env.CORTEX_ENQUEUE_DISMISS_RATE_GATE || '0.8')
+  const minDecisions = parseInt(env.CORTEX_ENQUEUE_MIN_DECISIONS || '3', 10)
+  if (dismissRateGate > 0 && actionCards.length > 0) {
+    try {
+      const actionTypes = [...new Set(actionCards.map(c => c.action))]
+      const dismissStats = await db`
+        SELECT action_type,
+               count(*)::int AS total,
+               count(*) FILTER (WHERE decision = 'dismissed')::int AS dismissed
+        FROM action_decisions
+        WHERE source = 'cortex'
+          AND action_type = ANY(${actionTypes})
+          AND sender_email IS NULL
+          AND created_at > now() - interval '30 days'
+        GROUP BY action_type
+      `.catch(() => [])
+
+      const suppressedTypes = new Map()
+      for (const row of dismissStats) {
+        if (row.total >= minDecisions && (row.dismissed / row.total) > dismissRateGate) {
+          suppressedTypes.set(row.action_type, `${row.dismissed}/${row.total} dismissed`)
+        }
+      }
+
+      if (suppressedTypes.size > 0) {
+        const before = actionCards.length
+        const kept = actionCards.filter(c => !suppressedTypes.has(c.action))
+        const removed = actionCards.filter(c => suppressedTypes.has(c.action))
+        actionCards.length = 0
+        actionCards.push(...kept)
+        for (const r of removed) {
+          logger.info(`Cortex: relevance-gated "${r.title}" (${r.action}) — ${suppressedTypes.get(r.action)}`)
+        }
+        if (removed.length) {
+          logger.info(`Cortex: relevance gate filtered ${removed.length}/${before} action_cards`)
+        }
+      }
+    } catch (err) {
+      logger.debug('Cortex relevance gate query failed — proceeding unfiltered', { error: err.message })
+    }
+  }
+
   // Cap: never enqueue more than 2 action cards per response
   if (actionCards.length > 2) {
     logger.info(`Cortex: capping ${actionCards.length} action_cards to 2`)
@@ -871,6 +916,18 @@ async function getSystemState() {
     logger.debug('Cortex worker heartbeats failed', { error: err.message })
   }
 
+  // ─── Integration Staleness ──────────────────────────────────────
+  // Expose how fresh external data is — without this, Cortex sees "0 unread"
+  // and assumes everything is fine when Gmail hasn't been polled in hours.
+  try {
+    const maintenanceWorker = require('../workers/autonomousMaintenanceWorker')
+    if (maintenanceWorker.getIntegrationStaleness) {
+      state.integrationStaleness = maintenanceWorker.getIntegrationStaleness()
+    }
+  } catch (err) {
+    logger.debug('Cortex integration staleness failed', { error: err.message })
+  }
+
   // ─── Stale Escalations (awaiting review > 2h) ──────────────────
   try {
     state.staleEscalations = await db`
@@ -913,6 +970,13 @@ function formatSystemState(state) {
   lines.push(`Emails: ${state.unreadEmails} unread, ${state.urgentEmails} urgent, ${state.highEmails} high priority, ${state.pendingTriage} pending triage`)
   lines.push(`Tasks: ${state.pendingTasks} pending`)
   lines.push(`Calendar: ${state.calendarNext24h} events in next 24 hours, ${state.calendarToday.length} today`)
+
+  if (state.integrationStaleness) {
+    const parts = Object.entries(state.integrationStaleness).map(([k, v]) =>
+      `${k}: ${v.minutesAgo != null ? `${v.minutesAgo}min ago` : 'never polled'}`
+    )
+    lines.push(`Integration freshness: ${parts.join(', ')}`)
+  }
 
   if (state.actionQueueStats) {
     const aq = state.actionQueueStats

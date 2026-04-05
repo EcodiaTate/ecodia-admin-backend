@@ -158,6 +158,7 @@ const envSchema = z.object({
   MAINTENANCE_BACKOFF_MAX_MULTIPLIER: z.string().default('3'),
   MAINTENANCE_BACKOFF_MAX_MS: z.string().default('600000'),               // 10 min ceiling
   MAINTENANCE_COOLDOWN_MS: z.string().default('0'),                       // 0 = no cooldown; AI decides if re-running an intent is worthwhile
+  INTEGRATION_STALE_THRESHOLD_MS: z.string().default('900000'),            // 15 min — integrations older than this get mandatory poll injection
   MAINTENANCE_ESCALATION_SLA_MS: z.string().default('7200000'),           // 2 hour stale threshold
   MAINTENANCE_ESCALATION_REMINDER_MS: z.string().default('14400000'),     // 4 hour re-remind
   // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
@@ -192,6 +193,9 @@ const envSchema = z.object({
   DEEPSEEK_KG_MAX_SEEDS: z.string().default('15'),
   DEEPSEEK_KG_MAX_DEPTH: z.string().default('5'),
   DEEPSEEK_KG_MIN_SIMILARITY: z.string().default('0.4'),
+  // Cortex action enqueue relevance gate — suppress action types with high dismiss rates
+  CORTEX_ENQUEUE_DISMISS_RATE_GATE: z.string().default('0.8'),   // dismiss rate above this → suppress (0 = disabled)
+  CORTEX_ENQUEUE_MIN_DECISIONS: z.string().default('3'),          // minimum decisions before gate applies
   // Action queue tuning
   ACTION_QUEUE_SUPPRESSION_THRESHOLD: z.string().default('0'),    // 0 = disabled (never auto-suppress)
   ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE: z.string().default('0.7'),
