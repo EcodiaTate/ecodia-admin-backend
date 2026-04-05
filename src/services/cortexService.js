@@ -1445,4 +1445,42 @@ async function listSessions(limit = 20) {
   }
 }
 
-module.exports = { chat, getLoadBriefing, executeAction, persistExchange, getSessionHistory, listSessions }
+// ─── Conversation Context Persistence ──────────────────────────────────
+// A single-row snapshot of the current conversation state.
+// Loaded when the interface opens so the Cortex has continuity.
+
+async function getConversationContext() {
+  try {
+    const [ctx] = await db`
+      SELECT * FROM cortex_context ORDER BY updated_at DESC LIMIT 1
+    `
+    return ctx || null
+  } catch (err) {
+    logger.debug('Cortex context load failed', { error: err.message })
+    return null
+  }
+}
+
+async function saveConversationContext(data) {
+  try {
+    const { last_topic, ongoing_work, pending_actions, current_focus, human_last_message, cortex_last_response } = data
+    const [ctx] = await db`
+      INSERT INTO cortex_context (last_topic, ongoing_work, pending_actions, current_focus, human_last_message, cortex_last_response)
+      VALUES (
+        ${last_topic || null},
+        ${JSON.stringify(ongoing_work || [])},
+        ${JSON.stringify(pending_actions || [])},
+        ${current_focus || null},
+        ${human_last_message || null},
+        ${cortex_last_response || null}
+      )
+      RETURNING *
+    `
+    return ctx
+  } catch (err) {
+    logger.debug('Cortex context save failed', { error: err.message })
+    return null
+  }
+}
+
+module.exports = { chat, getLoadBriefing, executeAction, persistExchange, getSessionHistory, listSessions, getConversationContext, saveConversationContext }
