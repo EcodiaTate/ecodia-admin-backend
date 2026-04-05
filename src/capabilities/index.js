@@ -26,6 +26,7 @@ const domains = [
   './selfhood',
   './context',
   './growth',
+  './bookkeeping',
 ]
 
 for (const domain of domains) {
