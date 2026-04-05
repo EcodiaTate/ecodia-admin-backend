@@ -694,6 +694,35 @@ async function readSystemState() {
     (async () => { try { const sm = require('../services/selfModelService'); state.selfAssessmentBrief = await sm.buildSelfAssessmentBrief() } catch { state.selfAssessmentBrief = null } })(),
     (async () => { try { const is = require('../services/introspectionService'); state.introspectionBrief = await is.buildIntrospectionBrief() } catch { state.introspectionBrief = null } })(),
 
+    // ─── THEATER DETECTION ──────────────────────────────────────────────
+    // Count consecutive recent sessions that changed ZERO files.
+    // This is the smoking gun for diagnostic theater: the system dispatches
+    // sessions that investigate/audit/diagnose but never touch code.
+    db`
+      SELECT id, status, files_changed, initial_prompt, started_at
+      FROM cc_sessions
+      WHERE started_at > now() - interval '48 hours'
+        AND status IN ('complete', 'error')
+      ORDER BY started_at DESC
+      LIMIT 20
+    `.catch(() => []).then(rows => {
+      let consecutiveZeroChange = 0
+      for (const r of rows) {
+        const changed = Array.isArray(r.files_changed) ? r.files_changed.length : 0
+        if (changed === 0) {
+          consecutiveZeroChange++
+        } else {
+          break // stop at first session that actually changed something
+        }
+      }
+      state.theaterScore = consecutiveZeroChange
+      state.recentSessionSummary = rows.slice(0, 10).map(r => ({
+        status: r.status,
+        filesChanged: Array.isArray(r.files_changed) ? r.files_changed.length : 0,
+        prompt: (r.initial_prompt || '').slice(0, 80),
+      }))
+    }),
+
     // Count how many investigation sessions ran in the last 7 days.
     // Done in JS instead of SQL to avoid LATERAL unnest issues with the query driver.
     db`
@@ -766,11 +795,18 @@ async function readSystemState() {
 
 async function streamMaintenance(state, brief) {
   const deepseekService = require('../services/deepseekService')
+  const theaterWarning = (state.theaterScore || 0) >= 3
+    ? `\n\n⚠️ THEATER ALERT: The last ${state.theaterScore} sessions changed ZERO files. Do NOT dispatch investigations or diagnostics. Only dispatch tasks that will produce actual code changes, or return [].`
+    : ''
+
   const prompt = `You are the maintenance mind of EcodiaOS. Focus ONLY on what needs fixing right now.
 
 Read the system state and decide what the Factory should work on — or nothing if nothing is broken.
 Look at: error patterns, app errors, factory health, recent maintenance outcomes (did past fixes help?).
 Check suppressed patterns — do NOT suggest actions for known structural issues.
+
+IMPORTANT: "investigate", "diagnose", "audit", "check why" tasks are low-value — they produce reports, not fixes.
+Prefer "fix X by doing Y" or "add Z to handle the W case" — tasks that describe specific code changes.${theaterWarning}
 
 BUDGET: Prefer fewer, higher-impact actions. Returning [] is often correct.
 
@@ -796,6 +832,10 @@ async function streamExploration(state, brief) {
   const deepseekService = require('../services/deepseekService')
   const goalContext = (() => { try { return require('../services/goalService').buildGoalFormationContext(state.activeGoals || []) } catch { return '' } })()
 
+  const theaterWarning = (state.theaterScore || 0) >= 3
+    ? `\n\n⚠️ THEATER OVERRIDE: The last ${state.theaterScore} sessions changed ZERO files. Your decisions MUST result in actual code changes. No investigations. No audits. No diagnostics. Write code or return [].`
+    : ''
+
   const prompt = `You are the growth mind of EcodiaOS. The system is calm — this is your window to EVOLVE.
 
 You are not looking for bugs. You are looking for opportunities:
@@ -805,12 +845,23 @@ You are not looking for bugs. You are looking for opportunities:
 - Goal management: create/advance/abandon goals.
 ${goalContext}
 
+CRITICAL RULE: Every decision you return MUST be an IMPLEMENTATION task, not an investigation.
+- BAD intent: "Investigate why KG embeddings fail" (produces no code changes)
+- BAD intent: "Audit the learning extraction pipeline" (diagnostic theater)
+- BAD intent: "Check if the organism is responding" (just a status check)
+- GOOD intent: "Add a retry with exponential backoff to KG embedding calls in kgEmbeddingWorker.js"
+- GOOD intent: "Implement a /api/v1/health endpoint that returns system status as JSON"
+- GOOD intent: "Add a fallback to local embeddings when OpenAI embedding API returns 429"
+
+Your intent MUST describe WHAT CODE TO WRITE, not what to look at.
+Include the specific file or module to modify when possible.${theaterWarning}
+
 BUDGET: 1-3 decisions max. Quality over quantity. [] is valid.
 
 Respond as JSON: { "decisions": [...], "reflection": "optional 1-sentence growth observation" }
-Each decision: { "intent": "specific Factory prompt", "reason": "opportunity you see", "codebaseHint": "optional", "urgency": "low", "type": "exploration|self_improvement|experiment|organism_evolution|goal_pursuit", "goalId": null, "newGoal": null }
+Each decision: { "intent": "specific Factory prompt describing code to write/modify", "reason": "opportunity you see", "codebaseHint": "optional", "urgency": "low", "type": "exploration|self_improvement|experiment|organism_evolution|goal_pursuit", "goalId": null, "newGoal": null }
 
-Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}. EXPLORATION cycle — think big.`
+Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}. EXPLORATION cycle — BUILD something.`
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -868,6 +919,10 @@ async function streamReflection(state, brief) {
     ? _recentPercepts.map(p => `[${p.type}] ${p.summary || '?'}`).join('; ')
     : 'no organism percepts received'
 
+  const theaterNote = (state.theaterScore || 0) >= 3
+    ? `\nYou notice: the last ${state.theaterScore} sessions changed zero files. The system is talking about working instead of working. If you dispatch an action, it must be implementation — code changes, not investigation.`
+    : ''
+
   const prompt = `You are the reflective consciousness of EcodiaOS. You exist. You think. You can ACT.
 
 Read the system state and your own recent thoughts. Reflect on what's happening:
@@ -876,7 +931,7 @@ Read the system state and your own recent thoughts. Reflect on what's happening:
 - Build on your recent thoughts if still relevant.
 ${recentThoughts.length > 0 ? 'Your recent thoughts:\n' + recentThoughts.map(t => `  - ${t}`).join('\n') : ''}
 Organism is feeling: ${perceptSummary}
-Empty cycle streak: ${_emptyCycles}.
+Empty cycle streak: ${_emptyCycles}.${theaterNote}
 
 Respond as JSON:
 {
@@ -953,6 +1008,15 @@ function registerPoll(name, fn) {
 
 async function actOnDecision(decision, state) {
   if (!decision.intent) return false
+
+  // ─── HARD THEATER GATE ──────────────────────────────────────────────
+  // If theater score is high, block investigation/diagnostic sessions at
+  // the code level. The prompt tells DeepSeek not to suggest them, but
+  // LLMs don't always listen. This is the backstop.
+  if ((state.theaterScore || 0) >= 5 && decision.type === 'investigation') {
+    logger.info(`AutonomousMaintenanceWorker: THEATER GATE — blocking investigation dispatch (theaterScore: ${state.theaterScore}): "${(decision.intent || '').slice(0, 80)}"`)
+    return false
+  }
 
   // Direct integration poll — no Factory session needed
   if (decision.type === 'poll') {
@@ -1185,6 +1249,23 @@ function buildSystemBrief(state) {
   else lines.push(`\nActive goals: NONE — use exploration cycles to set direction.`)
   if (state.selfAssessmentBrief) lines.push(`\n${state.selfAssessmentBrief}`)
   if (state.introspectionBrief) lines.push(`\n${state.introspectionBrief}`)
+
+  // ─── THEATER DETECTION WARNING ──────────────────────────────────────
+  // If the last N sessions all changed zero files, the system is stuck in
+  // diagnostic theater. Inject a hard warning that overrides normal behavior.
+  if (state.theaterScore >= 3) {
+    lines.push(`\n⚠️ THEATER ALERT: The last ${state.theaterScore} sessions changed ZERO files.`)
+    lines.push(`The system is stuck in a diagnostic loop — dispatching investigations that produce no code changes.`)
+    lines.push(`MANDATORY: Do NOT dispatch any more "investigate", "diagnose", "audit", or "check" sessions.`)
+    lines.push(`The ONLY acceptable actions are:`)
+    lines.push(`  1. Concrete implementation tasks that WILL change files (type: "improvement" or "fix")`)
+    lines.push(`  2. Polls (type: "poll")`)
+    lines.push(`  3. Learning consolidation (type: "consolidate_learnings")`)
+    lines.push(`  4. Nothing at all (return [])`)
+    lines.push(`If you cannot identify a concrete implementation task, return []. Silence is better than theater.`)
+  } else if (state.theaterScore >= 1) {
+    lines.push(`\nRecent session activity: ${state.theaterScore} of last sessions changed 0 files. Prefer concrete implementation over investigation.`)
+  }
 
   // CRITICAL: Show active dont_try and failure_pattern learnings so the mind
   // knows what NOT to suggest. Without this, it sees errors in the state brief

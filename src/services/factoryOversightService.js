@@ -916,8 +916,40 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
       parsed.confidence = Math.max(0, Math.min(1, Number(parsed.confidence) || 0.5))
     }
 
-    // Skip "none" learnings — the LLM decided nothing specific was worth saving
+    // ─── ANTI-THEATER: Force-record structural failures ────────────────
+    // When a session FAILS but the LLM says "nothing to learn", that's the
+    // exact scenario that causes the theater loop: the failure is invisible
+    // to next cycle, so it re-dispatches the same investigation forever.
+    // Force a dont_try learning so the system remembers it tried and failed.
     if (parsed.pattern_type === 'none' || !parsed.pattern_description || parsed.pattern_description.length <= 10) {
+      if (outcome !== 'success') {
+        const taskSnippet = (session.initial_prompt || '').slice(0, 150)
+        const errorSnippet = (details.error || details.reason || 'unknown failure').slice(0, 150)
+        const forcedDescription = `Session failed with no specific learning extractable. Task: "${taskSnippet}" — Error: "${errorSnippet}". Do not re-attempt this exact task without a fundamentally different approach.`
+        const forcedKeywords = _extractForcedKeywords(session.initial_prompt || '', details.error || '')
+
+        logger.info(`Learning extraction: forcing dont_try for failed session with no learning`, { sessionId: session.id })
+
+        await db`
+          INSERT INTO factory_learnings (codebase_id, pattern_type, pattern_description, confidence, success, session_ids, evidence)
+          VALUES (${session.codebase_id || null},
+                  'dont_try',
+                  ${forcedDescription},
+                  ${0.5},
+                  ${false},
+                  ${[session.id]},
+                  ${JSON.stringify({ keywords: forcedKeywords, task: taskSnippet, files: session.files_changed || [], forced: true })})
+        `
+
+        emitEvent('factory:learning_recorded', {
+          sessionId: session.id,
+          codebaseName: session.codebase_name,
+          patternType: 'dont_try',
+          merged: false,
+          forced: true,
+        })
+        return
+      }
       logger.debug('Learning extraction: LLM found nothing specific to remember', { sessionId: session.id })
       return
     }
@@ -1318,6 +1350,19 @@ async function backfillMissedLearnings(batchSize = 10) {
   }
 
   return stats
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
+
+// Extract keywords from task+error for forced dont_try learnings.
+// Simpler than the full stemmer pipeline — just grab meaningful words.
+function _extractForcedKeywords(task, error) {
+  const STOP = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were', 'been', 'have', 'has', 'had', 'not', 'but', 'all', 'can', 'will', 'just', 'should', 'would', 'could', 'into', 'about', 'than', 'then', 'when', 'what', 'which', 'there', 'their', 'some', 'error', 'failed', 'investigate', 'check', 'look', 'find', 'fix', 'session'])
+  const text = `${task} ${error}`.toLowerCase()
+  return [...new Set(
+    text.split(/[^a-z0-9]+/)
+      .filter(w => w.length > 3 && !STOP.has(w))
+  )].slice(0, 10)
 }
 
 module.exports = {
