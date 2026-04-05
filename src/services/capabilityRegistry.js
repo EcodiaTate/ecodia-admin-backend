@@ -90,6 +90,15 @@ async function execute(name, params = {}, context = {}) {
     if (pressureBlock) return pressureBlock
   }
 
+  // Coerce stringified arrays/objects — AI often serializes nested params as JSON strings
+  if (cap.params) {
+    for (const [key, schema] of Object.entries(cap.params)) {
+      if (params[key] && typeof params[key] === 'string' && (schema.type === 'array' || schema.type === 'object')) {
+        try { params[key] = JSON.parse(params[key]) } catch (_) { /* leave as-is */ }
+      }
+    }
+  }
+
   try {
     const result = await cap.handler(params, context)
     logger.debug(`CapabilityRegistry: executed "${name}"`, { domain: cap.domain })

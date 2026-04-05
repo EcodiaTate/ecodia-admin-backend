@@ -81,7 +81,7 @@ registry.registerMany([
   // ─── Shell Command ───────────────────────────────────────────────
   {
     name: 'run_shell_command',
-    description: 'Run a shell command on the VPS. For quick operations: checking logs, service status, disk space, git status, process info. NOT for code changes — use Factory CC sessions for that.',
+    description: 'Run a shell command on the VPS. Backend code is at ~/ecodiaos/ (Node/Express, no Prisma — uses raw postgres.js). Python organism is at ~/organism/. PM2 manages processes. For quick operations: checking logs, service status, disk space, git status, process info. NOT for code changes.',
     tier: 'write',
     domain: 'system',
     priority: 'critical',  // always allowed — needed for diagnostics even under pressure

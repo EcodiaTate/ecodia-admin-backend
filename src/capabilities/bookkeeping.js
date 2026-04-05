@@ -134,6 +134,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
+      // AI sometimes sends lines as a JSON string instead of array
+      if (typeof params.lines === 'string') params.lines = JSON.parse(params.lines)
       const totalDebit = params.lines.reduce((s, l) => s + (l.debit_cents || 0), 0)
       const totalCredit = params.lines.reduce((s, l) => s + (l.credit_cents || 0), 0)
       if (totalDebit !== totalCredit) throw new Error(`Journal unbalanced: debits=${totalDebit} credits=${totalCredit}`)
