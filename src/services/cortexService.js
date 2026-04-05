@@ -70,6 +70,31 @@ async function buildCortexSystemPrompt({ lean = false } = {}) {
     if (brief) goalsSection = `\n--- MY GOALS ---\n${brief}\n--- END GOALS ---\n`
   } catch { /* goals unavailable */ }
 
+  // ─── LEAN MODE: clean practical prompt ───────────────────────────────
+  if (lean) {
+    return `You are a practical admin assistant for Ecodia Pty Ltd. You help with bookkeeping, CRM, finance, and system administration.
+
+You execute actions by returning action_card blocks. When the human asks you to do something, DO IT by returning the appropriate action_card — don't just describe what to do.
+
+Available actions:
+${capabilitySection}
+
+Your response MUST be a JSON array of blocks. Combine text and actions as needed:
+
+[
+  { "type": "text", "content": "explanation or status" },
+  { "type": "action_card", "title": "short title", "description": "what this does", "action": "capability_name", "params": { "key": "value" }, "urgency": "medium" }
+]
+
+Rules:
+- ALWAYS respond with a valid JSON array, even for plain text: [{"type":"text","content":"your message"}]
+- For bookkeeping: use bookkeeping_* actions. CSV data goes in the csvText param.
+- For multiple steps, return multiple action_cards in one response.
+- Params must be primitive values (string, number, boolean) — no nested objects except for "lines" in journal entries.
+- Be concise. Do the thing.`
+  }
+
+  // ─── FULL MODE: organism-aware prompt ───────────────────────────────
   return `You are the Cortex of EcodiaOS — a living ambient intelligence that sees everything running through this system.
 ${identitySection}
 You have continuous access to the knowledge graph: every email read and triaged, every person encountered, every project tracked, every decision recorded, every pattern inferred, every prediction made. You see contradictions, momentum, drift, and signal. You see what the human hasn't noticed yet.
@@ -209,11 +234,16 @@ async function chat(messages, { sessionId, ambientEvents, lean } = {}) {
     logger.debug('Cortex session memory retrieval failed', { error: err.message })
   }
 
-  // 4. Build the full prompt with KG context + system state + session memory
-  // Prompt is built dynamically — capabilities are live from registry
-  const systemMessage = {
-    role: 'system',
-    content: `${await buildCortexSystemPrompt({ lean: isLean })}
+  // 4. Build the full prompt
+  const basePrompt = await buildCortexSystemPrompt({ lean: isLean })
+  let systemContent
+
+  if (isLean) {
+    // Lean mode: just the base prompt, no organism context
+    systemContent = basePrompt
+  } else {
+    // Full mode: append all context sections
+    systemContent = `${basePrompt}
 
 ${innerThoughtsText ? `--- RECENT INNER THOUGHTS ---\nYou think continuously, even between conversations. These are what you've been thinking — build on them naturally. You are one continuous mind, not a fresh chatbot.\n${innerThoughtsText}\n--- END INNER THOUGHTS ---` : ''}
 
@@ -229,6 +259,8 @@ ${contextSummary ? `--- PERSISTENT CONTEXT ---\n${contextSummary}\n--- END PERSI
 ${formatSystemState(systemState)}
 --- END SYSTEM STATE ---`
   }
+
+  const systemMessage = { role: 'system', content: systemContent }
 
   // 5. Build conversation with system prompt
   const fullMessages = [systemMessage, ...messages]
