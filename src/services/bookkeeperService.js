@@ -254,23 +254,31 @@ async function deleteRule(id) {
 // CATEGORIZATION (rule match first, then DeepSeek)
 // ═══════════════════════════════════════════════════════════════════════
 
-const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered company.
-Director Tate Donohoe uses personal and business accounts interchangeably.
-Known personal contacts: Casey Donohoe, T J Donohoe, Angelica Choppin.
+const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company.
+These transactions come from the director's PERSONAL bank account. Most are personal spending that has nothing to do with the business.
+
+CRITICAL DISTINCTION:
+- BUSINESS expenses (software, hosting, domains, advertising, office supplies for Ecodia) → categorize to the right GL account. These create a Director Loan entry (company owes Tate).
+- PURELY PERSONAL expenses (fuel, food, drinks, tobacco, groceries, personal transfers, pharmacy, entertainment, bars, restaurants) → set account_code to "DISCARD" and is_personal=true. These should NOT enter the books at all.
+- Transfers between Tate's own accounts (SAV, savings) → "DISCARD"
+- Bank fees (monthly fee, int tran fee) → 5045 Bank Fees (business expense, the account costs money to run)
+- $0.00 transactions (invalid PIN, etc.) → "DISCARD"
 
 Chart of accounts:
-1000 Bank (Operating) — asset | 1100 Stripe Clearing — asset | 1200 Accounts Receivable — asset
-2100 Director Loan — liability | 2110 GST Paid — asset | 2120 GST Collected — liability
-4000 ECO Local Contributions — income | 4100 Ecodia Software Development — income
-5005 Advertising & Marketing — expense | 5010 Software & SaaS — expense
-5015 Stripe Fees — expense | 5020 Contractor Services — expense
-5025 Legal & Compliance — expense | 5030 Office Supplies — expense
-5035 Motor Vehicle — expense | 5040 IP Licence Expense — expense
+1000 Bank (Operating) | 1100 Stripe Clearing | 1200 Accounts Receivable
+2100 Director Loan | 2110 GST Paid | 2120 GST Collected
+4000 ECO Local Contributions — income | 4100 Ecodia Software Dev — income
+5005 Advertising & Marketing | 5010 Software & SaaS | 5015 Stripe Fees
+5020 Contractor Services | 5025 Legal & Compliance | 5030 Office Supplies
+5035 Motor Vehicle | 5040 IP Licence | 5045 Bank Fees | 5050 Food & Entertainment
 
 Supplier rules: {rules}
 
 Respond with JSON array. Each: { "source_ref", "account_code", "supplier_name", "is_personal", "gst_amount_cents", "tags":[], "confidence", "reasoning" }
-GST = total/11 for standard business expenses. Personal deposits → 2100, is_personal=true. Ambiguous → confidence<0.7.`
+- account_code = "DISCARD" for purely personal transactions that don't belong in the books
+- GST: domestic business expenses = total/11. International SaaS = 0 (GST-free). Personal = 0.
+- is_personal = true for DISCARD items AND for director loan items paid from personal bank
+- Ambiguous → confidence < 0.7`
 
 async function categorizeTransactions(transactions) {
   if (!transactions.length) return []
@@ -351,8 +359,22 @@ async function autoCategorize() {
     if (!tx) continue
 
     const confidence = result.confidence || 0
-    const status = confidence >= 0.7 ? 'categorized' : 'flagged'
     const tags = result.tags || []
+
+    // DISCARD = purely personal, doesn't belong in the books at all
+    if (result.account_code === 'DISCARD') {
+      await updateStaged(tx.id, {
+        category: 'DISCARD',
+        is_personal: true,
+        confidence,
+        categorizer_reasoning: result.reasoning,
+        status: 'ignored',
+      })
+      categorized++
+      continue
+    }
+
+    const status = confidence >= 0.7 ? 'categorized' : 'flagged'
 
     await updateStaged(tx.id, {
       category: result.account_code,
