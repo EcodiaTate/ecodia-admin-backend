@@ -27,6 +27,7 @@ const momentumRoutes = require('./routes/momentum')
 const internalCortexStateRoutes = require('./routes/internalCortexState')
 const organismMetricsRoutes = require('./routes/organismMetrics')
 const bookkeepingRoutes = require('./routes/bookkeeping')
+const osRoutes = require('./routes/os')
 
 const app = express()
 
@@ -76,6 +77,7 @@ app.use('/api/momentum', momentumRoutes)
 app.use('/internal/cortex-state', internalCortexStateRoutes)
 app.use('/api/v1/organism/metrics', organismMetricsRoutes)
 app.use('/api/bookkeeping', bookkeepingRoutes)
+app.use('/api/os', osRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)
