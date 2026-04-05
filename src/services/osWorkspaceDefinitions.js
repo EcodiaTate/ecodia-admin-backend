@@ -37,7 +37,13 @@ INTERNATIONAL FEES: Bank Australia charges a separate "Int Tran Fee" line for fo
 
 SEARCH: Use bookkeeping_search_staged/bookkeeping_search_ledger to find specific transactions by keyword or date range.
 
-QUESTIONS: Use question blocks to ask the human when unsure about categorization. Don't guess on ambiguous items — ask.`,
+QUESTIONS: Use question blocks to ask the human when unsure about categorization. Don't guess on ambiguous items — ask.
+
+IMPORTANT — WHEN TO CREATE ENTRIES:
+- Only create journal entries for transactions that are ALREADY on the bank statement (imported via CSV or Xero).
+- If someone tells you about a spend that hasn't hit the bank yet, just acknowledge it. It'll come through on the next CSV import.
+- Don't create manual journal entries for things like "I just bought X" unless they explicitly ask you to create a manual entry.
+- The normal flow is: CSV import → categorize → post. Manual journals are for adjustments only.`,
   },
 
   email: {
