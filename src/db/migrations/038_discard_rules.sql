@@ -12,7 +12,9 @@ INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, g
   ('netflix|disney\+|spotify|stan |binge|youtube premium', 'Personal (streaming)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard"]'),
   ('uber(?!.*eats)|lyft|didi|taxi|cab charge', 'Personal (transport)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard"]'),
   ('invalid pin', 'Invalid PIN (discard)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["discard","zero"]'),
-  ('changing.*bank|bank.*transfer|internal transfer|between accounts', 'Personal (bank transfer)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard","transfer"]')
+  ('changing.*bank|bank.*transfer|internal transfer|between accounts', 'Personal (bank transfer)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard","transfer"]'),
+  ('transfer from up|transfer to up|up bank', 'Personal (Up Bank transfer)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard","transfer"]'),
+  ('transfer from sav|transfer to sav|received from sav', 'Personal (savings transfer)', 'DISCARD', TRUE, 'no_gst', 'seeded', '["personal","discard","transfer"]')
 ON CONFLICT DO NOTHING;
 
 -- Update existing personal rules to DISCARD instead of director loan
