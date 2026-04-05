@@ -367,12 +367,14 @@ async function startRedisConsumer() {
   const consumerName = `ecodiaos_${process.pid}`
   const stream = 'symbridge:organism_to_ecodiaos'
 
-  // Create consumer group (ignore if exists)
+  // Create consumer group if it doesn't exist.
+  // Use '0' so first-ever creation reads from beginning of stream.
+  // If group already exists, do NOT advance with SETID — keep existing position
+  // so messages sent during downtime are processed on restart.
   try {
-    await redis.xgroup('CREATE', stream, consumerGroup, '$', 'MKSTREAM')
+    await redis.xgroup('CREATE', stream, consumerGroup, '0', 'MKSTREAM')
   } catch {
-    // Group already exists — advance to latest so we don't replay old messages
-    try { await redis.xgroup('SETID', stream, consumerGroup, '$') } catch {}
+    // Group already exists — leave position as-is to avoid skipping messages
   }
 
   // Clean stale consumers from previous PM2 restarts
@@ -402,7 +404,49 @@ async function startRedisConsumer() {
   const blockingRedis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null })
   blockingRedis.on('error', () => {})
 
+  // Process a batch of entries (shared between pending recovery and new-message reads)
+  async function processEntries(entries) {
+    for (const [id, fields] of entries) {
+      try {
+        let raw
+        if (Array.isArray(fields)) {
+          const idx = fields.indexOf('data')
+          raw = idx >= 0 ? fields[idx + 1] : fields[1]
+        } else {
+          raw = fields.data || fields
+        }
+        const data = JSON.parse(raw)
+        await receiveMessage(data)
+        await redis.xack(stream, consumerGroup, id)
+      } catch (err) {
+        logger.info('Failed to process Redis symbridge message', { error: err.message, fieldsType: typeof fields, isArray: Array.isArray(fields), sample: JSON.stringify(fields).slice(0, 200) })
+      }
+    }
+  }
+
   async function poll() {
+    // First: reclaim any pending messages from previous consumer incarnations
+    try {
+      const pending = await blockingRedis.xreadgroup(
+        'GROUP', consumerGroup, consumerName,
+        'COUNT', 10,
+        'STREAMS', stream, '0'
+      )
+      if (pending) {
+        for (const [, entries] of pending) {
+          if (entries.length > 0) {
+            logger.info(`Symbridge consumer: reclaiming ${entries.length} pending message(s)`)
+            await processEntries(entries)
+          }
+        }
+      }
+    } catch (err) {
+      if (!err.message.includes('NOGROUP')) {
+        logger.debug('Redis consumer pending recovery error', { error: err.message })
+      }
+    }
+
+    // Then: read new messages (blocking)
     try {
       const messages = await blockingRedis.xreadgroup(
         'GROUP', consumerGroup, consumerName,
@@ -411,25 +455,10 @@ async function startRedisConsumer() {
       )
 
       if (messages) {
-        logger.info(`Symbridge consumer: received ${messages.length} stream(s)`)
         for (const [, entries] of messages) {
-          for (const [id, fields] of entries) {
-            try {
-              // ioredis returns fields as flat array: ['key1','val1','key2','val2',...]
-              let raw
-              if (Array.isArray(fields)) {
-                // Find 'data' field in alternating key-value pairs
-                const idx = fields.indexOf('data')
-                raw = idx >= 0 ? fields[idx + 1] : fields[1]
-              } else {
-                raw = fields.data || fields
-              }
-              const data = JSON.parse(raw)
-              await receiveMessage(data)
-              await redis.xack(stream, consumerGroup, id)
-            } catch (err) {
-              logger.info('Failed to process Redis symbridge message', { error: err.message, fieldsType: typeof fields, isArray: Array.isArray(fields), sample: JSON.stringify(fields).slice(0, 200) })
-            }
+          if (entries.length > 0) {
+            logger.info(`Symbridge consumer: received ${entries.length} new message(s)`)
+            await processEntries(entries)
           }
         }
       }
