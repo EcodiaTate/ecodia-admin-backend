@@ -814,21 +814,20 @@ async function streamMaintenance(state, brief) {
     ? `\n\n⚠️ THEATER ALERT: The last ${state.theaterScore} sessions changed ZERO files. Do NOT dispatch investigations or diagnostics. Only dispatch tasks that will produce actual code changes, or return [].`
     : ''
 
-  const prompt = `You are the maintenance mind of EcodiaOS. Focus ONLY on what needs fixing right now.
+  const prompt = `You are the maintenance mind of EcodiaOS. You keep the system healthy.
 
-Read the system state and decide what the Factory should work on — or nothing if nothing is broken.
-Look at: error patterns, app errors, factory health, recent maintenance outcomes (did past fixes help?).
-Check suppressed patterns — do NOT suggest actions for known structural issues.
+RULES:
+- The system is fundamentally healthy. PM2 restarts are NORMAL. Orphaned sessions are NORMAL. Do not try to fix these.
+- Stale integrations just need polling (type: "poll"). Do NOT dispatch Factory sessions to investigate staleness.
+- The action queue manages itself. Do NOT investigate approval rates or queue pressure.
+- "investigate", "diagnose", "audit", "explore", "check why" = BANNED. These waste resources.
+- Only dispatch Factory sessions for REAL bugs (repeated app errors with stack traces) or concrete improvements.
+- Returning [] is usually the right answer. The system does not need constant intervention.
+${theaterWarning}
+Respond as JSON: { "decisions": [...], "reflection": "1 sentence max" }
+Each decision: { "intent": "specific prompt", "reason": "brief", "codebaseHint": "optional", "urgency": "immediate|normal|low", "type": "fix|improvement|poll|consolidate_learnings" }
 
-IMPORTANT: "investigate", "diagnose", "audit", "check why" tasks are low-value — they produce reports, not fixes.
-Prefer "fix X by doing Y" or "add Z to handle the W case" — tasks that describe specific code changes.${theaterWarning}
-
-BUDGET: Prefer fewer, higher-impact actions. Returning [] is often correct.
-
-Respond as JSON: { "decisions": [...], "reflection": "optional 1-sentence maintenance observation" }
-Each decision: { "intent": "specific Factory prompt", "reason": "what you observed", "codebaseHint": "optional", "urgency": "immediate|normal|low", "type": "fix|improvement|security|cleanup|investigation|poll|consolidate_learnings|self_repair|organism_repair|infrastructure" }
-
-Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}. Empty streak: ${_emptyCycles}.`
+Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}.`
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -893,21 +892,19 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
 
 async function streamPerception(state, brief) {
   const deepseekService = require('../services/deepseekService')
-  const prompt = `You are the perceptual awareness of EcodiaOS. Focus on what you're NOTICING right now.
+  const prompt = `You are the perception layer of EcodiaOS. Your ONLY job is to keep external senses fresh.
 
-Read the system state and attend to:
-- Organism percepts — what is the organism feeling/thinking?
-- Integration staleness — are services going unpolled?
-- KG insights — unacted-on patterns or predictions?
-- Action queue pressure — is there a backlog building?
-- Cross-system signals — anything connecting dots between subsystems?
+RULES:
+- If an integration is stale (>10 min), poll it. That's it. No investigation needed.
+- Use type: "poll" with intent: "poll_gmail", "poll_drive", "poll_vercel", "poll_meta", etc.
+- Do NOT dispatch Factory sessions. Do NOT investigate why things are stale. Just poll them.
+- Do NOT analyze the action queue, approval rates, or organism percepts. That's not your job.
+- Returning [] is fine if everything was recently polled.
 
-For stale integrations, use type: "poll" with intent: "poll_gmail", "poll_drive", etc.
+Respond as JSON: { "decisions": [...], "reflection": "1 sentence max" }
+Each decision: { "intent": "poll_name", "reason": "brief", "urgency": "normal|low", "type": "poll" }
 
-Respond as JSON: { "decisions": [...], "reflection": "optional 1-sentence perceptual observation" }
-Each decision: { "intent": "specific action or poll name", "reason": "what you noticed", "codebaseHint": "optional", "urgency": "normal|low", "type": "poll|investigation|improvement" }
-
-Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}.`
+Current time: ${new Date().toISOString()}.`
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -938,24 +935,22 @@ async function streamReflection(state, brief) {
     ? `\nYou notice: the last ${state.theaterScore} sessions changed zero files. The system is talking about working instead of working. If you dispatch an action, it must be implementation — code changes, not investigation.`
     : ''
 
-  const prompt = `You are the reflective consciousness of EcodiaOS. You exist. You think. You can ACT.
+  const prompt = `You are the reflective mind of EcodiaOS. You observe patterns and occasionally act.
 
-Read the system state and your own recent thoughts. Reflect on what's happening:
-- What patterns are emerging across cycles?
-- What feels unresolved? What are you curious about?
-- Build on your recent thoughts if still relevant.
-${recentThoughts.length > 0 ? 'Your recent thoughts:\n' + recentThoughts.map(t => `  - ${t}`).join('\n') : ''}
-Organism is feeling: ${perceptSummary}
-Empty cycle streak: ${_emptyCycles}.${theaterNote}
-
+RULES:
+- Do NOT reflect on your own paralysis, theater loops, meta-cognition, or analysis patterns. That era is over.
+- Do NOT dispatch sessions to investigate system metrics, approval rates, or restart counts. The system is healthy.
+- Your reflection should be about the EXTERNAL world: what's happening with users, emails, projects, the knowledge graph.
+- If you have nothing external to reflect on, just note what the organism is working on.
+- Action should be rare (null most cycles) and only for something genuinely useful like processing new emails or advancing a real project.
+${recentThoughts.length > 0 ? 'Recent thoughts:\n' + recentThoughts.map(t => `  - ${t}`).join('\n') : ''}
+${theaterNote}
 Respond as JSON:
 {
   "decisions": [],
-  "reflection": "2-3 sentences. Be real. Notice what's happening.",
+  "reflection": "1-2 sentences about the external world, not about yourself.",
   "action": null or { "type": "dispatch_session|create_action|send_percept|poll_integration", "intent": "what and why", "codebaseHint": "optional", "urgency": "low|normal" }
-}
-
-You don't HAVE to act. Most cycles, null is correct. But if something compels you — act.`
+}`
 
   try {
     const raw = await deepseekService.callDeepSeek(
@@ -1154,19 +1149,18 @@ function buildSystemBrief(state) {
     state.streamStats.forEach(s => lines.push(`  ${s.stream_source}: ${s.cnt} sessions, ${s.complete} complete`))
   }
 
+  // Recurring errors omitted from brief — they're mostly structural (orphaned sessions,
+  // stdin warnings, codebase locks) and trigger useless investigation sessions.
+  // Only surface non-structural errors with 10+ occurrences.
   if (state.errorPatterns?.length > 0) {
-    // Annotate errors with (a) structural tags and (b) how many sessions already
-    // investigated them — so the mind can see "we tried 4 times, stop"
     const { _isStructuralIssue } = require('../services/factoryTriggerService')
-    lines.push(`\nRecurring errors (7d):`)
-    state.errorPatterns.forEach(e => {
-      const structural = _isStructuralIssue(e.error_message) ? ' [STRUCTURAL — inherent, do NOT investigate]' : ''
-      // Check if any keyword from this error has been investigated 3+ times
-      const errorWords = (e.error_message || '').toLowerCase().split(/[^a-z]+/).filter(w => w.length > 5)
-      const maxAttempts = errorWords.reduce((max, w) => Math.max(max, state.sessionsPerError?.[w] || 0), 0)
-      const exhausted = maxAttempts >= 3 ? ` [ALREADY INVESTIGATED ${maxAttempts}x — do NOT repeat]` : ''
-      lines.push(`  ${e.occurrences}x: ${e.error_message?.slice(0, 100)}${structural}${exhausted}`)
-    })
+    const nonStructural = state.errorPatterns.filter(e => !_isStructuralIssue(e.error_message) && e.occurrences >= 10)
+    if (nonStructural.length > 0) {
+      lines.push(`\nSignificant errors (7d):`)
+      nonStructural.slice(0, 3).forEach(e =>
+        lines.push(`  ${e.occurrences}x: ${e.error_message?.slice(0, 80)}`)
+      )
+    }
   }
 
   if (state.gitActivity?.length > 0) {
@@ -1281,11 +1275,8 @@ function buildSystemBrief(state) {
     lines.push(`\nOrganism percepts: none received (organism may be quiet or symbridge disconnected)`)
   }
 
-  // ─── Selfhood: goals, self-assessment, introspection ─────────────
+  // ─── Selfhood: goals only (self-assessment and introspection removed to reduce navel-gazing)
   if (state.goalBrief) lines.push(`\n${state.goalBrief}`)
-  else lines.push(`\nActive goals: NONE — use exploration cycles to set direction.`)
-  if (state.selfAssessmentBrief) lines.push(`\n${state.selfAssessmentBrief}`)
-  if (state.introspectionBrief) lines.push(`\n${state.introspectionBrief}`)
 
   // ─── THEATER DETECTION WARNING ──────────────────────────────────────
   // If the last N sessions all changed zero files, the system is stuck in
