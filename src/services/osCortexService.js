@@ -8,7 +8,7 @@ const { callDeepSeek } = require('./deepseekService')
 const registry = require('./capabilityRegistry')
 const db = require('../config/db')
 const logger = require('../config/logger')
-const { getWorkspace } = require('./osWorkspaceDefinitions')
+const { getWorkspace, listWorkspaces } = require('./osWorkspaceDefinitions')
 
 const MAX_HISTORY_TURNS = parseInt(process.env.OS_MAX_HISTORY_TURNS || '20')
 const TASK_TIMEOUT_MS = parseInt(process.env.OS_TASK_TIMEOUT_MS || '280000') // under nginx 300s
@@ -59,31 +59,71 @@ function formatCapabilities(domains) {
   return lines.join('\n')
 }
 
+async function listAllDocs(workspace) {
+  if (workspace) {
+    return db`SELECT key, title, workspace, updated_by, updated_at FROM os_docs WHERE workspace = ${workspace} OR workspace IS NULL ORDER BY workspace NULLS LAST, key`
+  }
+  return db`SELECT key, title, workspace, updated_by, updated_at FROM os_docs ORDER BY workspace NULLS LAST, key`
+}
+
 async function buildSystemPrompt(workspaceName) {
-  const ws = getWorkspace(workspaceName)
-  if (!ws) throw new Error(`Unknown workspace: ${workspaceName}`)
+  const ws = workspaceName ? getWorkspace(workspaceName) : null
 
-  // Load everything in parallel
-  const [coreFacts, docs, stateResults] = await Promise.all([
-    getCoreContext(),
-    loadDocs(ws.autoLoadDocs),
-    runStateQueries(ws.stateQueries),
-  ])
-
-  // Core facts section
+  // Load core facts always
+  const coreFacts = await getCoreContext()
   const factsBlock = coreFacts.map(f => `${f.key}: ${f.value}`).join('\n')
 
-  // State section
+  // If no workspace, build a general prompt with workspace options
+  if (!ws) {
+    const workspaceList = listWorkspaces().map(w => `- ${w.name}: ${w.description}`).join('\n')
+    const allDocs = await listAllDocs()
+    const docList = allDocs.map(d => `- ${d.key} (${d.workspace || 'global'}) — ${d.title}`).join('\n')
+
+    return `You are a practical operations assistant for Ecodia Pty Ltd. You can chat generally or activate a workspace for focused work.
+
+--- CORE FACTS ---
+${factsBlock}
+
+Available workspaces (tell the human to switch if they need focused tools):
+${workspaceList}
+
+Available reference docs (use need_doc to load any):
+${docList || '(none yet)'}
+
+RESPONSE FORMAT: Return a JSON array of blocks.
+  {"type":"text","content":"..."} — message to the human
+  {"type":"need_doc","docKey":"..."} — load a reference doc
+  {"type":"question","content":"..."} — ask the human a question
+  {"type":"update_doc","docKey":"...","title":"...","content":"..."} — create/update a doc
+  {"type":"update_context","key":"...","value":"..."} — update a core fact
+
+You have no action tools in general mode. If the human needs to run actions (bookkeeping, email, etc.), suggest they switch to the relevant workspace.
+Return ONLY the JSON array, no markdown fences, no prose outside the array.`
+  }
+
+  // Workspace-activated prompt
+  const [docs, stateResults, allDocs] = await Promise.all([
+    loadDocs(ws.autoLoadDocs),
+    runStateQueries(ws.stateQueries),
+    listAllDocs(ws.name),
+  ])
+
   const stateLines = Object.entries(stateResults).map(([label, val]) => {
     if (typeof val === 'number' || typeof val === 'string') return `${label}: ${val}`
     if (Array.isArray(val)) return `${label}:\n${val.map(r => '  ' + JSON.stringify(r)).join('\n')}`
     return `${label}: ${JSON.stringify(val)}`
   }).join('\n')
 
-  // Docs section
+  // Auto-loaded docs
   const docsBlock = docs.map(d => `[${d.title}]\n${d.content}`).join('\n\n')
 
-  // Capabilities
+  // List of OTHER docs available to load on demand
+  const loadedKeys = new Set(ws.autoLoadDocs)
+  const otherDocs = allDocs.filter(d => !loadedKeys.has(d.key))
+  const otherDocsLine = otherDocs.length
+    ? `\nOther docs available (use need_doc to load): ${otherDocs.map(d => d.key).join(', ')}`
+    : ''
+
   const capsBlock = formatCapabilities(ws.domains)
 
   return `You are a practical operations assistant. Execute tasks by returning JSON blocks. Be direct — do the work, don't explain what you could do.
@@ -95,9 +135,9 @@ ${factsBlock}
 ${ws.systemPromptAddition}
 
 Current state:
-${stateLines || '(no state queries configured)'}
+${stateLines || '(no live state)'}
 
-${docsBlock ? `--- REFERENCE DOCS ---\n${docsBlock}\n--- END DOCS ---` : ''}
+${docsBlock ? `--- REFERENCE DOCS ---\n${docsBlock}\n--- END DOCS ---` : ''}${otherDocsLine}
 
 Available actions:
 ${capsBlock}
@@ -106,15 +146,21 @@ RESPONSE FORMAT: Return a JSON array of blocks. Each block has a "type" field.
 Block types:
   {"type":"text","content":"..."} — message to the human
   {"type":"action_card","action":"capability_name","params":{...}} — execute an action
-  {"type":"need_doc","docKey":"..."} — request a reference doc to be loaded
-  {"type":"update_doc","docKey":"...","title":"...","content":"..."} — create/update a reference doc
+  {"type":"need_doc","docKey":"..."} — request a reference doc by key
+  {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."} — create/update/rename a reference doc. Set workspace to scope it. The AI manages doc organisation.
   {"type":"update_context","key":"...","value":"..."} — update a core fact
-  {"type":"question","content":"..."} — pause and ask the human a question
+  {"type":"question","content":"..."} — pause and ask the human a question (they can answer, then you continue)
   {"type":"done","summary":"..."} — signal task completion
+
+Doc management:
+- You own the docs. Create, rename, reorganise, split, or merge them as needed.
+- Store CSV upload references, working notes, partial results — anything useful for future sessions.
+- Title docs clearly so you can find them later. Use workspace field to scope them.
+- Don't force-load docs you don't need. Load on demand with need_doc.
 
 Rules:
 - Execute actions immediately, don't ask permission unless genuinely ambiguous
-- When you need more info from a doc, use need_doc to load it
+- Use question blocks to ask the human when you need clarification — you stay in workspace mode
 - Return ONLY the JSON array, no markdown fences, no prose outside the array
 - Multiple actions can be in one response
 - After action results come back, continue working or signal done`
@@ -228,7 +274,7 @@ async function runTask(taskId, userMessages, { workspace }) {
   // Load or create task session
   let session = taskId ? await loadTaskSession(taskId) : null
   if (!session) {
-    session = await createTaskSession(workspace, null)
+    session = await createTaskSession(workspace || 'general', null)
     taskId = session.id
   }
 
@@ -278,7 +324,7 @@ async function runTask(taskId, userMessages, { workspace }) {
     // Handle doc updates (fire-and-forget-ish)
     for (const du of docUpdates) {
       try {
-        await upsertDoc(du.docKey, du.title || du.docKey, du.content, workspace)
+        await upsertDoc(du.docKey, du.title || du.docKey, du.content, du.workspace || workspace)
         logger.info('OS Cortex: AI updated doc', { docKey: du.docKey })
       } catch (err) {
         logger.warn('OS Cortex: doc update failed', { docKey: du.docKey, error: err.message })

@@ -651,6 +651,46 @@ async function importXeroTransactions() {
   return { imported }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// SEARCH: Keyword and date-range queries
+// ═══════════════════════════════════════════════════════════════════════
+
+async function searchStaged({ keyword, dateFrom, dateTo, status, limit = 50 } = {}) {
+  const conditions = []
+  const params = []
+  if (keyword) conditions.push(`description ILIKE '%' || $${params.push(keyword)} || '%'`)
+  if (dateFrom) conditions.push(`occurred_at >= $${params.push(dateFrom)}`)
+  if (dateTo) conditions.push(`occurred_at <= $${params.push(dateTo)}`)
+  if (status) conditions.push(`status = $${params.push(status)}`)
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
+  return db.unsafe(
+    `SELECT * FROM staged_transactions ${where} ORDER BY occurred_at DESC LIMIT $${params.push(limit)}`,
+    params,
+  )
+}
+
+async function searchLedger({ keyword, dateFrom, dateTo, accountCode, limit = 50 } = {}) {
+  const conditions = []
+  const params = []
+  if (keyword) conditions.push(`t.description ILIKE '%' || $${params.push(keyword)} || '%'`)
+  if (dateFrom) conditions.push(`t.occurred_at >= $${params.push(dateFrom)}`)
+  if (dateTo) conditions.push(`t.occurred_at <= $${params.push(dateTo)}`)
+  if (accountCode) conditions.push(`EXISTS (SELECT 1 FROM ledger_lines l WHERE l.tx_id = t.id AND l.account_code = $${params.push(accountCode)})`)
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
+  const txs = await db.unsafe(
+    `SELECT * FROM ledger_transactions t ${where} ORDER BY t.occurred_at DESC LIMIT $${params.push(limit)}`,
+    params,
+  )
+  const result = []
+  for (const t of txs) {
+    const lines = await db`
+      SELECT l.*, a.name AS account_name FROM ledger_lines l
+      JOIN gl_accounts a ON a.code = l.account_code WHERE l.tx_id = ${t.id}`
+    result.push({ ...t, lines })
+  }
+  return result
+}
+
 module.exports = {
   parseAnyBankCSV, upsertStaged, listStaged, getStaged, updateStaged,
   markPosted, markIgnored, getStagedCounts,
@@ -661,4 +701,5 @@ module.exports = {
   getBASReport, getPnLReport, getBalanceSheet, getExpenseBreakdown,
   getDirectorLoanBalance, getGSTSummary,
   importXeroTransactions,
+  searchStaged, searchLedger,
 }

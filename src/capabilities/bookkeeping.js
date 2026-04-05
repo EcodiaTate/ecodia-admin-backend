@@ -362,6 +362,52 @@ registry.registerMany([
       return await bk.getDirectorLoanBalance()
     },
   },
+  // ═══════════════════════════════════════════════════════════════════════
+  // SEARCH: Find transactions by keyword, date, account
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_search_staged',
+    description: 'Search staged (unposted) transactions by keyword, date range, or status. Good for finding specific transactions before posting.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      keyword: { type: 'string', required: false, description: 'Search term matched against description (case-insensitive)' },
+      date_from: { type: 'string', required: false, description: 'Start date YYYY-MM-DD' },
+      date_to: { type: 'string', required: false, description: 'End date YYYY-MM-DD' },
+      status: { type: 'string', required: false, description: 'Filter: pending, categorized, posted, flagged, ignored' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const rows = await bk.searchStaged({
+        keyword: params.keyword, dateFrom: params.date_from, dateTo: params.date_to,
+        status: params.status, limit: params.limit || 50,
+      })
+      return { transactions: rows, count: rows.length }
+    },
+  },
+  {
+    name: 'bookkeeping_search_ledger',
+    description: 'Search posted ledger entries by keyword, date range, or account code. Returns journal entries with their double-entry lines.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      keyword: { type: 'string', required: false, description: 'Search term matched against description (case-insensitive)' },
+      date_from: { type: 'string', required: false, description: 'Start date YYYY-MM-DD' },
+      date_to: { type: 'string', required: false, description: 'End date YYYY-MM-DD' },
+      account_code: { type: 'string', required: false, description: 'Filter by GL account code (e.g. "5010")' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const rows = await bk.searchLedger({
+        keyword: params.keyword, dateFrom: params.date_from, dateTo: params.date_to,
+        accountCode: params.account_code, limit: params.limit || 50,
+      })
+      return { entries: rows, count: rows.length }
+    },
+  },
+
   {
     name: 'bookkeeping_gst_position',
     description: 'Quick GST position check — how much GST collected vs paid, and whether Ecodia owes the ATO or gets a refund this quarter',

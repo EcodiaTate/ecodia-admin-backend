@@ -16,8 +16,8 @@ router.post('/run', async (req, res, next) => {
   res.setTimeout(300_000)
   try {
     const { taskId, workspace, messages } = req.body
-    if (!workspace) return res.status(400).json({ error: 'workspace is required' })
     if (!messages || !messages.length) return res.status(400).json({ error: 'messages is required' })
+    // workspace is optional — null means general chat without tools
 
     const result = await osCortex.runTask(taskId || null, messages, { workspace })
     res.json(result)
