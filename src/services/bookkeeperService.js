@@ -13,15 +13,27 @@ const deepseek = require('./deepseekService')
 // ═══════════════════════════════════════════════════════════════════════
 
 function parseBankAustraliaCSV(csvText) {
-  const lines = csvText.replace(/\r\n/g, '\n').split('\n')
-  if (lines.length < 2) return []
+  if (!csvText || typeof csvText !== 'string') {
+    logger.warn('Bookkeeper CSV: received empty or non-string input', { type: typeof csvText, length: csvText?.length })
+    return []
+  }
 
-  const header = lines[0].split(',').map(h => h.trim().replace(/^"/, '').replace(/"$/, ''))
+  const lines = csvText.replace(/\r\n/g, '\n').split('\n').filter(l => l.trim())
+  if (lines.length < 2) {
+    logger.warn('Bookkeeper CSV: less than 2 lines', { lineCount: lines.length, firstLine: lines[0]?.slice(0, 200) })
+    return []
+  }
+
+  const header = _parseCSVRow(lines[0]).map(h => h.trim())
+  logger.info('Bookkeeper CSV: parsed headers', { headers: header, lineCount: lines.length })
   const transactions = []
 
   for (let i = 1; i < lines.length; i++) {
     const row = _parseCSVRow(lines[i])
-    if (row.length < header.length) continue
+    if (row.length < header.length) {
+      if (lines[i].trim()) logger.debug('Bookkeeper CSV: skipping short row', { row: i, cols: row.length, expected: header.length })
+      continue
+    }
 
     const obj = {}
     header.forEach((h, j) => { obj[h] = row[j] })
@@ -29,7 +41,10 @@ function parseBankAustraliaCSV(csvText) {
     const debit = parseFloat(obj['Debit amount'] || '0')
     const credit = parseFloat(obj['Credit amount'] || '0')
     const amountCents = debit ? -Math.abs(Math.round(debit * 100)) : Math.abs(Math.round(credit * 100))
-    if (amountCents === 0) continue
+    if (amountCents === 0) {
+      if (i <= 3) logger.debug('Bookkeeper CSV: row has zero amount', { row: i, debitRaw: obj['Debit amount'], creditRaw: obj['Credit amount'], keys: Object.keys(obj) })
+      continue
+    }
 
     let occurredAt = null
     const dateStr = (obj['Effective date'] || '').trim()
@@ -39,7 +54,10 @@ function parseBankAustraliaCSV(csvText) {
     } else {
       occurredAt = dateStr
     }
-    if (!occurredAt) continue
+    if (!occurredAt) {
+      if (i <= 3) logger.debug('Bookkeeper CSV: row has no date', { row: i, dateRaw: obj['Effective date'], keys: Object.keys(obj) })
+      continue
+    }
 
     const raw = `${dateStr}${obj['Debit amount'] || ''}${obj['Credit amount'] || ''}${obj['Description'] || ''}${obj['Reference no'] || ''}`
     const sourceRef = `csv:${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
