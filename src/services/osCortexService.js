@@ -39,10 +39,10 @@ async function runStateQueries(queries) {
       const rows = await db.unsafe(sql)
       if (rows.length === 1 && rows[0].count !== undefined) {
         results[label] = rows[0].count
-      } else if (rows.length <= 5) {
+      } else if (rows.length <= 10) {
         results[label] = rows
       } else {
-        results[label] = `${rows.length} rows`
+        results[label] = rows.slice(0, 10)
       }
     } catch (err) {
       results[label] = `(query failed: ${err.message})`
@@ -105,74 +105,56 @@ Return ONLY the JSON array, no markdown fences, no prose outside the array.`
   }
 
   // Workspace-activated prompt
-  const [docs, stateResults, allDocs] = await Promise.all([
-    loadDocs(ws.autoLoadDocs),
+  const [stateResults, allDocs] = await Promise.all([
     runStateQueries(ws.stateQueries),
     listAllDocs(ws.name),
   ])
 
   const stateLines = Object.entries(stateResults).map(([label, val]) => {
     if (typeof val === 'number' || typeof val === 'string') return `${label}: ${val}`
-    if (Array.isArray(val)) return `${label}:\n${val.map(r => '  ' + JSON.stringify(r)).join('\n')}`
+    if (Array.isArray(val)) {
+      // Compact row format: pick key fields, skip nulls
+      const compact = val.map(r => {
+        const parts = Object.entries(r).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}=${v}`)
+        return '  ' + parts.join(' | ')
+      })
+      return `${label}:\n${compact.join('\n')}`
+    }
     return `${label}: ${JSON.stringify(val)}`
   }).join('\n')
 
-  // Auto-loaded docs — truncate individual docs to prevent prompt bloat
-  const MAX_DOC_CHARS = 3000
-  const docsBlock = docs.map(d => {
-    const content = d.content.length > MAX_DOC_CHARS
-      ? d.content.slice(0, MAX_DOC_CHARS) + '\n... (truncated, use need_doc for full content)'
-      : d.content
-    return `[${d.title}]\n${content}`
-  }).join('\n\n')
-
-  // List of OTHER docs available to load on demand
-  const loadedKeys = new Set(ws.autoLoadDocs)
-  const otherDocs = allDocs.filter(d => !loadedKeys.has(d.key))
-  const otherDocsLine = otherDocs.length
-    ? `\nOther docs available (use need_doc to load): ${otherDocs.map(d => d.key).join(', ')}`
+  // All docs listed as on-demand — no auto-loading into prompt
+  const docList = allDocs.length > 0
+    ? `Docs (use need_doc to load): ${allDocs.map(d => d.key).join(', ')}`
     : ''
 
   const capsBlock = formatCapabilities(ws.domains)
 
   return `You are a practical operations assistant. Execute tasks by returning JSON blocks. Be direct — do the work, don't explain what you could do.
 
---- CORE FACTS ---
-${factsBlock}
+${factsBlock ? `FACTS: ${factsBlock}` : ''}
 
---- WORKSPACE: ${ws.label} ---
+WORKSPACE: ${ws.label}
 ${ws.systemPromptAddition}
 
-Current state:
+STATE:
 ${stateLines || '(no live state)'}
 
-${docsBlock ? `--- REFERENCE DOCS ---\n${docsBlock}\n--- END DOCS ---` : ''}${otherDocsLine}
+${docList}
 
-Available actions:
+ACTIONS:
 ${capsBlock}
 
-RESPONSE FORMAT: Return a JSON array of blocks. Each block has a "type" field.
-Block types:
-  {"type":"text","content":"..."} — message to the human
-  {"type":"action_card","action":"capability_name","params":{...}} — execute an action
-  {"type":"need_doc","docKey":"..."} — request a reference doc by key
-  {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."} — create/update/rename a reference doc. Set workspace to scope it. The AI manages doc organisation.
-  {"type":"update_context","key":"...","value":"..."} — update a core fact
-  {"type":"question","content":"..."} — pause and ask the human a question (they can answer, then you continue)
-  {"type":"done","summary":"..."} — signal task completion
+FORMAT: JSON array of blocks. Types:
+  text: {"type":"text","content":"..."}
+  action: {"type":"action_card","action":"name","params":{...}}
+  load doc: {"type":"need_doc","docKey":"..."}
+  save doc: {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."}
+  update fact: {"type":"update_context","key":"...","value":"..."}
+  ask human: {"type":"question","content":"..."}
+  done: {"type":"done","summary":"..."}
 
-Doc management:
-- You own the docs. Create, rename, reorganise, split, or merge them as needed.
-- Store CSV upload references, working notes, partial results — anything useful for future sessions.
-- Title docs clearly so you can find them later. Use workspace field to scope them.
-- Don't force-load docs you don't need. Load on demand with need_doc.
-
-Rules:
-- Execute actions immediately, don't ask permission unless genuinely ambiguous
-- Use question blocks to ask the human when you need clarification — you stay in workspace mode
-- Return ONLY the JSON array, no markdown fences, no prose outside the array
-- Multiple actions can be in one response
-- After action results come back, continue working or signal done`
+Return ONLY the JSON array. Execute immediately. Multiple actions per response OK. After results come back, continue or signal done.`
 }
 
 // ═══════════════════════════════════════════════════════════════════════

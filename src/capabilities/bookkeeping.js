@@ -264,17 +264,33 @@ registry.registerMany([
   // ═══════════════════════════════════════════════════════════════════════
   {
     name: 'bookkeeping_list_staged',
-    description: 'List staged transactions by status. Status: pending, categorized, posted, flagged, ignored. Shows description, amount, category, confidence, date.',
+    description: 'List staged transactions by status. Status: pending, categorized, posted, flagged, ignored. Returns compact rows (no bloated metadata). Use offset to paginate.',
     tier: 'read',
     domain: 'bookkeeping',
     params: {
       status: { type: 'string', required: false, description: 'Filter by status (pending, categorized, posted, flagged, ignored). All if omitted.' },
-      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+      limit: { type: 'number', required: false, description: 'Max results (default 50, max 100)' },
+      offset: { type: 'number', required: false, description: 'Skip first N results for pagination' },
     },
     handler: async (params) => {
       const bk = require('../services/bookkeeperService')
-      const rows = await bk.listStaged(params.status || null, params.limit || 50)
-      return { transactions: rows, count: rows.length }
+      const limit = Math.min(params.limit || 50, 100)
+      const rows = await bk.listStaged(params.status || null, limit, params.offset || 0)
+      // Strip long_description to keep response compact — AI has description for context
+      const compact = rows.map(r => ({
+        id: r.id,
+        occurred_at: r.occurred_at,
+        amount_cents: r.amount_cents,
+        description: r.description,
+        category: r.category,
+        subcategory: r.subcategory,
+        is_personal: r.is_personal,
+        confidence: r.confidence,
+        status: r.status,
+        source_account: r.source_account,
+        categorizer_reasoning: r.categorizer_reasoning ? r.categorizer_reasoning.slice(0, 150) : null,
+      }))
+      return { transactions: compact, count: compact.length }
     },
   },
   {
@@ -1011,6 +1027,126 @@ registry.registerMany([
       await bk.updateStaged(params.id, { status: 'categorized', ledger_tx_id: null })
 
       return { message: `Unposted. Reversal: ${reversalId}`, reversal_id: reversalId }
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // QUESTION SURFACING & REVIEW
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_get_questions',
+    description: 'Get flagged transactions that need human input. Returns them as plain English questions.',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const flagged = await db`
+        SELECT id, description, occurred_at, amount_cents, category, categorizer_reasoning, confidence, source_account
+        FROM staged_transactions WHERE status = 'flagged'
+        ORDER BY occurred_at DESC LIMIT 20
+      `
+      if (flagged.length === 0) return { questions: [], message: 'Nothing needs review.' }
+      return {
+        questions: flagged.map(tx => ({
+          id: tx.id,
+          question: `$${Math.abs(tx.amount_cents / 100).toFixed(2)} ${tx.amount_cents > 0 ? 'received' : 'spent'} on ${tx.occurred_at ? new Date(tx.occurred_at).toLocaleDateString('en-AU') : '?'} — "${tx.description}" — ${tx.categorizer_reasoning || 'Unsure'}. Business or personal?`,
+          currentCategory: tx.category,
+          confidence: tx.confidence,
+        })),
+        count: flagged.length,
+      }
+    },
+  },
+  {
+    name: 'bookkeeping_resolve_question',
+    description: 'Resolve a flagged transaction. Set as business (with account code) or personal (DISCARD).',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      transactionId: { type: 'string', required: true },
+      isPersonal: { type: 'boolean', required: true, description: 'true=DISCARD, false=business' },
+      accountCode: { type: 'string', required: false, description: 'GL code if business (e.g. "5010")' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      if (params.isPersonal) {
+        await bk.updateStaged(params.transactionId, { category: 'DISCARD', is_personal: true, confidence: 1.0, categorizer_reasoning: 'Human: personal', status: 'ignored' })
+        return { message: 'Discarded.' }
+      }
+      if (!params.accountCode) return { error: 'Need account code for business expenses' }
+      await bk.updateStaged(params.transactionId, { category: params.accountCode, is_personal: true, confidence: 1.0, categorizer_reasoning: 'Human: business', status: 'categorized' })
+      return { message: `Categorized as ${params.accountCode}.` }
+    },
+  },
+  {
+    name: 'bookkeeping_review_ignored',
+    description: 'Scan ignored transactions for potential business expenses that were wrongly discarded. Returns only the suspicious ones (known business merchants that got ignored).',
+    tier: 'read',
+    domain: 'bookkeeping',
+    params: {
+      limit: { type: 'number', required: false, description: 'Max results (default 50)' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      // Find ignored transactions whose descriptions match known business patterns
+      const businessPatterns = [
+        'vercel', 'godaddy', 'google.*workspace', 'google.*cloud', 'gsuite',
+        'linkedin.*prem', 'facebk', 'facebook', 'openai', 'chatgpt', 'anthropic',
+        'canva', 'wordpress', 'hostinger', 'render\\.com', 'macincloud',
+        'asic', 'bizcover', 'ecodia setup', 'avery', 'userswp', 'ayecode',
+      ]
+      const patternRegex = businessPatterns.join('|')
+      const suspicious = await db`
+        SELECT id, description, occurred_at, amount_cents, category, categorizer_reasoning, source_account
+        FROM staged_transactions
+        WHERE status = 'ignored'
+          AND description ~* ${patternRegex}
+        ORDER BY occurred_at DESC
+        LIMIT ${params.limit || 50}
+      `
+      return {
+        suspicious: suspicious.map(tx => ({
+          id: tx.id,
+          description: tx.description,
+          amount: `$${Math.abs(tx.amount_cents / 100).toFixed(2)}`,
+          date: tx.occurred_at ? new Date(tx.occurred_at).toLocaleDateString('en-AU') : '?',
+          wrongReason: tx.categorizer_reasoning?.slice(0, 100),
+        })),
+        count: suspicious.length,
+        message: suspicious.length > 0
+          ? `Found ${suspicious.length} ignored transactions that look like business expenses. Review and re-categorize with bookkeeping_resolve_question.`
+          : 'No wrongly-ignored business transactions found.',
+      }
+    },
+  },
+  {
+    name: 'bookkeeping_bulk_recategorize',
+    description: 'Re-run AI categorization on transactions that were wrongly categorized. Pass an array of transaction IDs to reset to pending and re-categorize.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {
+      transactionIds: { type: 'string', required: true, description: 'Comma-separated list of staged transaction UUIDs to re-categorize' },
+    },
+    handler: async (params) => {
+      const bk = require('../services/bookkeeperService')
+      const db = require('../config/db')
+      const ids = params.transactionIds.split(',').map(id => id.trim()).filter(Boolean)
+      if (ids.length === 0) return { error: 'No IDs provided' }
+      if (ids.length > 100) return { error: 'Max 100 at a time' }
+
+      // Reset to pending
+      await db`
+        UPDATE staged_transactions
+        SET status = 'pending', category = NULL, is_personal = NULL,
+            confidence = NULL, categorizer_reasoning = NULL
+        WHERE id = ANY(${ids})
+      `
+
+      // Re-run categorization
+      await bk.autoCategorize()
+
+      return { message: `Reset ${ids.length} transactions to pending and re-categorized.` }
     },
   },
 ])

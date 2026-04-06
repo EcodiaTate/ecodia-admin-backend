@@ -166,13 +166,22 @@ function checkPressureGate(name, cap) {
 // Returns a compact schema the AI can use to select the right capability
 // given a natural-language intent.
 
-function describeForAI({ domain, tier } = {}) {
+function describeForAI({ domain, tier, verbose } = {}) {
   const caps = list({ domain, tier, enabledOnly: true })
+  if (verbose) {
+    // Full descriptions with param schemas — used for single-capability lookups
+    return caps.map(c => {
+      const paramDesc = Object.entries(c.params || {})
+        .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.description || v.type || 'any'}`)
+        .join(', ')
+      return `${c.name} — ${c.description}${paramDesc ? ` (${paramDesc})` : ''}`
+    }).join('\n')
+  }
+  // Compact: name + short description, no params (saves ~60% tokens)
   return caps.map(c => {
-    const paramDesc = Object.entries(c.params || {})
-      .map(([k, v]) => `${k}${v.required ? '*' : ''}: ${v.description || v.type || 'any'}`)
-      .join(', ')
-    return `${c.name} — ${c.description}${paramDesc ? ` (${paramDesc})` : ''}`
+    // Truncate description to first sentence or 60 chars
+    const desc = c.description.length > 60 ? c.description.slice(0, 57) + '...' : c.description
+    return `${c.name}: ${desc}`
   }).join('\n')
 }
 
