@@ -1,48 +1,38 @@
 /**
  * OS Session Service — manages a persistent Claude Code session as the OS brain.
  *
- * Uses resume-on-demand pattern: each user message spawns CC CLI with --resume,
- * CC exits after responding, next message resumes. Proven by ccService.js resumeSession().
+ * Uses the Agent SDK (query()) instead of spawning CLI processes.
+ * The SDK gives us:
+ * - Real-time streaming via SDKMessage events (no more buffered --print output)
+ * - Proper session resume via session_id
+ * - Built-in MCP server management
+ * - CLAUDE.md loaded via settingSources
  *
- * The OS session:
- * - Has MCP access to all business systems via .mcp.json
- * - Reads CLAUDE.md for identity and business rules
- * - Persists conversation across browser refreshes and PM2 restarts
- * - Streams output via WebSocket in real-time
+ * Messages stream to the frontend via WebSocket in real-time as they arrive.
  */
 
-const { spawn } = require('child_process')
-const { createInterface } = require('readline')
 const db = require('../config/db')
 const logger = require('../config/logger')
 const env = require('../config/env')
 const { broadcast } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
 
-const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
-const OS_SESSION_TIMEOUT_MS = parseInt(env.OS_SESSION_TIMEOUT_MS || '300000', 10) // 5min per exchange
-const STDIN_WARNING_RE = /no stdin data received/i
-
-// Token tracking — CC reports usage in result events
-// Claude's context window is ~200K tokens. Compact at 150K to leave headroom.
+// Token tracking
 const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000', 10)
 
-// In-memory state for the active OS session process
-let activeProcess = null
-let sessionTokenUsage = { input: 0, output: 0 } // accumulated from result events
+// In-memory state
+let activeQuery = null          // the running Query object from the SDK
+let ccSessionId = null          // CC's internal session_id (for resume)
+let sessionTokenUsage = { input: 0, output: 0 }
 
-// ── Backpressure-aware stdin write (from ccService.js) ──
-
-function writeStdinSafe(proc, data) {
-  return new Promise((resolve, reject) => {
-    const ok = proc.stdin.write(data)
-    if (ok) {
-      proc.stdin.end(resolve)
-    } else {
-      proc.stdin.once('drain', () => proc.stdin.end(resolve))
-    }
-    proc.stdin.once('error', reject)
-  })
+// We lazy-import the ESM Agent SDK since the backend is CJS
+let _query = null
+async function getQuery() {
+  if (!_query) {
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    _query = sdk.query
+  }
+  return _query
 }
 
 // ── Session DB operations ──
@@ -97,163 +87,211 @@ function emitStatus(status, meta = {}) {
   broadcast('os-session:status', { status, ...meta })
 }
 
+// ── Extract text from an assistant message's content blocks ──
+
+function extractTextFromContent(content) {
+  if (!content || !Array.isArray(content)) return ''
+  return content
+    .filter(b => b.type === 'text' && b.text)
+    .map(b => b.text)
+    .join('\n\n')
+}
+
 // ── Main: send a message to the OS session ──
 
 async function sendMessage(content) {
-  // Kill any leftover active process
-  if (activeProcess) {
-    try { activeProcess.process.kill('SIGTERM') } catch {}
-    activeProcess = null
+  const queryFn = await getQuery()
+
+  // Kill any active query
+  if (activeQuery) {
+    try { activeQuery.close() } catch {}
+    activeQuery = null
   }
 
-  // Find or create the OS session
+  // Find or create the OS session (DB record)
   let session = await getOSSession()
   let isResume = false
 
   if (session?.cc_cli_session_id) {
     isResume = true
+    ccSessionId = session.cc_cli_session_id
   } else {
     session = await createOSSession()
   }
 
-  const sessionId = session.id
-  emitStatus('streaming', { sessionId })
+  const dbSessionId = session.id
+  emitStatus('streaming', { sessionId: dbSessionId })
 
   // cwd must contain .mcp.json and CLAUDE.md
   const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
 
-  // Build CLI args
-  const args = [
-    '--print',
-    '--verbose',
-    '--output-format', 'stream-json',
-    '--dangerously-skip-permissions',
-  ]
-  if (isResume && session.cc_cli_session_id) {
-    args.push('--resume', session.cc_cli_session_id)
-  }
-
-  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8', HOME: '/home/tate' }
-  delete ccEnv.ANTHROPIC_API_KEY // forces console auth
-
-  logger.info(`OS Session ${isResume ? 'resuming' : 'starting'}`, { sessionId, ccCliSessionId: session.cc_cli_session_id })
-
-  const proc = spawn(CC_CLI, args, {
-    cwd,
-    env: ccEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
+  logger.info(`OS Session ${isResume ? 'resuming' : 'starting'}`, {
+    sessionId: dbSessionId,
+    ccSessionId,
   })
-
-  // Track active process
-  activeProcess = { process: proc, sessionId, startedAt: Date.now() }
-
-  // Write user message via stdin
-  writeStdinSafe(proc, content).catch(err =>
-    logger.debug('OS Session stdin write error (non-fatal)', { error: err.message })
-  )
 
   // Log user message
-  await appendLog(sessionId, `[USER] ${content}`)
+  await appendLog(dbSessionId, `[USER] ${content}`)
   emitOutput({ type: 'user', content })
 
-  // Timeout
-  const timeout = setTimeout(() => {
-    logger.warn('OS Session exchange timed out')
-    try { proc.kill('SIGTERM') } catch {}
-    emitStatus('error', { error: 'Exchange timed out' })
-  }, OS_SESSION_TIMEOUT_MS)
-  timeout.unref?.()
+  // Build SDK options
+  const options = {
+    cwd,
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    settingSources: ['project'],       // loads CLAUDE.md from cwd
+    includePartialMessages: true,      // stream_event messages for real-time text
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
+    },
+    model: env.OS_SESSION_MODEL || undefined,
+  }
 
-  // Stream stdout (stream-json NDJSON)
-  let ccCliSessionId = session.cc_cli_session_id
-  let lastResultJson = null
-  const collectedText = [] // collect all text blocks for HTTP response fallback
+  // Resume existing session or start fresh
+  if (isResume && ccSessionId) {
+    options.resume = ccSessionId
+  }
 
-  const rl = createInterface({ input: proc.stdout })
-  rl.on('line', async (line) => {
-    try {
-      const safeLine = secretSafety.scrubSecrets(line)
-      await appendLog(sessionId, safeLine)
+  // Set ANTHROPIC_API_KEY in env if available
+  if (env.ANTHROPIC_API_KEY) {
+    options.env = { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }
+  }
 
-      // Parse stream-json to extract session ID, text, and broadcast
+  const collectedText = []
+  let newCcSessionId = ccSessionId
+
+  try {
+    const q = queryFn({ prompt: content, options })
+    activeQuery = q
+
+    // Stream all messages from the SDK
+    for await (const msg of q) {
       try {
-        const parsed = JSON.parse(safeLine)
+        // Log raw message type for debugging
+        logger.debug('OS Session SDK message', { type: msg.type, subtype: msg.subtype })
 
-        // Extract CC CLI session ID from the first message
-        if (parsed.session_id && !ccCliSessionId) {
-          ccCliSessionId = parsed.session_id
-          await updateOSSession(sessionId, { ccCliSessionId, status: 'running' })
-        }
-
-        // Collect text for HTTP response fallback
-        if (parsed.type === 'assistant' && parsed.message?.content) {
-          for (const block of parsed.message.content) {
-            if (block.type === 'text' && block.text) {
-              collectedText.push(block.text)
+        switch (msg.type) {
+          // ─── System init — capture session_id ────────────────
+          case 'system': {
+            if (msg.subtype === 'init' && msg.session_id) {
+              newCcSessionId = msg.session_id
+              if (newCcSessionId !== ccSessionId) {
+                ccSessionId = newCcSessionId
+                await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
+              }
             }
+            break
           }
-        }
 
-        // Track the last result for completion + token usage
-        if (parsed.type === 'result') {
-          lastResultJson = parsed
-          // Extract token usage from result
-          if (parsed.total_input_tokens) sessionTokenUsage.input = parsed.total_input_tokens
-          if (parsed.total_output_tokens) sessionTokenUsage.output = parsed.total_output_tokens
-          const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
-          // Broadcast token usage so frontend can track
-          broadcast('os-session:tokens', {
-            input: sessionTokenUsage.input,
-            output: sessionTokenUsage.output,
-            total: totalTokens,
-            threshold: COMPACT_THRESHOLD,
-            needsCompaction: totalTokens > COMPACT_THRESHOLD,
-          })
+          // ─── Full assistant message — extract text, broadcast ─
+          case 'assistant': {
+            const text = extractTextFromContent(msg.message?.content)
+            if (text) {
+              const safeText = secretSafety.scrubSecrets(text)
+              collectedText.push(safeText)
+              await appendLog(dbSessionId, safeText)
+              // Broadcast the full assistant text for the frontend
+              emitOutput({ type: 'assistant_text', content: safeText })
+            }
+
+            // Also broadcast tool_use blocks so frontend knows about tool calls
+            const toolUses = (msg.message?.content || []).filter(b => b.type === 'tool_use')
+            if (toolUses.length > 0) {
+              emitOutput({
+                type: 'tool_use',
+                tools: toolUses.map(t => ({ name: t.name, id: t.id })),
+              })
+            }
+
+            // Track usage from per-turn data
+            if (msg.message?.usage) {
+              sessionTokenUsage.input = msg.message.usage.input_tokens || sessionTokenUsage.input
+              sessionTokenUsage.output = msg.message.usage.output_tokens || sessionTokenUsage.output
+            }
+            break
+          }
+
+          // ─── Streaming partial — real-time text deltas ────────
+          case 'stream_event': {
+            const event = msg.event
+            if (!event) break
+
+            if (event.type === 'content_block_delta' && event.delta) {
+              if (event.delta.type === 'text_delta' && event.delta.text) {
+                const safeText = secretSafety.scrubSecrets(event.delta.text)
+                // Broadcast each text delta for live streaming in the UI
+                emitOutput({ type: 'text_delta', content: safeText })
+              }
+            }
+            break
+          }
+
+          // ─── Result — session complete, capture usage ─────────
+          case 'result': {
+            if (msg.usage) {
+              sessionTokenUsage.input = msg.usage.input_tokens || sessionTokenUsage.input
+              sessionTokenUsage.output = msg.usage.output_tokens || sessionTokenUsage.output
+            }
+            if (msg.result) {
+              const safeResult = secretSafety.scrubSecrets(msg.result)
+              if (!collectedText.includes(safeResult) && safeResult.length > 0) {
+                collectedText.push(safeResult)
+              }
+            }
+            // Broadcast token usage
+            const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
+            broadcast('os-session:tokens', {
+              input: sessionTokenUsage.input,
+              output: sessionTokenUsage.output,
+              total: totalTokens,
+              threshold: COMPACT_THRESHOLD,
+              needsCompaction: totalTokens > COMPACT_THRESHOLD,
+            })
+            break
+          }
+
+          default:
+            // Other message types (user replay, compact_boundary, etc.) — ignore
+            break
         }
-      } catch {
-        // Not JSON — raw text output, still broadcast
+      } catch (msgErr) {
+        logger.debug('OS Session message processing error', { error: msgErr.message })
       }
-
-      emitOutput({ type: 'stream', content: safeLine })
-    } catch (err) {
-      logger.debug('OS Session stdout parse error', { error: err.message })
     }
-  })
 
-  // Stream stderr (mostly noise, but log for observability)
-  const stderrLines = []
-  const stderrRl = createInterface({ input: proc.stderr })
-  stderrRl.on('line', (line) => {
-    if (STDIN_WARNING_RE.test(line)) return // harmless noise
-    stderrLines.push(line)
-    logger.debug('OS Session stderr', { line: line.slice(0, 200) })
-  })
+    // Session complete
+    activeQuery = null
+    await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
+    emitStatus('complete', { sessionId: dbSessionId, code: 0 })
+    broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
 
-  // Handle process exit
-  return new Promise((resolve) => {
-    proc.on('close', async (code) => {
-      clearTimeout(timeout)
-      activeProcess = null
+    logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId })
 
-      // Save the CC CLI session ID for future resumes
-      if (ccCliSessionId) {
-        await updateOSSession(sessionId, { ccCliSessionId, status: code === 0 ? 'complete' : 'error' })
-      }
+    return {
+      sessionId: dbSessionId,
+      ccCliSessionId: ccSessionId,
+      code: 0,
+      text: collectedText.join('\n\n'),
+    }
 
-      if (code !== 0 && stderrLines.length > 0) {
-        const errorMsg = stderrLines.slice(-5).join('\n')
-        emitOutput({ type: 'error', content: errorMsg })
-        logger.warn('OS Session exited with error', { code, stderr: errorMsg.slice(0, 500) })
-      }
+  } catch (err) {
+    activeQuery = null
+    logger.error('OS Session SDK error', { error: err.message, stack: err.stack })
 
-      // Emit both status and complete events — frontend listens on complete to finalize
-      emitStatus('complete', { sessionId, code })
-      broadcast('os-session:complete', { sessionId, code })
-      logger.info('OS Session exchange complete', { sessionId, code, ccCliSessionId })
+    emitOutput({ type: 'error', content: err.message })
+    emitStatus('error', { error: err.message })
+    broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
 
-      resolve({ sessionId, ccCliSessionId, code, text: collectedText.join('\n\n') })
-    })
-  })
+    await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+
+    return {
+      sessionId: dbSessionId,
+      ccCliSessionId: ccSessionId,
+      code: 1,
+      text: `Error: ${err.message}`,
+    }
+  }
 }
 
 // ── Get current session status ──
@@ -261,10 +299,10 @@ async function sendMessage(content) {
 async function getStatus() {
   const session = await getOSSession()
   return {
-    active: !!activeProcess,
+    active: !!activeQuery,
     sessionId: session?.id || null,
     ccCliSessionId: session?.cc_cli_session_id || null,
-    status: activeProcess ? 'streaming' : (session?.status || 'idle'),
+    status: activeQuery ? 'streaming' : (session?.status || 'idle'),
     startedAt: session?.started_at,
   }
 }
@@ -272,11 +310,11 @@ async function getStatus() {
 // ── Restart — kill current, start fresh ──
 
 async function restart() {
-  if (activeProcess) {
-    try { activeProcess.process.kill('SIGTERM') } catch {}
-    activeProcess = null
+  if (activeQuery) {
+    try { activeQuery.close() } catch {}
+    activeQuery = null
   }
-  // Create a new session (don't reuse the old cc_cli_session_id)
+  ccSessionId = null
   const session = await createOSSession()
   emitStatus('idle', { sessionId: session.id, restarted: true })
   return { sessionId: session.id }
@@ -300,25 +338,24 @@ async function getHistory(limit = 100) {
 // ── Compact — seamlessly transition to a new session with context ──
 
 async function compact(summary) {
-  // Kill any active process
-  if (activeProcess) {
-    try { activeProcess.process.kill('SIGTERM') } catch {}
-    activeProcess = null
+  // Kill any active query
+  if (activeQuery) {
+    try { activeQuery.close() } catch {}
+    activeQuery = null
   }
 
   // Create a new session
   const newSession = await createOSSession()
 
-  // Reset token tracking
+  // Reset token tracking and session ID
   sessionTokenUsage = { input: 0, output: 0 }
+  ccSessionId = null
 
   // Send the summary as the first message to establish context in the new session
-  // This is invisible to the user — it primes the new session with prior context
   const contextMessage = `[CONTEXT FROM PREVIOUS SESSION]\n\n${summary}\n\n[END CONTEXT]\n\nYou are continuing an ongoing conversation. The above is a summary of what was discussed and decided. Continue seamlessly — the human should not notice the session transition.`
 
   logger.info('OS Session compacting', { newSessionId: newSession.id, summaryLength: summary.length })
 
-  // Don't broadcast this as a user message — it's internal
   const result = await sendMessage(contextMessage)
 
   emitStatus('compacted', { sessionId: newSession.id, previousTokens: sessionTokenUsage })
@@ -343,10 +380,9 @@ async function recoverResponse(sinceTs) {
   const session = await getOSSession()
   if (!session) return { found: false, text: '', status: 'idle', streaming: false }
 
-  const streaming = !!activeProcess
+  const streaming = !!activeQuery
 
-  // Fetch logs since the given timestamp (or all recent if no timestamp)
-  const since = sinceTs ? new Date(sinceTs) : new Date(Date.now() - 600_000) // last 10 min
+  const since = sinceTs ? new Date(sinceTs) : new Date(Date.now() - 600_000)
   const logs = await db`
     SELECT content, created_at
     FROM cc_session_logs
@@ -354,29 +390,19 @@ async function recoverResponse(sinceTs) {
     ORDER BY created_at ASC
   `
 
-  // Parse NDJSON logs to extract assistant text
+  // Collect assistant text from logs (now stored as plain text, not NDJSON)
   const textParts = []
-  const chunks = []
   for (const log of logs) {
     const line = log.content
-    if (line.startsWith('[USER]')) continue // skip user messages
-    try {
-      const parsed = JSON.parse(line)
-      chunks.push(line)
-      if (parsed.type === 'assistant' && parsed.message?.content) {
-        for (const block of parsed.message.content) {
-          if (block.type === 'text' && block.text) textParts.push(block.text)
-        }
-      }
-    } catch {
-      // Not JSON — raw output
-    }
+    if (line.startsWith('[USER]')) continue
+    // Lines are now plain text from assistant responses
+    if (line.trim()) textParts.push(line)
   }
 
   return {
-    found: textParts.length > 0 || chunks.length > 0,
+    found: textParts.length > 0,
     text: textParts.join('\n\n'),
-    chunks,
+    chunks: [],  // no longer using NDJSON chunks
     status: session.status,
     streaming,
     sessionId: session.id,
