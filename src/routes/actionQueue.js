@@ -81,6 +81,28 @@ router.get('/suppress-check', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ─── Feedback Loop Endpoints (before :id routes to avoid param conflict) ──
+
+// GET /api/actions/feedback/summary — aggregate quality metrics per source/type
+router.get('/feedback/summary', async (req, res, next) => {
+  try {
+    const { source, actionType, senderEmail, days } = req.query
+    const summary = await actionQueue.getFeedbackSummary({
+      source, actionType, senderEmail, days: parseInt(days) || 30,
+    })
+    res.json(summary)
+  } catch (err) { next(err) }
+})
+
+// GET /api/actions/feedback/recalibration — unified signals for triage improvement
+router.get('/feedback/recalibration', async (req, res, next) => {
+  try {
+    const { days } = req.query
+    const signals = await actionQueue.getRecalibrationSignals({ days: parseInt(days) || 30 })
+    res.json(signals)
+  } catch (err) { next(err) }
+})
+
 // POST /api/actions/:id/execute — approve and execute
 router.post('/:id/execute', async (req, res, next) => {
   try {
@@ -130,6 +152,20 @@ router.post('/expire', async (_req, res, next) => {
   try {
     const count = await actionQueue.purgeExpired()
     res.json({ purged: count })
+  } catch (err) { next(err) }
+})
+
+// POST /api/actions/:id/feedback — submit quality feedback after decision
+router.post('/:id/feedback', async (req, res, next) => {
+  try {
+    const { draftQuality, priorityAccuracy, relevance, overall, correction } = req.body || {}
+    if (!overall && !draftQuality && !priorityAccuracy && !relevance && !correction) {
+      return res.status(400).json({ error: 'At least one feedback signal required' })
+    }
+    const feedback = await actionQueue.recordFeedback(req.params.id, {
+      draftQuality, priorityAccuracy, relevance, overall, correction,
+    })
+    res.json(feedback)
   } catch (err) { next(err) }
 })
 

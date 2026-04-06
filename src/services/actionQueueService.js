@@ -994,11 +994,177 @@ async function getTriageContext({ senderEmail, senderName, source }) {
       }
     }
 
+    // Quality feedback overlay — shows how well drafts/priorities have been rated
+    try {
+      const qualityStats = await db`
+        SELECT
+          round(avg(overall)::numeric, 1)::float AS avg_overall,
+          round(avg(draft_quality)::numeric, 1)::float AS avg_draft,
+          round(avg(priority_accuracy)::numeric, 1)::float AS avg_priority,
+          count(*)::int AS feedback_count,
+          count(*) FILTER (WHERE correction IS NOT NULL)::int AS corrections
+        FROM action_feedback
+        WHERE (
+          (${senderEmail || ''} != '' AND sender_email = ${senderEmail || ''})
+          OR (${senderName || ''} != '' AND sender_name = ${senderName || ''})
+        )
+        AND created_at > now() - interval '30 days'
+      `
+      const qs = qualityStats[0]
+      if (qs && qs.feedback_count > 0) {
+        const qParts = []
+        if (qs.avg_overall != null) qParts.push(`overall: ${qs.avg_overall}/5`)
+        if (qs.avg_draft != null) qParts.push(`draft: ${qs.avg_draft}/5`)
+        if (qs.avg_priority != null) qParts.push(`priority accuracy: ${qs.avg_priority}/5`)
+        if (qs.corrections > 0) qParts.push(`${qs.corrections} corrections given`)
+        parts.push(`quality feedback (${qs.feedback_count} ratings): ${qParts.join(', ')}`)
+      }
+    } catch {}
+
     return parts.join('. ')
   } catch (err) {
     logger.debug('Triage context query failed (non-blocking)', { error: err.message })
     return null
   }
+}
+
+// ─── Post-Decision Quality Feedback ─────────────────────────────────
+// After approving/dismissing, the user can rate quality. This closes the
+// loop: triage → surface → decide → feedback → recalibrate → better triage.
+
+async function recordFeedback(actionId, { draftQuality, priorityAccuracy, relevance, overall, correction } = {}) {
+  // Find the action and its decision
+  const [action] = await db`SELECT * FROM action_queue WHERE id = ${actionId}`
+  if (!action) throw new Error('Action not found')
+
+  const [decision] = await db`
+    SELECT id FROM action_decisions WHERE action_id = ${actionId} ORDER BY created_at DESC LIMIT 1
+  `
+
+  const ctx = ensureObject(action.context)
+
+  const [feedback] = await db`
+    INSERT INTO action_feedback (
+      action_id, decision_id, draft_quality, priority_accuracy, relevance, overall, correction,
+      source, action_type, sender_email, sender_name
+    ) VALUES (
+      ${actionId}, ${decision?.id || null},
+      ${draftQuality || null}, ${priorityAccuracy || null}, ${relevance || null}, ${overall || null},
+      ${correction || null},
+      ${action.source}, ${action.action_type}, ${ctx.email || null}, ${ctx.from || null}
+    ) RETURNING *
+  `
+
+  broadcast('action_queue:feedback', { id: actionId, feedback })
+  emitEvent('action:feedback', { id: actionId, source: action.source, actionType: action.action_type, overall })
+
+  // KG ingestion — the organism learns from quality signals
+  try {
+    const kgHooks = require('./kgIngestionHooks')
+    kgHooks.onActionFeedback({ action, feedback }).catch(() => {})
+  } catch {}
+
+  return feedback
+}
+
+// ─── Feedback Summary — per (source, action_type) quality metrics ────
+// Returns aggregate quality scores so the AI can self-assess and recalibrate.
+
+async function getFeedbackSummary({ source, actionType, senderEmail, days = 30 } = {}) {
+  const rows = await db`
+    SELECT
+      source,
+      action_type,
+      count(*)::int AS total_feedback,
+      round(avg(draft_quality)::numeric, 2)::float AS avg_draft_quality,
+      round(avg(priority_accuracy)::numeric, 2)::float AS avg_priority_accuracy,
+      round(avg(relevance)::numeric, 2)::float AS avg_relevance,
+      round(avg(overall)::numeric, 2)::float AS avg_overall,
+      count(*) FILTER (WHERE overall <= 2)::int AS poor_count,
+      count(*) FILTER (WHERE overall >= 4)::int AS good_count,
+      count(*) FILTER (WHERE correction IS NOT NULL)::int AS corrections_given
+    FROM action_feedback
+    WHERE created_at > now() - interval '1 day' * ${days}
+      ${source ? db`AND source = ${source}` : db``}
+      ${actionType ? db`AND action_type = ${actionType}` : db``}
+      ${senderEmail ? db`AND sender_email = ${senderEmail}` : db``}
+    GROUP BY source, action_type
+    ORDER BY count(*) DESC
+  `
+  return rows
+}
+
+// ─── Recalibration Signals — what the triage AI should adjust ────────
+// Combines decision patterns + quality feedback into actionable signals
+// that triage prompts can consume to improve future surfacing.
+
+async function getRecalibrationSignals({ days = 30 } = {}) {
+  // Decision patterns
+  const decisions = await db`
+    SELECT source, action_type,
+      count(*)::int AS total_decisions,
+      count(*) FILTER (WHERE decision = 'executed')::int AS approved,
+      count(*) FILTER (WHERE decision = 'dismissed')::int AS dismissed,
+      round(count(*) FILTER (WHERE decision = 'dismissed')::numeric / NULLIF(count(*), 0), 3)::float AS dismiss_rate,
+      mode() WITHIN GROUP (ORDER BY reason_category) FILTER (WHERE decision = 'dismissed') AS top_dismiss_reason
+    FROM action_decisions
+    WHERE created_at > now() - interval '1 day' * ${days}
+    GROUP BY source, action_type
+    HAVING count(*) >= 3
+    ORDER BY count(*) FILTER (WHERE decision = 'dismissed')::numeric / NULLIF(count(*), 0) DESC
+  `
+
+  // Quality feedback
+  const quality = await db`
+    SELECT source, action_type,
+      count(*)::int AS feedback_count,
+      round(avg(overall)::numeric, 2)::float AS avg_overall,
+      round(avg(draft_quality)::numeric, 2)::float AS avg_draft,
+      round(avg(priority_accuracy)::numeric, 2)::float AS avg_priority,
+      round(avg(relevance)::numeric, 2)::float AS avg_relevance
+    FROM action_feedback
+    WHERE created_at > now() - interval '1 day' * ${days}
+    GROUP BY source, action_type
+    HAVING count(*) >= 2
+  `
+
+  // Merge into unified signals
+  const qualityMap = new Map(quality.map(q => [`${q.source}:${q.action_type}`, q]))
+
+  const signals = decisions.map(d => {
+    const key = `${d.source}:${d.action_type}`
+    const q = qualityMap.get(key)
+    return {
+      source: d.source,
+      actionType: d.action_type,
+      totalDecisions: d.total_decisions,
+      approved: d.approved,
+      dismissed: d.dismissed,
+      dismissRate: d.dismiss_rate,
+      topDismissReason: d.top_dismiss_reason,
+      // Quality overlay
+      feedbackCount: q?.feedback_count || 0,
+      avgOverall: q?.avg_overall || null,
+      avgDraft: q?.avg_draft || null,
+      avgPriority: q?.avg_priority || null,
+      avgRelevance: q?.avg_relevance || null,
+      // Actionable signal
+      needsImprovement: (d.dismiss_rate > 0.5) || (q?.avg_overall != null && q.avg_overall < 3),
+      strongPerformer: (d.dismiss_rate < 0.2) && (q?.avg_overall == null || q.avg_overall >= 4),
+    }
+  })
+
+  // Recent corrections — the most valuable feedback for prompt improvement
+  const recentCorrections = await db`
+    SELECT source, action_type, correction, sender_email, created_at
+    FROM action_feedback
+    WHERE correction IS NOT NULL
+      AND created_at > now() - interval '1 day' * ${days}
+    ORDER BY created_at DESC
+    LIMIT 10
+  `
+
+  return { signals, recentCorrections }
 }
 
 module.exports = {
@@ -1021,4 +1187,8 @@ module.exports = {
   getDecisionStats,
   getTriageContext,
   recordDecision,
+  // Feedback loop exports
+  recordFeedback,
+  getFeedbackSummary,
+  getRecalibrationSignals,
 }

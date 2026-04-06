@@ -708,6 +708,41 @@ Resource key: ${action.resource_key || 'none'}`
   }
 }
 
+// ─── Action Quality Feedback ──────────────────────────────────────────
+
+async function onActionFeedback({ action, feedback }) {
+  if (!isEnabled()) return
+
+  try {
+    const scores = [
+      feedback.overall != null ? `overall: ${feedback.overall}/5` : null,
+      feedback.draft_quality != null ? `draft: ${feedback.draft_quality}/5` : null,
+      feedback.priority_accuracy != null ? `priority: ${feedback.priority_accuracy}/5` : null,
+      feedback.relevance != null ? `relevance: ${feedback.relevance}/5` : null,
+    ].filter(Boolean).join(', ')
+
+    const content = `Action quality feedback (calibration signal):
+Source: ${action.source}
+Type: ${action.action_type}
+Title: ${action.title}
+Sender: ${action.context?.from || 'unknown'} (${action.context?.email || ''})
+Scores: ${scores}
+${feedback.correction ? `Correction: ${feedback.correction}` : 'No correction provided'}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'action_feedback',
+      sourceId: feedback.id,
+      context: `Quality feedback on an action — calibration signal. Extract:
+1. If scores are low (1-2), learn what went wrong for this (source=${action.source}, type=${action.action_type}) pattern.
+2. If a correction is given, it contains specific guidance for improving future drafts/actions.
+3. If scores are high (4-5), reinforce the current approach for this pattern.
+4. Track sender-specific quality trends (${action.context?.email || action.context?.from || 'unknown'}).`,
+    })
+  } catch (err) {
+    logger.debug('KG action feedback ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 // ─── Direct Actions (organism → integration without CC) ─────────────
 
 async function onDirectAction({ actionType, params, result, status, durationMs }) {
@@ -879,6 +914,7 @@ module.exports = {
   onSymbridgeMessage,
   onActionDismissed,
   onActionExecuted,
+  onActionFeedback,
   onDirectAction,
   onFactoryOutcome,
   onSystemEvent,
