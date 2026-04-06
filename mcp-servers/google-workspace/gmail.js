@@ -121,4 +121,64 @@ export function registerGmailTools(server) {
       return { content: [{ type: 'text', text: `Archived ${messageIds.length} message(s)` }] }
     }
   )
+
+  server.tool('gmail_create_draft',
+    'Create an email draft (saved but not sent). Use for review workflows.',
+    { to: z.string(), subject: z.string(), body: z.string(), cc: z.string().optional(), threadId: z.string().optional().describe('Thread ID to make this a reply draft'), inbox: z.string().optional() },
+    async ({ to, subject, body, cc, threadId, inbox }) => {
+      const gmail = getGmailClient(inbox || primaryAccount)
+      const from = inbox || primaryAccount
+      const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
+      const raw = Buffer.from(headers).toString('base64url')
+      const requestBody = { message: { raw } }
+      if (threadId) requestBody.message.threadId = threadId
+      const res = await gmail.users.drafts.create({ userId: 'me', requestBody })
+      return { content: [{ type: 'text', text: `Draft created. Draft ID: ${res.data.id}` }] }
+    }
+  )
+
+  server.tool('gmail_list_labels',
+    'List all available Gmail labels.',
+    { inbox: z.string().optional() },
+    async ({ inbox }) => {
+      const gmail = getGmailClient(inbox || primaryAccount)
+      const res = await gmail.users.labels.list({ userId: 'me' })
+      const labels = (res.data.labels || []).map(l => ({ id: l.id, name: l.name, type: l.type }))
+      return { content: [{ type: 'text', text: JSON.stringify(labels, null, 2) }] }
+    }
+  )
+
+  server.tool('gmail_create_label',
+    'Create a custom Gmail label.',
+    { name: z.string().describe('Label name (use / for nesting, e.g. "Clients/Active")'), inbox: z.string().optional() },
+    async ({ name, inbox }) => {
+      const gmail = getGmailClient(inbox || primaryAccount)
+      const res = await gmail.users.labels.create({ userId: 'me', requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' } })
+      return { content: [{ type: 'text', text: `Label created: ${res.data.name} (ID: ${res.data.id})` }] }
+    }
+  )
+
+  server.tool('gmail_trash',
+    'Move messages to trash.',
+    { messageIds: z.array(z.string()).describe('Message IDs to trash'), inbox: z.string().optional() },
+    async ({ messageIds, inbox }) => {
+      const gmail = getGmailClient(inbox || primaryAccount)
+      for (const id of messageIds) {
+        await gmail.users.messages.trash({ userId: 'me', id })
+      }
+      return { content: [{ type: 'text', text: `Trashed ${messageIds.length} message(s)` }] }
+    }
+  )
+
+  server.tool('gmail_mark_read',
+    'Mark messages as read.',
+    { messageIds: z.array(z.string()).describe('Message IDs'), inbox: z.string().optional() },
+    async ({ messageIds, inbox }) => {
+      const gmail = getGmailClient(inbox || primaryAccount)
+      for (const id of messageIds) {
+        await gmail.users.messages.modify({ userId: 'me', id, requestBody: { removeLabelIds: ['UNREAD'] } })
+      }
+      return { content: [{ type: 'text', text: `Marked ${messageIds.length} message(s) as read` }] }
+    }
+  )
 }

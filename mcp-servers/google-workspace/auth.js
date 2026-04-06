@@ -54,4 +54,11 @@ export function getDriveClient(userEmail) {
   }
 }
 
+export function getPeopleClient(userEmail) {
+  const auth = createAuth([
+    'https://www.googleapis.com/auth/contacts',
+  ], userEmail)
+  return google.people({ version: 'v1', auth })
+}
+
 export const primaryAccount = PRIMARY_ACCOUNT

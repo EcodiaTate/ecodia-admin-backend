@@ -12,6 +12,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerGmailTools } from './gmail.js'
 import { registerCalendarTools } from './calendar.js'
 import { registerDriveTools } from './drive.js'
+import { registerContactsTools } from './contacts.js'
 
 const server = new McpServer({
   name: 'google-workspace',
@@ -21,6 +22,7 @@ const server = new McpServer({
 registerGmailTools(server)
 registerCalendarTools(server)
 registerDriveTools(server)
+registerContactsTools(server)
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
