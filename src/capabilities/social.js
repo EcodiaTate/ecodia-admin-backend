@@ -511,51 +511,67 @@ registry.registerMany([
 
   {
     name: 'linkedin_set_cookie',
-    description: 'Update the LinkedIn li_at session cookie. The user will paste a long string starting with AQ. Pass it as the li_at param.',
+    description: 'Update LinkedIn session cookies. Pass li_at (required), and optionally JSESSIONID and li_a for full session support.',
     tier: 'write',
     domain: 'linkedin',
     params: {
-      li_at: { type: 'string', required: false, description: 'The li_at cookie value' },
+      li_at: { type: 'string', required: false, description: 'The li_at cookie value (starts with AQ)' },
+      JSESSIONID: { type: 'string', required: false, description: 'The JSESSIONID cookie (starts with ajax:)' },
+      li_a: { type: 'string', required: false, description: 'The li_a cookie if present' },
       cookie: { type: 'string', required: false, description: 'Alias for li_at' },
       value: { type: 'string', required: false, description: 'Alias for li_at' },
     },
-    handler: async (params, context) => {
+    handler: async (params) => {
       const browser = require('../services/linkedinBrowser')
 
-      // Accept from any param name — AI often puts it in the wrong field
-      let cookie = params.li_at || params.cookie || params.value || ''
-
-      // If no param matched, try to find a long AQ string in any param value
-      if (!cookie || cookie.length < 20) {
+      // Find li_at from any param
+      let liAt = params.li_at || params.cookie || params.value || ''
+      if (!liAt || liAt.length < 20) {
         for (const v of Object.values(params)) {
-          if (typeof v === 'string' && v.length > 20 && v.startsWith('AQ')) {
-            cookie = v
-            break
-          }
+          if (typeof v === 'string' && v.length > 20 && v.startsWith('AQ')) { liAt = v; break }
         }
       }
-
-      // Last resort: check if the calling context has the original user message
-      // (the AI sometimes puts the whole message as a param value)
-      if (!cookie || cookie.length < 20) {
+      if (!liAt || liAt.length < 20) {
         for (const v of Object.values(params)) {
           if (typeof v === 'string') {
             const match = v.match(/AQ[A-Za-z0-9_-]{20,}/)
-            if (match) { cookie = match[0]; break }
+            if (match) { liAt = match[0]; break }
           }
         }
       }
 
-      cookie = (cookie || '').trim()
-      if (!cookie || cookie.length < 20) {
-        return { error: 'Could not find the li_at cookie value. Please paste the cookie string starting with AQ directly.' }
+      liAt = (liAt || '').trim()
+      if (!liAt || liAt.length < 20) {
+        return { error: 'Could not find the li_at cookie value. Paste the string starting with AQ.' }
+      }
+
+      // Build full cookie set
+      const cookies = [
+        { name: 'li_at', value: liAt, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true, sameSite: 'None' },
+      ]
+      if (params.JSESSIONID) {
+        cookies.push({ name: 'JSESSIONID', value: params.JSESSIONID.trim(), domain: '.www.linkedin.com', path: '/', httpOnly: false, secure: true, sameSite: 'None' })
+      }
+      if (params.li_a) {
+        cookies.push({ name: 'li_a', value: params.li_a.trim(), domain: '.linkedin.com', path: '/', httpOnly: true, secure: true, sameSite: 'None' })
       }
 
       try {
-        await browser.setSessionCookie(cookie)
-        return { message: `LinkedIn cookie updated (${cookie.slice(0, 10)}...${cookie.slice(-6)}). The worker will use this on its next run.` }
+        // Use saveCookies directly to store the full set
+        const { encrypt } = require('../utils/encryption')
+        const db = require('../config/db')
+        const encrypted = encrypt(JSON.stringify(cookies))
+        await db`
+          UPDATE linkedin_session
+          SET cookies = ${encrypted}, last_active_at = now(), status = 'active', suspend_reason = NULL, updated_at = now()
+          WHERE id = 'default'
+        `
+        const parts = [`li_at (${liAt.slice(0, 8)}...)`]
+        if (params.JSESSIONID) parts.push('JSESSIONID')
+        if (params.li_a) parts.push('li_a')
+        return { message: `LinkedIn cookies updated: ${parts.join(', ')}. Worker will use these on next run.` }
       } catch (err) {
-        return { error: `Failed to update cookie: ${err.message}` }
+        return { error: `Failed to update cookies: ${err.message}` }
       }
     },
   },
