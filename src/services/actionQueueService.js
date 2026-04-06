@@ -614,7 +614,13 @@ async function performAction(item) {
 
   const registry = require('./capabilityRegistry')
 
-  // Registry handles unknown capability recovery (fuzzy match, domain reload) internally
+  // Ensure capabilities are loaded — prevents boot race where actions execute
+  // before capabilities/index has been required. The registry's internal recovery
+  // is one-shot with a cooldown, so we proactively load here.
+  if (registry.list().length === 0) {
+    try { require('../capabilities/index') } catch (_) {}
+  }
+
   const outcome = await registry.execute(capabilityName, params, { source: 'action_queue', item })
 
   if (!outcome.success) {

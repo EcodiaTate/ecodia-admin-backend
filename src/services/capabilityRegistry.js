@@ -201,7 +201,9 @@ function findClosestCapability(name) {
 // attempt to reload capabilities once. Handles transient boot failures.
 
 function attemptRecovery(name) {
-  if (_recoveryAttempted) return false
+  // Always allow recovery when registry is completely empty — the one-shot flag
+  // should only gate failed-domain retries, not boot-race recovery
+  if (_recoveryAttempted && registry.size > 0) return false
   _recoveryAttempted = true
 
   // Two recovery paths:
