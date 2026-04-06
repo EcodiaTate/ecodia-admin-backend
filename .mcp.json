@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "google-workspace": {
+      "command": "node",
+      "args": ["mcp-servers/google-workspace/index.js"]
+    },
+    "supabase": {
+      "command": "node",
+      "args": ["mcp-servers/supabase/index.js"]
+    },
+    "vps": {
+      "command": "node",
+      "args": ["mcp-servers/vps-ssh/index.js"]
+    },
+    "business-tools": {
+      "command": "node",
+      "args": ["mcp-servers/business-tools/index.js"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "ecodiaos-mcp-vps",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

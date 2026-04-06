@@ -1,0 +1,10 @@
+{
+  "name": "ecodiaos-mcp-supabase",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "postgres": "^3.4.4"
+  }
+}
