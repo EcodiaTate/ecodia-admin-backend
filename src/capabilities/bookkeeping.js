@@ -1033,6 +1033,136 @@ registry.registerMany([
   // ═══════════════════════════════════════════════════════════════════════
   // QUESTION SURFACING & REVIEW
   // ═══════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════
+  // SMART ACTION: Single capability that handles the common workflows
+  // The AI calls this with a plain English intent and it figures out the rest
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    name: 'bookkeeping_do',
+    description: `Smart bookkeeping action. Pass an intent and it does the right thing automatically.
+
+Intents:
+- "fix_mistakes" — finds wrongly-ignored business expenses AND fixes them in one shot. Returns what was fixed.
+- "ask_questions" — gets flagged items and returns them as plain English questions for the human.
+- "answer" — resolves a flagged transaction. Needs transactionId + isPersonal (true/false) + accountCode (if business).
+- "status" — returns current counts and what needs attention.
+- "recategorize_all" — resets ALL ignored/flagged items to pending and re-runs AI categorization from scratch.
+- "post_ready" — batch-posts all categorized transactions that are ready.
+
+This is the PREFERRED capability for bookkeeping actions. Use this instead of the granular ones.`,
+    tier: 'write',
+    domain: 'bookkeeping',
+    priority: 'critical',
+    params: {
+      intent: { type: 'string', required: true, description: 'What to do: fix_mistakes, ask_questions, answer, status, recategorize_all, post_ready' },
+      transactionId: { type: 'string', required: false, description: 'For "answer" intent: transaction UUID' },
+      isPersonal: { type: 'boolean', required: false, description: 'For "answer": true=discard, false=business' },
+      accountCode: { type: 'string', required: false, description: 'For "answer" when business: GL account code' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const bk = require('../services/bookkeeperService')
+
+      switch (params.intent) {
+        case 'fix_mistakes': {
+          // All known business patterns
+          const businessPatterns = [
+            'vercel', 'godaddy', 'google.*workspace', 'google.*cloud', 'gsuite',
+            'linkedin.*prem', 'facebk', 'facebook', 'openai', 'chatgpt', 'anthropic',
+            'canva', 'wordpress', 'hostinger', 'render\\.com', 'macincloud',
+            'asic', 'bizcover', 'ecodia setup', 'avery', 'userswp', 'ayecode',
+            'apple\\.com/bill', 'instagram',
+          ]
+          const patternRegex = businessPatterns.join('|')
+
+          const wronglyIgnored = await db`
+            SELECT id, description, amount_cents, occurred_at
+            FROM staged_transactions
+            WHERE status = 'ignored' AND description ~* ${patternRegex}
+            ORDER BY occurred_at DESC LIMIT 200
+          `
+
+          if (wronglyIgnored.length === 0) return { fixed: 0, message: 'All good — no wrongly-ignored business expenses found.' }
+
+          const ids = wronglyIgnored.map(t => t.id)
+          await db`
+            UPDATE staged_transactions
+            SET status = 'pending', category = NULL, is_personal = NULL,
+                confidence = NULL, categorizer_reasoning = NULL
+            WHERE id = ANY(${ids})
+          `
+          await bk.autoCategorize()
+
+          const fixed = wronglyIgnored.map(t => `${t.description} $${Math.abs(t.amount_cents / 100).toFixed(2)} (${t.occurred_at ? new Date(t.occurred_at).toLocaleDateString('en-AU') : '?'})`)
+          return { fixed: fixed.length, items: fixed, message: `Fixed ${fixed.length} transactions that were wrongly ignored. They've been re-categorized as business expenses.` }
+        }
+
+        case 'ask_questions': {
+          const flagged = await db`
+            SELECT id, description, occurred_at, amount_cents, category, categorizer_reasoning, confidence
+            FROM staged_transactions WHERE status = 'flagged'
+            ORDER BY occurred_at DESC LIMIT 20
+          `
+          if (flagged.length === 0) return { questions: [], message: 'Nothing needs your input right now.' }
+
+          return {
+            questions: flagged.map(tx => ({
+              id: tx.id,
+              question: `$${Math.abs(tx.amount_cents / 100).toFixed(2)} ${tx.amount_cents > 0 ? 'received' : 'spent'} on ${tx.occurred_at ? new Date(tx.occurred_at).toLocaleDateString('en-AU') : '?'} at "${tx.description}" — ${tx.categorizer_reasoning || 'unsure'}. Business or personal?`,
+            })),
+            count: flagged.length,
+          }
+        }
+
+        case 'answer': {
+          if (!params.transactionId) return { error: 'Need transactionId' }
+          if (params.isPersonal) {
+            await bk.updateStaged(params.transactionId, { category: 'DISCARD', is_personal: true, confidence: 1.0, categorizer_reasoning: 'Human: personal', status: 'ignored' })
+            return { message: 'Marked as personal — discarded.' }
+          }
+          if (!params.accountCode) return { error: 'Need accountCode for business expenses' }
+          await bk.updateStaged(params.transactionId, { category: params.accountCode, is_personal: true, confidence: 1.0, categorizer_reasoning: 'Human: business', status: 'categorized' })
+          return { message: `Categorized as ${params.accountCode} (business).` }
+        }
+
+        case 'status': {
+          const counts = await bk.getStagedCounts()
+          const [flaggedCount] = await db`SELECT count(*)::int AS c FROM staged_transactions WHERE status = 'flagged'`
+          return {
+            ...counts,
+            flagged: flaggedCount.c,
+            summary: `Pending: ${counts.pending || 0}, Categorized (ready to post): ${counts.categorized || 0}, Flagged (needs your input): ${flaggedCount.c}, Ignored: ${counts.ignored || 0}, Posted: ${counts.posted || 0}`,
+          }
+        }
+
+        case 'recategorize_all': {
+          await db`
+            UPDATE staged_transactions
+            SET status = 'pending', category = NULL, is_personal = NULL,
+                confidence = NULL, categorizer_reasoning = NULL
+            WHERE status IN ('ignored', 'flagged')
+          `
+          const result = await bk.autoCategorize()
+          return { message: `Reset all ignored/flagged transactions and re-categorized. ${result.categorized} processed.` }
+        }
+
+        case 'post_ready': {
+          const ready = await bk.listStaged('categorized', 500)
+          if (ready.length === 0) return { message: 'Nothing ready to post.' }
+          let posted = 0
+          for (const tx of ready) {
+            try { await bk.postStagedTransaction(tx.id); posted++ }
+            catch { /* skip failures */ }
+          }
+          return { message: `Posted ${posted}/${ready.length} transactions to the ledger.` }
+        }
+
+        default:
+          return { error: `Unknown intent: ${params.intent}. Use: fix_mistakes, ask_questions, answer, status, recategorize_all, post_ready` }
+      }
+    },
+  },
+
   {
     name: 'bookkeeping_get_questions',
     description: 'Get flagged transactions that need human input. Returns them as plain English questions.',
