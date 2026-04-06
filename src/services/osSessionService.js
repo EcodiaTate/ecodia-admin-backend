@@ -164,6 +164,7 @@ async function sendMessage(content) {
   // Stream stdout (stream-json NDJSON)
   let ccCliSessionId = session.cc_cli_session_id
   let lastResultJson = null
+  const collectedText = [] // collect all text blocks for HTTP response fallback
 
   const rl = createInterface({ input: proc.stdout })
   rl.on('line', async (line) => {
@@ -171,7 +172,7 @@ async function sendMessage(content) {
       const safeLine = secretSafety.scrubSecrets(line)
       await appendLog(sessionId, safeLine)
 
-      // Parse stream-json to extract session ID and broadcast
+      // Parse stream-json to extract session ID, text, and broadcast
       try {
         const parsed = JSON.parse(safeLine)
 
@@ -179,6 +180,15 @@ async function sendMessage(content) {
         if (parsed.session_id && !ccCliSessionId) {
           ccCliSessionId = parsed.session_id
           await updateOSSession(sessionId, { ccCliSessionId, status: 'running' })
+        }
+
+        // Collect text for HTTP response fallback
+        if (parsed.type === 'assistant' && parsed.message?.content) {
+          for (const block of parsed.message.content) {
+            if (block.type === 'text' && block.text) {
+              collectedText.push(block.text)
+            }
+          }
         }
 
         // Track the last result for completion
@@ -221,10 +231,12 @@ async function sendMessage(content) {
         logger.warn('OS Session exited with error', { code, stderr: errorMsg.slice(0, 500) })
       }
 
+      // Emit both status and complete events — frontend listens on complete to finalize
       emitStatus('complete', { sessionId, code })
+      broadcast('os-session:complete', { sessionId, code })
       logger.info('OS Session exchange complete', { sessionId, code, ccCliSessionId })
 
-      resolve({ sessionId, ccCliSessionId, code })
+      resolve({ sessionId, ccCliSessionId, code, text: collectedText.join('\n\n') })
     })
   })
 }
