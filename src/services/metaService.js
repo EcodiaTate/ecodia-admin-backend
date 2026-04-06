@@ -413,8 +413,7 @@ async function getPosts({ pageId, limit = 30 } = {}) {
 async function getConversations({ pageId, limit = 30 } = {}) {
   return db`
     SELECT mc.id, mc.conversation_id, mc.page_id, mc.participant_name, mc.participant_id,
-           mc.platform, mc.last_message_at, mc.unread_count, mc.triage_status, mc.triage_summary,
-           mc.triage_action, mc.category, mc.priority, mc.client_id,
+           mc.platform, mc.last_message_at, mc.unread, mc.triage_status, mc.triage_priority, mc.triage_summary,
            pg.name AS page_name,
       (SELECT message_text FROM meta_messages WHERE conversation_id = mc.id ORDER BY created_time DESC LIMIT 1) AS last_message
     FROM meta_conversations mc

@@ -1,12 +1,17 @@
 const registry = require('../services/capabilityRegistry')
 
+// Resolve a client by UUID or name — lets capabilities accept either
 async function resolveClientId(params) {
   if (params.clientId && /^[0-9a-f-]{36}$/i.test(params.clientId)) return params.clientId
-  const name = params.clientName || params.clientId
+  const name = params.clientName || params.clientId // treat non-UUID clientId as a name
   if (!name || name.trim().length < 2) throw new Error('Provide a clientId (UUID) or clientName to search')
   const db = require('../config/db')
   const q = `%${name.trim()}%`
-  const matches = await db`SELECT id, name FROM clients WHERE archived_at IS NULL AND name ILIKE ${q} ORDER BY updated_at DESC LIMIT 3`
+  const matches = await db`
+    SELECT id, name FROM clients
+    WHERE archived_at IS NULL AND name ILIKE ${q}
+    ORDER BY updated_at DESC LIMIT 3
+  `
   if (matches.length === 0) throw new Error(`No client found matching "${name}"`)
   if (matches.length > 1) {
     const list = matches.map(m => `${m.name} (${m.id})`).join(', ')
@@ -62,37 +67,39 @@ registry.registerMany([
 
   {
     name: 'update_crm_status',
-    description: 'Move a CRM client to a new pipeline status — lead, proposal, contract, development, live, ongoing, archived',
+    description: 'Move a CRM client to a new pipeline status — lead, proposal, contract, development, live, ongoing, archived. Accepts UUID or client name.',
     tier: 'write',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       status: { type: 'string', required: true, description: 'New status name' },
       note: { type: 'string', required: false, description: 'Reason for status change' },
     },
     handler: async (params) => {
       const db = require('../config/db')
       const crmService = require('../services/crmService')
+      const clientId = await resolveClientId(params)
 
-      const [current] = await db`SELECT name, status FROM clients WHERE id = ${params.clientId}`
-      if (!current) throw new Error(`Client ${params.clientId} not found`)
+      const [current] = await db`SELECT name, status FROM clients WHERE id = ${clientId}`
+      if (!current) throw new Error(`Client ${clientId} not found`)
 
-      await db`UPDATE clients SET status = ${params.status}, updated_at = now() WHERE id = ${params.clientId}`
+      await db`UPDATE clients SET status = ${params.status}, updated_at = now() WHERE id = ${clientId}`
       await db`
         INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
-        VALUES (${params.clientId}, ${current.status}, ${params.status}, ${params.note || null})
+        VALUES (${clientId}, ${current.status}, ${params.status}, ${params.note || null})
       `
 
       if (params.note) {
         const note = JSON.stringify([{ content: params.note, createdAt: new Date().toISOString(), source: 'ai' }])
         await db`
           UPDATE clients SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
-          WHERE id = ${params.clientId}
+          WHERE id = ${clientId}
         `
       }
 
       await crmService.logActivity({
-        clientId: params.clientId,
+        clientId,
         activityType: 'stage_changed',
         title: `Status: ${current.status} → ${params.status}`,
         description: params.note,
@@ -104,7 +111,7 @@ registry.registerMany([
       // Fire KG hook
       try {
         const kgHooks = require('../services/kgIngestionHooks')
-        kgHooks.onClientUpdated({ client: { ...current, id: params.clientId }, previousStage: current.status }).catch(() => {})
+        kgHooks.onClientUpdated({ client: { ...current, id: clientId }, previousStage: current.status }).catch(() => {})
       } catch {}
 
       return { message: `${current.name} moved from ${current.status} to ${params.status}` }
@@ -115,7 +122,7 @@ registry.registerMany([
 
   {
     name: 'create_task',
-    description: 'Create a task — anything that needs doing, tied to a client or project or free-standing',
+    description: 'Create a task — anything that needs doing, tied to a client or project or free-standing. Accepts client UUID or name.',
     tier: 'write',
     domain: 'crm',
     params: {
@@ -124,25 +131,27 @@ registry.registerMany([
       priority: { type: 'string', required: false, description: 'low|medium|high|urgent' },
       source: { type: 'string', required: false, description: 'Origin: gmail|linkedin|crm|ai|manual' },
       clientId: { type: 'string', required: false, description: 'Associated client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       projectId: { type: 'string', required: false, description: 'Associated project UUID' },
       dueDate: { type: 'string', required: false, description: 'ISO date' },
     },
     handler: async (params) => {
       const db = require('../config/db')
       const crmService = require('../services/crmService')
+      const clientId = (params.clientId || params.clientName) ? await resolveClientId(params) : null
       const validSources = ['gmail', 'linkedin', 'crm', 'manual', 'cc', 'cortex']
       const source = validSources.includes(params.source) ? params.source : 'cortex'
       const [task] = await db`
         INSERT INTO tasks (title, description, source, client_id, project_id, priority, due_date)
         VALUES (${params.title}, ${params.description || null}, ${source},
-                ${params.clientId || null}, ${params.projectId || null},
+                ${clientId || null}, ${params.projectId || null},
                 ${params.priority || 'medium'}, ${params.dueDate || null})
         RETURNING id, title
       `
 
-      if (params.clientId) {
+      if (clientId) {
         await crmService.logActivity({
-          clientId: params.clientId,
+          clientId,
           projectId: params.projectId,
           activityType: 'task_created',
           title: `Task: ${task.title}`,
@@ -176,17 +185,18 @@ registry.registerMany([
 
   {
     name: 'get_client_tasks',
-    description: 'Get open tasks for a client, sorted by priority and due date',
+    description: 'Get open tasks for a client, sorted by priority and due date. Accepts UUID or client name.',
     tier: 'read',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       includeCompleted: { type: 'boolean', required: false, description: 'Include completed tasks (default: false)' },
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const id=await resolveClientId(params)
-      const tasks=await crmService.getClientTasks(id, { includeCompleted: params.includeCompleted })
+      const id = await resolveClientId(params)
+      const tasks = await crmService.getClientTasks(id, { includeCompleted: params.includeCompleted })
       return { tasks, count: tasks.length }
     },
   },
@@ -195,25 +205,27 @@ registry.registerMany([
 
   {
     name: 'add_client_note',
-    description: 'Add a note to a CRM client record — logged to activity timeline',
+    description: 'Add a note to a CRM client record — logged to activity timeline. Accepts UUID or client name.',
     tier: 'write',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       content: { type: 'string', required: true, description: 'Note text' },
       source: { type: 'string', required: false, description: 'Note origin' },
     },
     handler: async (params) => {
       const db = require('../config/db')
       const crmService = require('../services/crmService')
+      const clientId = await resolveClientId(params)
       const note = JSON.stringify([{ content: params.content, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
       await db`
         UPDATE clients SET notes = COALESCE(notes, '[]'::jsonb) || ${note}::jsonb, updated_at = now()
-        WHERE id = ${params.clientId}
+        WHERE id = ${clientId}
       `
 
       await crmService.logActivity({
-        clientId: params.clientId,
+        clientId,
         activityType: 'note_added',
         title: 'Note added',
         description: params.content.slice(0, 200),
@@ -221,7 +233,7 @@ registry.registerMany([
         actor: 'ai',
       })
 
-      return { message: `Note added to client ${params.clientId}` }
+      return { message: `Note added to client ${clientId}` }
     },
   },
 
@@ -229,7 +241,7 @@ registry.registerMany([
 
   {
     name: 'get_client_intelligence',
-    description: 'Get comprehensive client intelligence — projects, emails, tasks, sessions, activity timeline, revenue, contacts. The full picture.',
+    description: 'Get comprehensive client intelligence — projects, emails, tasks, sessions, activity timeline, revenue, contacts. The full picture. Accepts UUID or client name.',
     tier: 'read',
     domain: 'crm',
     priority: 'critical',
@@ -246,7 +258,7 @@ registry.registerMany([
 
   {
     name: 'get_client_timeline',
-    description: 'Get the unified activity timeline for a client — every interaction from every channel',
+    description: 'Get the unified activity timeline for a client — every interaction from every channel. Accepts UUID or client name.',
     tier: 'read',
     domain: 'crm',
     params: {
@@ -257,8 +269,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const types = params.types ? params.types.split(',').map(t => t.trim()) : undefined
       const id = await resolveClientId(params)
+      const types = params.types ? params.types.split(',').map(t => t.trim()) : undefined
       return crmService.getClientTimeline(id, { limit: params.limit || 50, types })
     },
   },
@@ -267,11 +279,12 @@ registry.registerMany([
 
   {
     name: 'add_client_contact',
-    description: 'Add a contact person to a client — supports multiple stakeholders per client',
+    description: 'Add a contact person to a client — supports multiple stakeholders per client. Accepts UUID or client name.',
     tier: 'write',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       name: { type: 'string', required: true, description: 'Contact name' },
       role: { type: 'string', required: false, description: 'Role: decision_maker, technical, billing, general' },
       email: { type: 'string', required: false, description: 'Contact email' },
@@ -281,24 +294,25 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const cid=await resolveClientId(params)
-      const contact=await crmService.addContact({...params,clientId:cid})
+      const clientId = await resolveClientId(params)
+      const contact = await crmService.addContact({ ...params, clientId })
       return { message: `Contact added: ${contact.name}`, contactId: contact.id }
     },
   },
 
   {
     name: 'get_client_contacts',
-    description: 'List all contacts for a client',
+    description: 'List all contacts for a client. Accepts UUID or client name.',
     tier: 'read',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const id=await resolveClientId(params)
-      const contacts=await crmService.getContacts(id)
+      const id = await resolveClientId(params)
+      const contacts = await crmService.getContacts(id)
       return { contacts }
     },
   },
@@ -410,15 +424,16 @@ registry.registerMany([
 
   {
     name: 'compute_client_health',
-    description: 'Compute and update the health score for a client based on recent activity',
+    description: 'Compute and update the health score for a client based on recent activity. Accepts UUID or client name.',
     tier: 'write',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const id=await resolveClientId(params)
+      const id = await resolveClientId(params)
       return crmService.computeClientHealth(id)
     },
   },

@@ -76,32 +76,14 @@ async function buildSystemPrompt(workspaceName) {
   const coreFacts = await getCoreContext()
   const factsBlock = coreFacts.map(f => `${f.key}: ${f.value}`).join('\n')
 
-  // If no workspace, build a general prompt with workspace options
+  // If no workspace specified, default to "command" — the boss mode with all capabilities
   if (!ws) {
-    const workspaceList = listWorkspaces().map(w => `- ${w.name}: ${w.description}`).join('\n')
-    const allDocs = await listAllDocs()
-    const docList = allDocs.map(d => `- ${d.key} (${d.workspace || 'global'}) — ${d.title}`).join('\n')
-
-    return `You are a practical operations assistant for Ecodia Pty Ltd. You can chat generally or activate a workspace for focused work.
-
---- CORE FACTS ---
-${factsBlock}
-
-Available workspaces (tell the human to switch if they need focused tools):
-${workspaceList}
-
-Available reference docs (use need_doc to load any):
-${docList || '(none yet)'}
-
-RESPONSE FORMAT: Return a JSON array of blocks.
-  {"type":"text","content":"..."} — message to the human
-  {"type":"need_doc","docKey":"..."} — load a reference doc
-  {"type":"question","content":"..."} — ask the human a question
-  {"type":"update_doc","docKey":"...","title":"...","content":"..."} — create/update a doc
-  {"type":"update_context","key":"...","value":"..."} — update a core fact
-
-You have no action tools in general mode. If the human needs to run actions (bookkeeping, email, etc.), suggest they switch to the relevant workspace.
-Return ONLY the JSON array, no markdown fences, no prose outside the array.`
+    ws = getWorkspace('command')
+    if (!ws) {
+      // Fallback if command workspace somehow doesn't exist
+      const workspaceList = listWorkspaces().map(w => `- ${w.name}: ${w.description}`).join('\n')
+      return `You are a practical operations assistant for Ecodia Pty Ltd. Switch to a workspace for focused tools:\n${workspaceList}`
+    }
   }
 
   // Workspace-activated prompt
