@@ -201,23 +201,36 @@ function findClosestCapability(name) {
 // attempt to reload capabilities once. Handles transient boot failures.
 
 function attemptRecovery(name) {
-  if (_recoveryAttempted || failedDomains.size === 0) return false
+  if (_recoveryAttempted) return false
   _recoveryAttempted = true
 
-  logger.info(`CapabilityRegistry: attempting recovery for "${name}" (${failedDomains.size} failed domains: ${[...failedDomains].join(', ')})`)
-  const recovered = []
-  for (const domain of [...failedDomains]) {
+  // Two recovery paths:
+  // 1. Failed domains — specific domains threw during bootstrap
+  // 2. Empty registry — capabilities/index hasn't been required yet (boot race)
+  if (failedDomains.size === 0 && registry.size === 0) {
+    logger.info(`CapabilityRegistry: registry empty — loading capabilities/index for "${name}"`)
     try {
-      require(`../capabilities/${domain}`)
-      failedDomains.delete(domain)
-      recovered.push(domain)
+      require('../capabilities/index')
     } catch (err) {
-      logger.warn(`CapabilityRegistry: recovery failed for ${domain}`, { error: err.message })
+      logger.warn(`CapabilityRegistry: full bootstrap recovery failed`, { error: err.message })
+    }
+  } else if (failedDomains.size > 0) {
+    logger.info(`CapabilityRegistry: attempting recovery for "${name}" (${failedDomains.size} failed domains: ${[...failedDomains].join(', ')})`)
+    const recovered = []
+    for (const domain of [...failedDomains]) {
+      try {
+        require(`../capabilities/${domain}`)
+        failedDomains.delete(domain)
+        recovered.push(domain)
+      } catch (err) {
+        logger.warn(`CapabilityRegistry: recovery failed for ${domain}`, { error: err.message })
+      }
+    }
+    if (recovered.length > 0) {
+      logger.info(`CapabilityRegistry: recovered ${recovered.join(', ')} — registry now has ${registry.size} capabilities`)
     }
   }
-  if (recovered.length > 0) {
-    logger.info(`CapabilityRegistry: recovered ${recovered.join(', ')} — registry now has ${registry.size} capabilities`)
-  }
+
   // Reset recovery flag after 60s so we can retry later if needed
   setTimeout(() => { _recoveryAttempted = false }, 60_000)
   return registry.has(name)

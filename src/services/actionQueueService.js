@@ -540,6 +540,14 @@ async function execute(actionId) {
   try {
     const result = await performAction(item)
 
+    // If the capability wasn't found (boot race or genuinely missing),
+    // keep the action as pending with an error so retryFailed() picks it up
+    if (result?.unhandled) {
+      await db`UPDATE action_queue SET status = 'pending', error_message = ${result.message || 'Capability not loaded'} WHERE id = ${actionId}`
+      logger.info(`ActionQueue: ${actionId} kept pending (unhandled) — will retry`, { actionType: item.action_type })
+      return result
+    }
+
     await db`UPDATE action_queue SET status = 'executed', executed_at = now() WHERE id = ${actionId}`
 
     broadcast('action_queue:executed', { id: actionId, result })
