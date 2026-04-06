@@ -1024,8 +1024,8 @@ Respond as JSON:
     }
   }
 
-  // Dispatch high-confidence predictions to Factory — let the Factory resolve whether
-  // it's actually codebase work. No keyword filtering: the AI decides, not a regex.
+  // Dispatch predictions to Factory — dispatchFromPrediction runs AI triage to filter
+  // non-code predictions (behavioral, psychological) before spawning a CC session.
   for (const pred of predictions) {
     if (pred.action !== 'predicted') continue
     try {

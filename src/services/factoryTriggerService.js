@@ -697,6 +697,36 @@ async function dispatchFromPrediction(prediction) {
     return null
   }
 
+  // AI triage: let DeepSeek decide whether this prediction is actionable code work
+  // before burning a CC session on it. Behavioral/psychological predictions about
+  // humans are valid KG output but not Factory work.
+  try {
+    const deepseekService = require('./deepseekService')
+    const triageRaw = await deepseekService.callDeepSeek([{
+      role: 'user',
+      content: `A knowledge graph prediction was generated. Should this trigger a coding session?
+
+Prediction: ${prediction.description}
+Basis: ${prediction.basis || 'unknown'}
+Confidence: ${prediction.confidence || 'N/A'}
+
+A coding session can: modify code, add features, fix bugs, create migrations, update configs, improve infrastructure.
+A coding session cannot: change human behavior, resolve emotional states, provide therapy, write articles.
+
+Respond as JSON:
+{ "actionable": true/false, "reason": "why or why not" }`
+    }], { module: 'prediction_triage', skipRetrieval: true, skipLogging: true, temperature: 0.3 })
+
+    const triage = JSON.parse(triageRaw.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+    if (!triage.actionable) {
+      logger.info(`KG prediction skipped (not code-actionable): ${(prediction.description || '').slice(0, 80)} — ${triage.reason || 'AI decided'}`)
+      return null
+    }
+  } catch (err) {
+    // Triage failure is non-blocking — if we can't triage, proceed with dispatch
+    logger.debug('Prediction triage failed, proceeding with dispatch', { error: err.message })
+  }
+
   const codebaseId = prediction.codebaseId || await resolveCodebase({ prompt: prediction.description })
 
   logger.info(`KG prediction → Factory session: ${(prediction.description || '').slice(0, 80)} (${windowCount + 1}/${PREDICTION_DAILY_CAP} in 24h window)`)
