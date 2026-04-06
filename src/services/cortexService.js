@@ -1503,61 +1503,101 @@ function formatDuration(seconds) {
 }
 
 function parseBlocks(raw) {
-  // Helper: validate that a parsed value looks like a blocks array
-  const isBlockArray = (v) => Array.isArray(v) && v.length > 0 && v.every(b => b && typeof b.type === 'string')
+  if (!raw || typeof raw !== 'string') return [{ type: 'text', content: String(raw || '') }]
+  const trimmed = raw.trim()
+  const isBlock = (v) => v && typeof v === 'object' && typeof v.type === 'string'
+  const isBlockArray = (v) => Array.isArray(v) && v.length > 0 && v.every(isBlock)
 
-  // 1. Direct JSON parse
+  // 1. Pure JSON
   try {
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(trimmed)
     if (isBlockArray(parsed)) return parsed
-    if (parsed.blocks && isBlockArray(parsed.blocks)) return parsed.blocks
-    // Single block object (not wrapped in array)
-    if (parsed && typeof parsed.type === 'string') return [parsed]
-  } catch { /* not pure JSON — try extraction strategies */ }
+    if (parsed?.blocks && isBlockArray(parsed.blocks)) return parsed.blocks
+    if (isBlock(parsed)) return [parsed]
+  } catch { /* not pure JSON */ }
 
-  // 2. JSON inside markdown code fences
-  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+  // 2. Fenced JSON
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenceMatch) {
     try {
       const parsed = JSON.parse(fenceMatch[1].trim())
       if (isBlockArray(parsed)) return parsed
-      if (parsed && typeof parsed.type === 'string') return [parsed]
+      if (isBlock(parsed)) return [parsed]
     } catch { /* fall through */ }
   }
 
-  // 3. JSON array embedded in surrounding prose — find [{"type": pattern
-  //    Using indexOf('[') is too greedy — prose like "my [response]:" grabs the wrong bracket.
-  //    Instead, look for [{ which is the actual start of a JSON blocks array.
-  const jsonArrayStart = raw.indexOf('[{')
-  if (jsonArrayStart !== -1) {
-    const lastBracket = raw.lastIndexOf(']')
-    if (lastBracket > jsonArrayStart) {
-      try {
-        const parsed = JSON.parse(raw.slice(jsonArrayStart, lastBracket + 1))
-        if (isBlockArray(parsed)) return parsed
-      } catch { /* fall through */ }
+  // 3. Extract JSON array with proper bracket matching
+  const arrayStart = trimmed.indexOf('[')
+  if (arrayStart !== -1) {
+    let depth = 0, inStr = false, esc = false
+    for (let i = arrayStart; i < trimmed.length; i++) {
+      const ch = trimmed[i]
+      if (esc) { esc = false; continue }
+      if (ch === '\\') { esc = true; continue }
+      if (ch === '"') { inStr = !inStr; continue }
+      if (inStr) continue
+      if (ch === '[') depth++
+      else if (ch === ']') {
+        depth--
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(arrayStart, i + 1))
+            if (isBlockArray(parsed)) return parsed
+          } catch { /* not valid at this bracket */ }
+          break
+        }
+      }
     }
   }
 
-  // 3b. Fallback: try any outermost [ ... ] pair (handles edge cases)
-  const firstBracket = raw.indexOf('[')
-  const lastBracket = raw.lastIndexOf(']')
-  if (firstBracket !== -1 && lastBracket > firstBracket && firstBracket !== jsonArrayStart) {
+  // 4. Find individual JSON objects with "type" field scattered in prose
+  const blocks = []
+  const proseChunks = []
+  let lastEnd = 0
+  const objPattern = /\{[^{}]*"type"\s*:\s*"[^"]+"/g
+  let objMatch
+  while ((objMatch = objPattern.exec(trimmed)) !== null) {
+    const start = objMatch.index
+    let depth = 0, inStr = false, esc = false, end = -1
+    for (let i = start; i < trimmed.length; i++) {
+      const ch = trimmed[i]
+      if (esc) { esc = false; continue }
+      if (ch === '\\') { esc = true; continue }
+      if (ch === '"') { inStr = !inStr; continue }
+      if (inStr) continue
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) { end = i; break }
+      }
+    }
+    if (end === -1) continue
     try {
-      const parsed = JSON.parse(raw.slice(firstBracket, lastBracket + 1))
-      if (isBlockArray(parsed)) return parsed
-    } catch { /* fall through */ }
+      const parsed = JSON.parse(trimmed.slice(start, end + 1))
+      if (isBlock(parsed)) {
+        const prose = trimmed.slice(lastEnd, start).trim()
+        if (prose) proseChunks.push(prose)
+        blocks.push(parsed)
+        lastEnd = end + 1
+      }
+    } catch { /* not valid JSON */ }
   }
 
-  // 4. Last resort: wrap as text — log so we can diagnose parsing failures
-  logger.warn('Cortex parseBlocks: all JSON extraction strategies failed — wrapping as raw text', {
-    rawLength: raw.length,
-    rawPreview: raw.slice(0, 300),
-    rawTail: raw.slice(-200),
-    hasOpenBracket: raw.includes('['),
-    hasOpenBrace: raw.includes('{'),
+  if (blocks.length > 0) {
+    const trailing = trimmed.slice(lastEnd).trim()
+    if (trailing) proseChunks.push(trailing)
+    if (proseChunks.length > 0) {
+      blocks.unshift({ type: 'text', content: proseChunks.join('\n\n') })
+    }
+    return blocks
+  }
+
+  // 5. Nothing parsed — return as text
+  logger.warn('Cortex parseBlocks: all extraction strategies failed', {
+    rawLength: trimmed.length,
+    rawPreview: trimmed.slice(0, 300),
   })
-  return [{ type: 'text', content: raw }]
+  return [{ type: 'text', content: trimmed }]
 }
 
 function extractMentionedNodes(kgContext, query) {
