@@ -509,6 +509,28 @@ registry.registerMany([
     },
   },
 
+  {
+    name: 'linkedin_set_cookie',
+    description: 'Update the LinkedIn li_at session cookie. Get this from browser DevTools: Application → Cookies → linkedin.com → li_at. Paste the value here.',
+    tier: 'write',
+    domain: 'linkedin',
+    params: {
+      li_at: { type: 'string', required: true, description: 'The li_at cookie value from LinkedIn (starts with AQ...)' },
+    },
+    handler: async (params) => {
+      const browser = require('../services/linkedinBrowser')
+      const cookie = params.li_at.trim()
+      if (!cookie || cookie.length < 20) return { error: 'Invalid cookie — too short. The li_at value should be a long string starting with AQ.' }
+
+      try {
+        await browser.setSessionCookie(cookie)
+        return { message: 'LinkedIn cookie updated. The worker will use this on its next run.' }
+      } catch (err) {
+        return { error: `Failed to update cookie: ${err.message}` }
+      }
+    },
+  },
+
   // ── Sync ──
   {
     name: 'linkedin_sync_dms',
