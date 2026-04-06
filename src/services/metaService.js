@@ -379,7 +379,7 @@ async function poll() {
 
 async function getPages() {
   return db`
-    SELECT mp.*,
+    SELECT mp.id, mp.page_id, mp.name, mp.category, mp.platform, mp.followers_count, mp.fan_count, mp.created_at,
       (SELECT count(*)::int FROM meta_posts WHERE page_id = mp.id) AS post_count,
       (SELECT count(*)::int FROM meta_conversations WHERE page_id = mp.id) AS conversation_count
     FROM meta_pages mp
@@ -389,7 +389,9 @@ async function getPages() {
 
 async function getPosts({ pageId, limit = 30 } = {}) {
   return db`
-    SELECT mp.*, pg.name AS page_name
+    SELECT mp.id, mp.post_id, mp.page_id, mp.message, mp.link, mp.picture, mp.type,
+           mp.likes_count, mp.comments_count, mp.shares_count, mp.reach, mp.impressions,
+           mp.created_time, pg.name AS page_name
     FROM meta_posts mp
     JOIN meta_pages pg ON mp.page_id = pg.id
     WHERE 1=1 ${pageId ? db`AND mp.page_id = ${pageId}` : db``}
@@ -400,7 +402,10 @@ async function getPosts({ pageId, limit = 30 } = {}) {
 
 async function getConversations({ pageId, limit = 30 } = {}) {
   return db`
-    SELECT mc.*, pg.name AS page_name,
+    SELECT mc.id, mc.conversation_id, mc.page_id, mc.participant_name, mc.participant_id,
+           mc.platform, mc.last_message_at, mc.unread_count, mc.triage_status, mc.triage_summary,
+           mc.triage_action, mc.category, mc.priority, mc.client_id,
+           pg.name AS page_name,
       (SELECT message_text FROM meta_messages WHERE conversation_id = mc.id ORDER BY created_time DESC LIMIT 1) AS last_message
     FROM meta_conversations mc
     JOIN meta_pages pg ON mc.page_id = pg.id

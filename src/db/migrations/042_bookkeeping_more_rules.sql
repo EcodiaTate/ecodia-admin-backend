@@ -1,3 +1,16 @@
+-- 042: Additional supplier rules + cleanup garbage auto-learned rules
+
+-- First: purge auto-learned rules that are reference numbers or garbage patterns
+DELETE FROM supplier_rules WHERE learning_source = 'ai_learned'
+  AND (
+    pattern ~ '^[a-z0-9\\.*]{10,}$'           -- long alphanumeric garbage
+    OR supplier_name ~ '^[A-Z0-9]{5,}'         -- ref-number supplier names
+    OR pattern ~ '7d1b'                         -- Centrelink refs
+    OR pattern ~ 'dewr'                         -- DEWR salary refs
+    OR account_code = 'DISCARD'                 -- never should have learned DISCARD rules
+    OR account_code = '2100'                    -- Director Loan as account code is wrong
+  );
+
 -- 042: Additional supplier rules discovered from CSV analysis
 --
 -- These cover patterns found in months 2-12 of the bank statements
@@ -12,7 +25,7 @@ VALUES
   ('BIZ\s*COVER|EZI\*BIZ', 'BizCover', '5025', true, true, 'gst_inclusive'),
   ('ECODIA PTY', 'Ecodia Pty Ltd (Stripe test)', 'DISCARD', true, false, 'gst_free'),
   ('translink|smartticket', 'Translink', 'DISCARD', true, false, 'gst_free'),
-  ('google one', 'Google One', 'DISCARD', true, false, 'gst_free'),
+  ('google one', 'Google One (Personal)', 'DISCARD', true, false, 'gst_free'),
   ('suncorp transactional', 'Suncorp (Personal Transfer)', 'DISCARD', true, false, 'gst_free'),
   ('QUT SPORT', 'QUT Sport', 'DISCARD', true, false, 'gst_free')
 ON CONFLICT DO NOTHING;

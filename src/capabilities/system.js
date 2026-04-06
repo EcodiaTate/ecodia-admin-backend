@@ -123,11 +123,28 @@ registry.registerMany([
   // ─── Query Own Database ──────────────────────────────────────────
   {
     name: 'query_database',
-    description: 'Run a read-only SQL query against the EcodiaOS database. For diagnostics: checking session counts, error patterns, action queue state, integration health.',
+    description: `Run a read-only SQL query against the EcodiaOS database. For diagnostics: checking session counts, error patterns, action queue state, integration health.
+
+IMPORTANT — use exact table names (there is NO table called "goals"):
+Core: clients, projects, tasks, pipeline_events, transactions, notifications, app_errors
+Sessions: cc_sessions, cc_session_logs, cortex_sessions, cortex_context, os_task_sessions
+Factory: factory_learnings, factory_dispatch_log, validation_runs, deployments
+Organism: organism_goals, organism_self_model, introspection_logs, growth_journal, scheduled_tasks
+Actions: action_queue, action_decisions, direct_actions, event_bus_log
+CRM: crm_activity_log, crm_contacts
+Email/Social: email_threads, gmail_sync_state, linkedin_profiles, linkedin_posts, linkedin_dms, linkedin_session, linkedin_connection_requests, linkedin_network_snapshots, linkedin_content_themes, linkedin_scrape_log, linkedin_engagement_watchlist, linkedin_engagement_queue
+Calendar: calendar_events, calendar_sync_state
+Coding: codebases, code_chunks, code_requests, secret_blocklist
+Bookkeeping: gl_accounts, staged_transactions, ledger_transactions, ledger_lines, bk_receipts, supplier_rules, accounting_periods, audit_log, bank_reconciliation
+Infrastructure: worker_heartbeats, deepseek_usage, playwright_runs, symbridge_messages, _migrations
+Google/Vercel/Meta: drive_files, drive_sync_state, vercel_projects, vercel_deployments, meta_pages, meta_posts, meta_conversations, meta_messages
+Context: dismissed_items, resolved_issues, user_preferences, conversation_context
+OS Cortex: os_docs, os_core_context
+Discard: discard_rules`,
     tier: 'read',
     domain: 'system',
     params: {
-      query: { type: 'string', required: true, description: 'SQL SELECT query (read-only, no mutations)' },
+      query: { type: 'string', required: true, description: 'SQL SELECT query (read-only, no mutations). Use exact table names from the capability description.' },
     },
     handler: async (params) => {
       const db = require('../config/db')
@@ -472,12 +489,23 @@ registry.registerMany([
   // ─── Execute Database Mutation ──────────────────────────────────
   {
     name: 'execute_database',
-    description: 'Execute a SQL mutation (INSERT, UPDATE, DELETE, ALTER, CREATE) against the EcodiaOS database. For operational fixes, data corrections, and schema changes without a full Factory session.',
+    description: `Execute a SQL mutation (INSERT, UPDATE, DELETE, ALTER, CREATE) against the EcodiaOS database. For operational fixes, data corrections, and schema changes without a full Factory session.
+
+IMPORTANT — use exact table names (there is NO table called "goals"):
+Core: clients, projects, tasks, pipeline_events, transactions, notifications, app_errors
+Sessions: cc_sessions, cc_session_logs, cortex_sessions, cortex_context, os_task_sessions
+Factory: factory_learnings, factory_dispatch_log, validation_runs, deployments
+Organism: organism_goals, organism_self_model, introspection_logs, growth_journal, scheduled_tasks
+Actions: action_queue, action_decisions, direct_actions, event_bus_log
+CRM: crm_activity_log, crm_contacts
+Coding: codebases, code_chunks, code_requests, secret_blocklist
+Bookkeeping: gl_accounts, staged_transactions, ledger_transactions, ledger_lines, bk_receipts, supplier_rules, accounting_periods, audit_log, bank_reconciliation
+Infrastructure: worker_heartbeats, deepseek_usage, playwright_runs, symbridge_messages, _migrations`,
     tier: 'write',
     domain: 'system',
     priority: 'critical',
     params: {
-      query: { type: 'string', required: true, description: 'SQL statement to execute' },
+      query: { type: 'string', required: true, description: 'SQL statement to execute. Use exact table names from the capability description.' },
     },
     handler: async (params) => {
       const db = require('../config/db')

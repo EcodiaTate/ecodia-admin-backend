@@ -72,9 +72,12 @@ registry.registerMany([
       limit: { type: 'number', required: false, description: 'Max messages (default 30)' },
     },
     handler: async (params) => {
+      const conversationId = params.conversationId || params.conversation_id
+      if (!conversationId) throw new Error('conversationId is required')
       const db = require('../config/db')
       const messages = await db`
-        SELECT * FROM meta_messages WHERE conversation_id = ${params.conversationId}
+        SELECT id, conversation_id, sender_id, sender_name, message_text, created_time, is_from_page
+        FROM meta_messages WHERE conversation_id = ${conversationId}
         ORDER BY created_time DESC LIMIT ${params.limit || 30}`
       return { messages }
     },
@@ -240,8 +243,14 @@ registry.registerMany([
       dmId: { type: 'string', required: true, description: 'DM UUID' },
     },
     handler: async (params) => {
+      const dmId = params.dmId || params.dm_id || params.id
+      if (!dmId) throw new Error('dmId is required')
       const db = require('../config/db')
-      const [dm] = await db`SELECT * FROM linkedin_dms WHERE id = ${params.dmId}`
+      const [dm] = await db`
+        SELECT id, conversation_id, participant_name, participant_headline, participant_company,
+               status, category, priority, triage_summary, triage_action, lead_score,
+               draft_reply, message_count, last_message_at, messages, client_id
+        FROM linkedin_dms WHERE id = ${dmId}`
       if (!dm) throw new Error('DM not found')
       return dm
     },
@@ -333,7 +342,8 @@ registry.registerMany([
       const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
       const limit = params.limit || 20
       return { posts: await db.unsafe(
-        `SELECT * FROM linkedin_posts ${where} ORDER BY COALESCE(posted_at, scheduled_at, created_at) DESC LIMIT $${values.push(limit)}`, values) }
+        `SELECT id, content, post_type, hashtags, status, impressions, reactions, comments_count, engagement_rate, posted_at, scheduled_at, created_at, theme
+         FROM linkedin_posts ${where} ORDER BY COALESCE(posted_at, scheduled_at, created_at) DESC LIMIT $${values.push(limit)}`, values) }
     },
   },
   {
@@ -403,7 +413,9 @@ registry.registerMany([
     handler: async () => {
       const db = require('../config/db')
       const requests = await db`
-        SELECT * FROM linkedin_connection_requests
+        SELECT id, requester_name, requester_headline, requester_company, requester_profile_url,
+               relevance_score, note, status, direction, created_at
+        FROM linkedin_connection_requests
         WHERE status = 'pending' AND direction = 'incoming'
         ORDER BY relevance_score DESC NULLS LAST LIMIT 30`
       return { requests, count: requests.length }
@@ -451,10 +463,12 @@ registry.registerMany([
       const db = require('../config/db')
       const days = params.days || 30
       const snapshots = await db`
-        SELECT * FROM linkedin_network_snapshots
+        SELECT id, connections, followers, profile_views, search_appearances, snapshot_date
+        FROM linkedin_network_snapshots
         WHERE snapshot_date > now() - (${days} * interval '1 day')
         ORDER BY snapshot_date DESC`
-      return { snapshots, latest: snapshots[0] || null }
+      if (snapshots.length === 0) return { snapshots: [], latest: null, note: 'No snapshots found — LinkedIn network scraper may not have run recently. Use linkedin_check_connections to trigger a fresh snapshot.' }
+      return { snapshots, latest: snapshots[0] }
     },
   },
   {

@@ -505,14 +505,22 @@ async function autoCategorize() {
     })
     categorized++
 
-    // Auto-learn supplier rule from AI categorization (confidence > 0.8)
-    if (confidence >= 0.8 && result.supplier_name && !result.reasoning?.startsWith('Matched rule:')) {
-      try { await autoLearnRule(tx.description, result.account_code, result.is_personal, 'ai_learned') }
+    // Auto-learn supplier rule — BUT only for business expenses with a clean supplier name
+    // Never learn from DISCARD items (personal stuff is too varied)
+    // Never learn from reference-number-like descriptions (Centrelink refs, etc.)
+    if (confidence >= 0.8
+        && result.supplier_name
+        && result.account_code !== 'DISCARD'
+        && !result.reasoning?.startsWith('Matched rule:')
+        && !/^[A-Z0-9]{8,}/.test(tx.description)  // Skip ref-number descriptions
+        && result.supplier_name.length >= 3
+    ) {
+      try { await autoLearnRule(result.supplier_name, result.account_code, result.is_personal, 'ai_learned') }
       catch { /* non-critical */ }
     }
 
-    // Auto-post high confidence
-    if (confidence >= 0.9) {
+    // Auto-post high confidence business expenses (NOT discards — those are already ignored)
+    if (confidence >= 0.9 && result.account_code !== 'DISCARD') {
       try { await postStagedTransaction(tx.id) }
       catch (e) { logger.warn('Auto-post failed, will need manual posting', { id: tx.id, error: e.message }) }
     }
@@ -1055,23 +1063,26 @@ async function performEOFYClose(fyEnd) {
 // AUTO-LEARN SUPPLIER RULES
 // ═══════════════════════════════════════════════════════════════════════
 
-async function autoLearnRule(description, category, isPersonal, source = 'ai_learned', gstTreatment = null) {
-  // Extract first 3 meaningful words, escape each for regex, join with .*
-  const words = description.replace(/[#()\[\]{}"']/g, '').split(/\s+/).filter(w => w.length > 1).slice(0, 3)
-  if (words.length === 0) return null
+async function autoLearnRule(supplierName, category, isPersonal, source = 'ai_learned', gstTreatment = null) {
+  // The supplierName is the clean name from the AI (e.g. "Vercel", "GoDaddy", "Marketing Broker")
+  // NOT the raw bank description which contains garbage like ref numbers
+  if (!supplierName || supplierName.length < 3) return null
 
-  const escaped = words.map(w => w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  const pattern = escaped.join('.*')
+  // Skip if it looks like a reference number (mostly digits/uppercase)
+  if (/^[A-Z0-9\s*#]{8,}$/.test(supplierName)) return null
+
+  // Create a case-insensitive regex pattern from the supplier name
+  const escaped = supplierName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = escaped
   if (pattern.length < 3) return null
 
-  // Check if any existing rule already matches this description (not just exact pattern match)
-  const existing = await db`SELECT id FROM supplier_rules WHERE pattern = ${pattern}`
+  // Check if any existing rule already matches this supplier
+  const existing = await db`SELECT id FROM supplier_rules WHERE pattern ILIKE ${`%${escaped}%`} OR supplier_name ILIKE ${`%${supplierName}%`}`
   if (existing.length) return null
 
   // Default GST: personal = no_gst, DISCARD = no_gst, otherwise assume gst_inclusive (AU domestic)
   const gst = gstTreatment || (isPersonal || category === 'DISCARD' ? 'no_gst' : 'gst_inclusive')
 
-  const supplierName = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
   const [rule] = await db`
     INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, gst_treatment, learning_source, tags)
     VALUES (${pattern}, ${supplierName}, ${category}, ${isPersonal || false}, ${gst}, ${source}, ${'["auto_learned"]'})

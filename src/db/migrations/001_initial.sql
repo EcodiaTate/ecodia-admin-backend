@@ -10,23 +10,25 @@ CREATE TABLE IF NOT EXISTS _migrations (
 -- ─── CLIENTS / CRM ───────────────────────────────────────────────────────────
 
 CREATE TABLE clients (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL,
-    company     TEXT,
-    email       TEXT,
-    phone       TEXT,
-    linkedin_url TEXT,
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT NOT NULL,
+    company         TEXT,
+    contact_name    TEXT,
+    contact_email   TEXT,
+    contact_phone   TEXT,
+    linkedin_url    TEXT,
     xero_contact_id TEXT,
-    stage       TEXT NOT NULL DEFAULT 'lead'
-                CHECK (stage IN ('lead','proposal','contract',
-                                  'development','live','ongoing','archived')),
-    priority    TEXT DEFAULT 'medium' CHECK (priority IN ('low','medium','high')),
-    notes       JSONB DEFAULT '[]',
-    tags        TEXT[] DEFAULT '{}',
-    meta        JSONB DEFAULT '{}',
-    archived_at TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
+    status          TEXT NOT NULL DEFAULT 'lead'
+                    CHECK (status IN ('lead','proposal','contract',
+                                      'development','live','ongoing','archived')),
+    priority        TEXT DEFAULT 'medium' CHECK (priority IN ('low','medium','high')),
+    notes           JSONB DEFAULT '[]',
+    tags            TEXT[] DEFAULT '{}',
+    email_domains   TEXT[],
+    meta            JSONB DEFAULT '{}',
+    archived_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE projects (
