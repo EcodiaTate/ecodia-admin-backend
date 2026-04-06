@@ -66,6 +66,46 @@ registry.registerMany([
   },
 
   {
+    name: 'update_client',
+    description: 'Update client fields — contact info, company, tags, email domains, ABN. Accepts UUID or client name.',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
+      name: { type: 'string', required: false, description: 'New client name' },
+      contactName: { type: 'string', required: false, description: 'Primary contact name' },
+      contactEmail: { type: 'string', required: false, description: 'Primary contact email' },
+      contactPhone: { type: 'string', required: false, description: 'Primary contact phone' },
+      company: { type: 'string', required: false, description: 'Company name' },
+      tags: { type: 'array', required: false, description: 'Tags array' },
+      emailDomains: { type: 'array', required: false, description: 'Email domains for auto-linking' },
+      source: { type: 'string', required: false, description: 'Lead source' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const id = await resolveClientId(params)
+      const updates = {}
+      if (params.name) updates.name = params.name
+      if (params.contactName) updates.contact_name = params.contactName
+      if (params.contactEmail) updates.contact_email = params.contactEmail
+      if (params.contactPhone) updates.contact_phone = params.contactPhone
+      if (params.company) updates.company = params.company
+      if (params.tags) updates.tags = params.tags
+      if (params.emailDomains) updates.email_domains = params.emailDomains
+      if (params.source) updates.source = params.source
+      if (Object.keys(updates).length === 0) return { error: 'No fields to update' }
+      const [updated] = await db`
+        UPDATE clients SET ${db(updates, ...Object.keys(updates))}, updated_at = now()
+        WHERE id = ${id}
+        RETURNING id, name
+      `
+      if (!updated) return { error: 'Client not found' }
+      return { message: `Updated: ${updated.name}`, clientId: updated.id }
+    },
+  },
+
+  {
     name: 'update_crm_status',
     description: 'Move a CRM client to a new pipeline status — lead, proposal, contract, development, live, ongoing, archived. Accepts UUID or client name.',
     tier: 'write',
@@ -317,6 +357,48 @@ registry.registerMany([
     },
   },
 
+  // ─── Projects ──────────────────────────────────────────────────────
+
+  {
+    name: 'create_project',
+    description: 'Create a project for a client — tracks work, deals, tech stack, repo. Accepts client UUID or name.',
+    tier: 'write',
+    domain: 'crm',
+    params: {
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
+      name: { type: 'string', required: true, description: 'Project name' },
+      description: { type: 'string', required: false, description: 'Project description' },
+      status: { type: 'string', required: false, description: 'active|paused|complete|archived (default: active)' },
+      techStack: { type: 'array', required: false, description: 'Tech stack array e.g. ["Next.js", "Supabase"]' },
+      dealValueAud: { type: 'number', required: false, description: 'Deal value in AUD' },
+      paymentStatus: { type: 'string', required: false, description: 'none|invoiced|partial|paid|overdue' },
+      repoUrl: { type: 'string', required: false, description: 'GitHub/repo URL' },
+    },
+    handler: async (params) => {
+      const db = require('../config/db')
+      const crmService = require('../services/crmService')
+      const clientId = await resolveClientId(params)
+      const [project] = await db`
+        INSERT INTO projects (client_id, name, description, status, tech_stack, deal_value_aud, payment_status, repo_url)
+        VALUES (${clientId}, ${params.name}, ${params.description || null}, ${params.status || 'active'},
+                ${params.techStack || []}, ${params.dealValueAud || null},
+                ${params.paymentStatus || 'none'}, ${params.repoUrl || null})
+        RETURNING id, name
+      `
+      await crmService.logActivity({
+        clientId,
+        projectId: project.id,
+        activityType: 'deal_updated',
+        title: `Project created: ${project.name}`,
+        description: params.description,
+        source: 'crm',
+        actor: 'ai',
+      })
+      return { message: `Project created: ${project.name}`, projectId: project.id }
+    },
+  },
+
   // ─── Revenue & Deals ───────────────────────────────────────────────
 
   {
@@ -335,11 +417,14 @@ registry.registerMany([
 
   {
     name: 'update_project_deal',
-    description: 'Update deal/contract information on a project — value, contract date, payment status, invoice ref',
+    description: 'Update deal/contract information on a project — value, contract date, payment status, invoice ref. Accepts project UUID, project name, or client name (uses first active project).',
     tier: 'write',
     domain: 'crm',
     params: {
-      projectId: { type: 'string', required: true, description: 'Project UUID' },
+      projectId: { type: 'string', required: false, description: 'Project UUID' },
+      projectName: { type: 'string', required: false, description: 'Project name to search' },
+      clientId: { type: 'string', required: false, description: 'Client UUID (uses first active project)' },
+      clientName: { type: 'string', required: false, description: 'Client name (uses first active project)' },
       dealValue: { type: 'number', required: false, description: 'Deal value in AUD' },
       contractDate: { type: 'string', required: false, description: 'Contract date (ISO)' },
       estimatedHours: { type: 'number', required: false, description: 'Estimated hours' },
@@ -349,6 +434,23 @@ registry.registerMany([
     handler: async (params) => {
       const db = require('../config/db')
       const crmService = require('../services/crmService')
+
+      // Resolve project — by ID, name, or client's first active project
+      let projectId = params.projectId
+      if (!projectId && params.projectName) {
+        const q = `%${params.projectName.trim()}%`
+        const [match] = await db`SELECT id FROM projects WHERE name ILIKE ${q} ORDER BY updated_at DESC LIMIT 1`
+        if (!match) throw new Error(`No project found matching "${params.projectName}"`)
+        projectId = match.id
+      }
+      if (!projectId && (params.clientId || params.clientName)) {
+        const cid = await resolveClientId(params)
+        const [match] = await db`SELECT id FROM projects WHERE client_id = ${cid} ORDER BY status = 'active' DESC, updated_at DESC LIMIT 1`
+        if (!match) throw new Error(`No projects found for this client`)
+        projectId = match.id
+      }
+      if (!projectId) throw new Error('Provide projectId, projectName, or clientId/clientName')
+
       const updates = {}
       if (params.dealValue != null) updates.deal_value_aud = params.dealValue
       if (params.contractDate) updates.contract_date = params.contractDate
@@ -360,7 +462,7 @@ registry.registerMany([
 
       const [project] = await db`
         UPDATE projects SET ${db(updates, ...Object.keys(updates))}, updated_at = now()
-        WHERE id = ${params.projectId}
+        WHERE id = ${projectId}
         RETURNING id, name, client_id
       `
       if (!project) return { error: 'Project not found' }
@@ -407,15 +509,29 @@ registry.registerMany([
 
   {
     name: 'search_clients',
-    description: 'Search clients by name, company, email, or contact person',
+    description: 'Search clients by name, email, or contact person. If no query provided, returns all active clients.',
     tier: 'read',
     domain: 'crm',
     params: {
-      query: { type: 'string', required: true, description: 'Search query' },
+      query: { type: 'string', required: false, description: 'Search query (name, email, etc). Omit to list all active clients.' },
     },
     handler: async (params) => {
+      const db = require('../config/db')
       const crmService = require('../services/crmService')
-      const results = await crmService.searchClients(params.query)
+      const query = params.query || params.clientName || params.name || ''
+      if (query.trim().length >= 2) {
+        const results = await crmService.searchClients(query)
+        return { results, count: results.length }
+      }
+      // No query or too short — return all active clients
+      const results = await db`
+        SELECT c.id, c.name, c.contact_email, c.status, c.health_score,
+               (SELECT count(*)::int FROM projects WHERE client_id = c.id AND status = 'active') AS active_projects,
+               (SELECT count(*)::int FROM tasks WHERE client_id = c.id AND completed_at IS NULL) AS open_tasks
+        FROM clients c
+        WHERE c.archived_at IS NULL
+        ORDER BY c.updated_at DESC LIMIT 50
+      `
       return { results, count: results.length }
     },
   },
