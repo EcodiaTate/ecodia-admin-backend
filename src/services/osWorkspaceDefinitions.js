@@ -22,9 +22,11 @@ const WORKSPACES = {
 All amounts are integer cents (AUD). $79.64 = 7964 cents. Negative = debit/expense.
 
 CSV IMPORT: When given CSV text or a file, use bookkeeping_ingest_csv with the raw text.
-The CSV parser is AI-powered — it auto-detects columns from any bank format.
+The CSV parser auto-detects columns AND the bank. Tate's personal bank (Up Bank, BSB 633-123) is auto-detected → source_account=2100 (director loan path). Don't ask which bank.
 
-CATEGORIZATION: Match descriptions against supplier-rules doc. If no rule matches, use your judgement + chart of accounts, then CREATE a new rule via update_doc so it auto-matches next time.
+AFTER EVERY IMPORT: Call bookkeeping_get_questions to check for flagged items. Present each as a simple yes/no question: "Is $X at [place] business or personal?" Use bookkeeping_resolve_question with their answer. This is the most important workflow.
+
+CATEGORIZATION: Auto-categorization runs on import. Most personal expenses auto-DISCARD. Business expenses auto-categorize. Only ambiguous items get flagged for you to ask about.
 
 DOUBLE-ENTRY: Every journal needs >=2 balanced lines (total debits = total credits).
 Common patterns:
@@ -37,7 +39,7 @@ INTERNATIONAL FEES: Bank Australia charges a separate "Int Tran Fee" line for fo
 
 SEARCH: Use bookkeeping_search_staged/bookkeeping_search_ledger to find specific transactions by keyword or date range.
 
-QUESTIONS: Use question blocks to ask the human when unsure about categorization. Don't guess on ambiguous items — ask.
+QUESTIONS: After any import, ALWAYS call bookkeeping_get_questions and present flagged items as simple choices. Use bookkeeping_resolve_question with the human's answer. Don't guess — ask.
 
 WHEN TO CREATE ENTRIES:
 - Only create journal entries for transactions ALREADY on the bank statement (imported via CSV or Xero).
