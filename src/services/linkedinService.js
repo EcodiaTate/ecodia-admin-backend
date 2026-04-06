@@ -95,6 +95,23 @@ async function triagePendingDMs() {
       // Enqueue to action queue — AI decides what surfaces
       const actionQueue = require('./actionQueueService')
 
+      // Feed decision history back into triage — if this sender's actions are
+      // consistently dismissed, the AI should know before surfacing more
+      try {
+        const triageCtx = await actionQueue.getTriageContext({
+          senderName: dm.participant_name,
+          senderEmail: dm.participant_email,
+          source: 'linkedin',
+        })
+        if (triageCtx && triage.priority !== 'urgent') {
+          // Downgrade priority if sender is mostly dismissed
+          const dismissMatch = triageCtx.match(/(\d+)% dismissed/)
+          if (dismissMatch && parseInt(dismissMatch[1]) >= 70) {
+            triage.priority = triage.priority === 'high' ? 'medium' : 'low'
+          }
+        }
+      } catch {}
+
       // Surface reply if draft exists and it's not spam/ignore
       if (triage.draftReply && triage.priority !== 'spam' && triage.suggestedAction !== 'ignore') {
         await actionQueue.enqueue({

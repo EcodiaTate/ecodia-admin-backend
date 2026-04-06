@@ -326,7 +326,7 @@ Respond as JSON:
   }))
 }
 
-async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, projectCodebaseContext, receivedAt }) {
+async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, projectCodebaseContext, decisionContext, receivedAt }) {
   // kgContext may already be provided by gmailService — if so, skip retrieval
   const hasExternalContext = !!kgContext
 
@@ -348,6 +348,10 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
     ? `\n--- CLIENT PROJECTS & CODEBASES ---\n${projectCodebaseContext}\n--- END ---\n`
     : ''
 
+  const decisionBlock = decisionContext
+    ? `\n--- DECISION HISTORY (this sender) ---\n${decisionContext}\n--- END ---\n`
+    : ''
+
   const now = new Date()
   const emailAge = receivedAt
     ? (() => {
@@ -365,7 +369,7 @@ Now: ${now.toISOString()}
 Inbox: ${inbox || env.GOOGLE_PRIMARY_ACCOUNT}
 From: ${from}
 Subject: ${subject}${emailAge ? `\nReceived: ${emailAge}` : ''}
-${contextBlock}${pendingBlock}${channelsBlock}${codebaseBlock}
+${contextBlock}${pendingBlock}${channelsBlock}${codebaseBlock}${decisionBlock}
 Body:
 ${(body || snippet || '').slice(0, 3000)}
 

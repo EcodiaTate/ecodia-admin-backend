@@ -942,6 +942,77 @@ async function purgeExpired() {
   return expired.length
 }
 
+// ─── Triage Context ─────────────────────────────────────────────────────
+// Builds a concise decision intelligence summary for a sender+source pair.
+// Injected into triage prompts so the AI sees historical approval patterns
+// and adjusts surfacing/priority decisions at the source — not just at enqueue.
+
+async function getTriageContext({ senderEmail, senderName, source }) {
+  if (!senderEmail && !senderName) return null
+  try {
+    // Per-sender decision patterns
+    const [senderStats] = await db`
+      SELECT
+        count(*)::int AS total,
+        count(*) FILTER (WHERE decision = 'executed')::int AS executed,
+        count(*) FILTER (WHERE decision = 'dismissed')::int AS dismissed,
+        mode() WITHIN GROUP (ORDER BY reason_category)
+          FILTER (WHERE decision = 'dismissed') AS top_dismiss_reason,
+        max(created_at) AS last_decision
+      FROM action_decisions
+      WHERE (
+        (${senderEmail || ''} != '' AND sender_email = ${senderEmail || ''})
+        OR (${senderName || ''} != '' AND sender_name = ${senderName || ''})
+      )
+      AND created_at > now() - interval '30 days'
+    `
+
+    if (!senderStats || senderStats.total === 0) return null
+
+    const parts = []
+    const execRate = Math.round((senderStats.executed / senderStats.total) * 100)
+    const dismissRate = Math.round((senderStats.dismissed / senderStats.total) * 100)
+
+    parts.push(`${senderStats.total} prior decisions: ${execRate}% approved, ${dismissRate}% dismissed`)
+
+    if (senderStats.top_dismiss_reason) {
+      parts.push(`top dismiss reason: ${senderStats.top_dismiss_reason}`)
+    }
+
+    // Per-action-type breakdown if source is provided
+    if (source) {
+      const typeStats = await db`
+        SELECT action_type,
+               count(*)::int AS total,
+               count(*) FILTER (WHERE decision = 'executed')::int AS executed,
+               count(*) FILTER (WHERE decision = 'dismissed')::int AS dismissed
+        FROM action_decisions
+        WHERE source = ${source}
+          AND (
+            (${senderEmail || ''} != '' AND sender_email = ${senderEmail || ''})
+            OR (${senderName || ''} != '' AND sender_name = ${senderName || ''})
+          )
+          AND created_at > now() - interval '30 days'
+        GROUP BY action_type
+        HAVING count(*) >= 2
+        ORDER BY count(*) DESC
+        LIMIT 5
+      `
+      if (typeStats.length > 0) {
+        const typeLines = typeStats.map(t =>
+          `  ${t.action_type}: ${t.executed}/${t.total} approved`
+        )
+        parts.push('by action type:\n' + typeLines.join('\n'))
+      }
+    }
+
+    return parts.join('. ')
+  } catch (err) {
+    logger.debug('Triage context query failed (non-blocking)', { error: err.message })
+    return null
+  }
+}
+
 module.exports = {
   enqueue,
   execute,
@@ -960,5 +1031,6 @@ module.exports = {
   getSenderReputation,
   getDecisionHistory,
   getDecisionStats,
+  getTriageContext,
   recordDecision,
 }

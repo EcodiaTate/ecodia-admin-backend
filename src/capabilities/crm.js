@@ -1,5 +1,20 @@
 const registry = require('../services/capabilityRegistry')
 
+async function resolveClientId(params) {
+  if (params.clientId && /^[0-9a-f-]{36}$/i.test(params.clientId)) return params.clientId
+  const name = params.clientName || params.clientId
+  if (!name || name.trim().length < 2) throw new Error('Provide a clientId (UUID) or clientName to search')
+  const db = require('../config/db')
+  const q = `%${name.trim()}%`
+  const matches = await db`SELECT id, name FROM clients WHERE archived_at IS NULL AND name ILIKE ${q} ORDER BY updated_at DESC LIMIT 3`
+  if (matches.length === 0) throw new Error(`No client found matching "${name}"`)
+  if (matches.length > 1) {
+    const list = matches.map(m => `${m.name} (${m.id})`).join(', ')
+    throw new Error(`Multiple clients match "${name}": ${list}. Be more specific or use the UUID.`)
+  }
+  return matches[0].id
+}
+
 registry.registerMany([
   // ─── Lead & Client Management ──────────────────────────────────────
 
@@ -170,7 +185,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const tasks = await crmService.getClientTasks(params.clientId, { includeCompleted: params.includeCompleted })
+      const id=await resolveClientId(params)
+      const tasks=await crmService.getClientTasks(id, { includeCompleted: params.includeCompleted })
       return { tasks, count: tasks.length }
     },
   },
@@ -218,11 +234,13 @@ registry.registerMany([
     domain: 'crm',
     priority: 'critical',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      return crmService.getClientIntelligence(params.clientId)
+      const id = await resolveClientId(params)
+      return crmService.getClientIntelligence(id)
     },
   },
 
@@ -232,14 +250,16 @@ registry.registerMany([
     tier: 'read',
     domain: 'crm',
     params: {
-      clientId: { type: 'string', required: true, description: 'Client UUID' },
+      clientId: { type: 'string', required: false, description: 'Client UUID' },
+      clientName: { type: 'string', required: false, description: 'Client name to search (if no UUID)' },
       limit: { type: 'number', required: false, description: 'Max results (default 50)' },
       types: { type: 'string', required: false, description: 'Comma-separated activity types to filter' },
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
       const types = params.types ? params.types.split(',').map(t => t.trim()) : undefined
-      return crmService.getClientTimeline(params.clientId, { limit: params.limit || 50, types })
+      const id = await resolveClientId(params)
+      return crmService.getClientTimeline(id, { limit: params.limit || 50, types })
     },
   },
 
@@ -261,7 +281,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const contact = await crmService.addContact(params)
+      const cid=await resolveClientId(params)
+      const contact=await crmService.addContact({...params,clientId:cid})
       return { message: `Contact added: ${contact.name}`, contactId: contact.id }
     },
   },
@@ -276,7 +297,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      const contacts = await crmService.getContacts(params.clientId)
+      const id=await resolveClientId(params)
+      const contacts=await crmService.getContacts(id)
       return { contacts }
     },
   },
@@ -396,7 +418,8 @@ registry.registerMany([
     },
     handler: async (params) => {
       const crmService = require('../services/crmService')
-      return crmService.computeClientHealth(params.clientId)
+      const id=await resolveClientId(params)
+      return crmService.computeClientHealth(id)
     },
   },
 

@@ -254,14 +254,19 @@ async function triagePendingEmails() {
       // Pull existing pending actions for this sender — helps the LLM
       // avoid re-surfacing the same topic that's already queued
       let pendingActionsContext = null
+      let decisionContext = null
       try {
         const actionQueue = require('./actionQueueService')
-        const pending = await actionQueue.getPendingForSender(thread.from_email, thread.from_name)
+        const [pending, triageCtx] = await Promise.all([
+          actionQueue.getPendingForSender(thread.from_email, thread.from_name),
+          actionQueue.getTriageContext({ senderEmail: thread.from_email, senderName: thread.from_name, source: 'gmail' }),
+        ])
         if (pending.length > 0) {
           pendingActionsContext = pending.map(p =>
             `- [${p.priority}] "${p.title}" — ${p.summary || 'no summary'}${p.context?.consolidated_count > 1 ? ` (${p.context.consolidated_count} signals consolidated)` : ''}`
           ).join('\n')
         }
+        decisionContext = triageCtx
       } catch (aqErr) {
         logger.debug('Failed to load pending actions for triage', { error: aqErr.message })
       }
@@ -320,6 +325,7 @@ async function triagePendingEmails() {
         pendingActionsContext,
         activeChannelsContext,
         projectCodebaseContext,
+        decisionContext,
         receivedAt: thread.received_at,
       })
 

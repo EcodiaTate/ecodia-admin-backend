@@ -257,11 +257,21 @@ async function triagePendingConversations() {
           })()
         : null
 
+      // Inject decision history for this sender
+      let decisionBlock = ''
+      try {
+        const triageCtx = await actionQueue.getTriageContext({
+          senderName: conv.participant_name,
+          source: 'meta',
+        })
+        if (triageCtx) decisionBlock = `\nDecision history: ${triageCtx}`
+      } catch {}
+
       const prompt = `Triage this ${conv.platform || 'messenger'} DM for Ecodia (software development company).
 
 Now: ${new Date().toISOString()}
 Page: ${conv.page_name}
-Participant: ${conv.participant_name || 'Unknown'}${lastMessageAge ? `\nLast message: ${lastMessageAge}` : ''}
+Participant: ${conv.participant_name || 'Unknown'}${lastMessageAge ? `\nLast message: ${lastMessageAge}` : ''}${decisionBlock}
 
 Recent messages:
 ${messages.map(m => `[${m.time || '?'}] ${m.from_page ? 'Page' : conv.participant_name || 'Customer'}: ${m.text || '(no text)'}`).join('\n')}
