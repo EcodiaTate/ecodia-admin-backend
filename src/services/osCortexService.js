@@ -351,6 +351,7 @@ async function runTask(taskId, userMessages, { workspace }) {
   }
 
   const allBlocks = []
+  const failedActions = new Map() // track failed action+params to prevent retries
   let rounds = 0
   let taskStatus = 'active'
   const MAX_ROUNDS = 20 // safety net — prevents infinite loops
@@ -417,17 +418,47 @@ async function runTask(taskId, userMessages, { workspace }) {
       break
     }
 
-    // Execute actions
+    // Execute actions — dedup + skip previously failed actions
     const resultParts = []
+    const seenThisRound = new Set()
     for (const action of actions) {
+      const actionKey = `${action.action}:${JSON.stringify(action.params || {})}`
+
+      // Skip duplicates within the same round
+      if (seenThisRound.has(actionKey)) {
+        resultParts.push(`⊘ ${action.action}: skipped duplicate`)
+        continue
+      }
+      seenThisRound.add(actionKey)
+
+      // Skip if this exact action+params already failed — don't burn rounds retrying
+      const priorFailures = failedActions.get(actionKey) || 0
+      if (priorFailures >= 1) {
+        resultParts.push(`⊘ ${action.action}: skipped — already failed with these params. Try different params or a different approach.`)
+        allBlocks.push({ type: 'action_result', action: action.action, success: false, error: 'Already failed — skipped retry' })
+        continue
+      }
+
       try {
         const result = await registry.execute(action.action, action.params, { source: 'os' })
-        resultParts.push(`✓ ${action.action}: ${JSON.stringify(result.result || result).slice(0, 500)}`)
-        allBlocks.push({ type: 'action_result', action: action.action, success: true, result: result.result || result })
+        if (result && result.success === false) {
+          failedActions.set(actionKey, priorFailures + 1)
+          resultParts.push(`✗ ${action.action}: ${result.error || 'failed'}`)
+          allBlocks.push({ type: 'action_result', action: action.action, success: false, error: result.error || 'failed' })
+        } else {
+          resultParts.push(`✓ ${action.action}: ${JSON.stringify(result.result || result).slice(0, 500)}`)
+          allBlocks.push({ type: 'action_result', action: action.action, success: true, result: result.result || result })
+        }
       } catch (err) {
+        failedActions.set(actionKey, priorFailures + 1)
         resultParts.push(`✗ ${action.action}: ${err.message}`)
         allBlocks.push({ type: 'action_result', action: action.action, success: false, error: err.message })
       }
+    }
+
+    // If every action this round was skipped or failed, break — nothing useful left
+    if (resultParts.length > 0 && resultParts.every(r => r.startsWith('✗') || r.startsWith('⊘'))) {
+      break
     }
 
     // Load requested docs
