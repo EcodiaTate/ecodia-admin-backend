@@ -1278,84 +1278,76 @@ async function consolidateLearnings() {
     }
   }
 
-  // Step 2: Find and merge near-duplicate learnings per codebase
+  // Step 2: Find and merge near-duplicate learnings globally
+  // Merges across all learnings (same codebase, cross-codebase, and null-codebase)
+  // when they share the same pattern_type and exceed the similarity threshold.
+  // Survivor keeps its codebase_id; victim is absorbed.
   try {
-    const codebases = await db`
-      SELECT DISTINCT codebase_id FROM factory_learnings
-      WHERE codebase_id IS NOT NULL AND absorbed_into IS NULL AND embedding IS NOT NULL
-    `
-
     const threshold = parseFloat(env.FACTORY_LEARNING_DEDUP_THRESHOLD || '0.88')
 
-    for (const { codebase_id } of codebases) {
-      // Get all active embedded learnings for this codebase
-      const learnings = await db`
-        SELECT id, pattern_type, pattern_description, confidence, session_ids, evidence
-        FROM factory_learnings
-        WHERE codebase_id = ${codebase_id} AND absorbed_into IS NULL AND embedding IS NOT NULL
-        ORDER BY confidence DESC, updated_at DESC
+    const allLearnings = await db`
+      SELECT id, codebase_id, pattern_type, pattern_description, confidence, session_ids, evidence
+      FROM factory_learnings
+      WHERE absorbed_into IS NULL AND embedding IS NOT NULL
+      ORDER BY confidence DESC, updated_at DESC
+    `
+
+    // Single query to find ALL similar pairs above threshold globally.
+    // Same pattern_type required. Codebase match not required — duplicates
+    // often arise from null-codebase extractions or cross-codebase patterns.
+    const similarPairs = await db`
+      SELECT a.id AS id_a, b.id AS id_b,
+             1 - (a.embedding <=> b.embedding) AS similarity
+      FROM factory_learnings a
+      JOIN factory_learnings b ON a.id < b.id
+        AND a.pattern_type = b.pattern_type
+      WHERE a.absorbed_into IS NULL AND b.absorbed_into IS NULL
+        AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+        AND 1 - (a.embedding <=> b.embedding) >= ${threshold}
+      ORDER BY 1 - (a.embedding <=> b.embedding) DESC
+    `
+
+    const learningMap = new Map(allLearnings.map(l => [l.id, l]))
+    const absorbed = new Set()
+
+    for (const pair of similarPairs) {
+      if (absorbed.has(pair.id_a) || absorbed.has(pair.id_b)) continue
+
+      const a = learningMap.get(pair.id_a)
+      const b = learningMap.get(pair.id_b)
+      if (!a || !b) continue
+
+      // Survivor = higher confidence. On tie, prefer the one with a codebase_id.
+      const survivor = a.confidence > b.confidence ? a
+        : b.confidence > a.confidence ? b
+        : (a.codebase_id ? a : b)
+      const victim = survivor === a ? b : a
+
+      const mergedSessions = [...new Set([...(survivor.session_ids || []), ...(victim.session_ids || [])])]
+      const mergedKeywords = [...new Set([...(survivor.evidence?.keywords || []), ...(victim.evidence?.keywords || [])])]
+      const mergedFiles = [...new Set([...(survivor.evidence?.files || []), ...(victim.evidence?.files || [])])]
+      const increment = victim.confidence * 0.1
+      const newConfidence = Math.min(0.98, survivor.confidence + (1 - survivor.confidence) * increment)
+
+      const bestDesc = victim.pattern_description.length > survivor.pattern_description.length
+        ? victim.pattern_description : survivor.pattern_description
+
+      await db`
+        WITH update_survivor AS (
+          UPDATE factory_learnings
+          SET confidence = ${newConfidence},
+              session_ids = ${mergedSessions},
+              pattern_description = ${bestDesc},
+              evidence = ${JSON.stringify({ ...survivor.evidence, keywords: mergedKeywords, files: mergedFiles })},
+              merged_from = array_cat(COALESCE(merged_from, '{}'), ${[victim.id]}),
+              updated_at = now()
+          WHERE id = ${survivor.id}
+        )
+        UPDATE factory_learnings SET absorbed_into = ${survivor.id} WHERE id = ${victim.id}
       `
 
-      // Single query to find ALL similar pairs above threshold — replaces O(n²) individual queries.
-      // Self-join with a.id < b.id ensures each pair is checked once. Ordered by similarity DESC
-      // so the strongest merges happen first.
-      const similarPairs = await db`
-        SELECT a.id AS id_a, b.id AS id_b,
-               1 - (a.embedding <=> b.embedding) AS similarity
-        FROM factory_learnings a
-        JOIN factory_learnings b ON a.id < b.id
-          AND a.pattern_type = b.pattern_type
-        WHERE a.codebase_id = ${codebase_id} AND b.codebase_id = ${codebase_id}
-          AND a.absorbed_into IS NULL AND b.absorbed_into IS NULL
-          AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-          AND 1 - (a.embedding <=> b.embedding) >= ${threshold}
-        ORDER BY 1 - (a.embedding <=> b.embedding) DESC
-      `
-
-      // Build a lookup from the learnings array for fast access
-      const learningMap = new Map(learnings.map(l => [l.id, l]))
-      const absorbed = new Set()
-
-      for (const pair of similarPairs) {
-        if (absorbed.has(pair.id_a) || absorbed.has(pair.id_b)) continue
-
-        // Survivor = higher confidence (learnings ordered by confidence DESC, so use the map)
-        const a = learningMap.get(pair.id_a)
-        const b = learningMap.get(pair.id_b)
-        if (!a || !b) continue
-
-        const survivor = a.confidence >= b.confidence ? a : b
-        const victim = survivor === a ? b : a
-
-        const mergedSessions = [...new Set([...(survivor.session_ids || []), ...(victim.session_ids || [])])]
-        const mergedKeywords = [...new Set([...(survivor.evidence?.keywords || []), ...(victim.evidence?.keywords || [])])]
-        const mergedFiles = [...new Set([...(survivor.evidence?.files || []), ...(victim.evidence?.files || [])])]
-        // Diminishing-returns merge — same formula as extraction path
-        const increment = victim.confidence * 0.1
-        const newConfidence = Math.min(0.98, survivor.confidence + (1 - survivor.confidence) * increment)
-
-        const bestDesc = victim.pattern_description.length > survivor.pattern_description.length
-          ? victim.pattern_description : survivor.pattern_description
-
-        // Atomic merge: both updates in a single SQL to prevent partial state
-        // (survivor updated but victim not marked absorbed, or vice versa)
-        await db`
-          WITH update_survivor AS (
-            UPDATE factory_learnings
-            SET confidence = ${newConfidence},
-                session_ids = ${mergedSessions},
-                pattern_description = ${bestDesc},
-                evidence = ${JSON.stringify({ ...survivor.evidence, keywords: mergedKeywords, files: mergedFiles })},
-                merged_from = array_cat(COALESCE(merged_from, '{}'), ${[victim.id]}),
-                updated_at = now()
-            WHERE id = ${survivor.id}
-          )
-          UPDATE factory_learnings SET absorbed_into = ${survivor.id} WHERE id = ${victim.id}
-        `
-
-        absorbed.add(victim.id)
-        stats.merged++
-      }
+      absorbed.add(victim.id)
+      stats.merged++
     }
   } catch (err) {
     logger.debug('Learning merge pass failed', { error: err.message })
