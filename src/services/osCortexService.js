@@ -177,36 +177,97 @@ Rules:
 // ═══════════════════════════════════════════════════════════════════════
 
 function parseBlocks(raw) {
-  const isBlockArray = (v) => Array.isArray(v) && v.length > 0 && v.every(b => b && typeof b.type === 'string')
+  if (!raw || typeof raw !== 'string') return [{ type: 'text', content: String(raw || '') }]
+  const trimmed = raw.trim()
+  const isBlock = (v) => v && typeof v === 'object' && typeof v.type === 'string'
+  const isBlockArray = (v) => Array.isArray(v) && v.length > 0 && v.every(isBlock)
 
+  // 1. Pure JSON — most common success path
   try {
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(trimmed)
     if (isBlockArray(parsed)) return parsed
-    if (parsed.blocks && isBlockArray(parsed.blocks)) return parsed.blocks
-    if (parsed && typeof parsed.type === 'string') return [parsed]
+    if (parsed?.blocks && isBlockArray(parsed.blocks)) return parsed.blocks
+    if (isBlock(parsed)) return [parsed]
   } catch { /* not pure JSON */ }
 
-  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+  // 2. Fenced JSON
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenceMatch) {
     try {
       const parsed = JSON.parse(fenceMatch[1].trim())
       if (isBlockArray(parsed)) return parsed
-      if (parsed && typeof parsed.type === 'string') return [parsed]
+      if (isBlock(parsed)) return [parsed]
     } catch { /* fall through */ }
   }
 
-  const jsonArrayStart = raw.indexOf('[{')
-  if (jsonArrayStart !== -1) {
-    const lastBracket = raw.lastIndexOf(']')
-    if (lastBracket > jsonArrayStart) {
-      try {
-        const parsed = JSON.parse(raw.slice(jsonArrayStart, lastBracket + 1))
-        if (isBlockArray(parsed)) return parsed
-      } catch { /* fall through */ }
+  // 3. Extract JSON array with proper bracket matching
+  const arrayStart = trimmed.indexOf('[')
+  if (arrayStart !== -1) {
+    let depth = 0, inStr = false, esc = false
+    for (let i = arrayStart; i < trimmed.length; i++) {
+      const ch = trimmed[i]
+      if (esc) { esc = false; continue }
+      if (ch === '\\') { esc = true; continue }
+      if (ch === '"') { inStr = !inStr; continue }
+      if (inStr) continue
+      if (ch === '[') depth++
+      else if (ch === ']') {
+        depth--
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(arrayStart, i + 1))
+            if (isBlockArray(parsed)) return parsed
+          } catch { /* try next bracket */ }
+          break
+        }
+      }
     }
   }
 
-  return [{ type: 'text', content: raw }]
+  // 4. Find individual JSON objects with "type" field scattered in prose
+  const blocks = []
+  const proseChunks = []
+  let lastEnd = 0
+  const objPattern = /\{[^{}]*"type"\s*:\s*"[^"]+"/g
+  let match
+  while ((match = objPattern.exec(trimmed)) !== null) {
+    const start = match.index
+    let depth = 0, inStr = false, esc = false, end = -1
+    for (let i = start; i < trimmed.length; i++) {
+      const ch = trimmed[i]
+      if (esc) { esc = false; continue }
+      if (ch === '\\') { esc = true; continue }
+      if (ch === '"') { inStr = !inStr; continue }
+      if (inStr) continue
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) { end = i; break }
+      }
+    }
+    if (end === -1) continue
+    try {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1))
+      if (isBlock(parsed)) {
+        const prose = trimmed.slice(lastEnd, start).trim()
+        if (prose) proseChunks.push(prose)
+        blocks.push(parsed)
+        lastEnd = end + 1
+      }
+    } catch { /* not valid JSON at this position */ }
+  }
+
+  if (blocks.length > 0) {
+    const trailing = trimmed.slice(lastEnd).trim()
+    if (trailing) proseChunks.push(trailing)
+    if (proseChunks.length > 0) {
+      blocks.unshift({ type: 'text', content: proseChunks.join('\n\n') })
+    }
+    return blocks
+  }
+
+  // 5. Nothing parsed — return as text
+  return [{ type: 'text', content: trimmed }]
 }
 
 // ═══════════════════════════════════════════════════════════════════════
