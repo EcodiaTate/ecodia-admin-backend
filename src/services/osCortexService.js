@@ -130,6 +130,7 @@ ${capsBlock}
 FORMAT: JSON array of blocks. Types:
   text: {"type":"text","content":"..."}
   action: {"type":"action_card","action":"name","params":{...}}
+  delegate: {"type":"delegate","workspace":"name","prompt":"task description"} — runs a sub-task in another workspace
   load doc: {"type":"need_doc","docKey":"..."}
   save doc: {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."}
   update fact: {"type":"update_context","key":"...","value":"..."}
@@ -395,9 +396,46 @@ async function runTask(taskId, userMessages, { workspace }) {
       break
     }
 
-    // If no actions and no doc requests — AI is done talking
-    if (actions.length === 0 && docRequests.length === 0) {
+    // If no actions, no doc requests, and no delegations — AI is done talking
+    if (actions.length === 0 && docRequests.length === 0 && delegations.length === 0) {
       break
+    }
+
+    // Handle delegations — run sub-tasks in other workspaces and return their results
+    const delegations = blocks.filter(b => b.type === 'delegate')
+    for (const del of delegations) {
+      const targetWs = del.workspace
+      const targetPrompt = del.prompt
+      if (!targetWs || !targetPrompt) {
+        allBlocks.push({ type: 'delegate_result', workspace: targetWs, success: false, error: 'Missing workspace or prompt' })
+        continue
+      }
+
+      try {
+        logger.info(`OS Cortex delegating to ${targetWs}: ${targetPrompt.slice(0, 80)}`)
+        // Run a sub-task in the target workspace — gets its own system prompt + capabilities
+        const subResult = await runTask(null, [{ role: 'user', content: targetPrompt }], { workspace: targetWs })
+        // Extract the text content from the sub-task's response
+        const subBlocks = subResult.blocks || []
+        const textContent = subBlocks
+          .filter(b => b.type === 'text' || b.type === 'done')
+          .map(b => b.content || b.summary || '')
+          .join('\n')
+        const actionResults = subBlocks
+          .filter(b => b.type === 'action_result')
+          .map(b => `${b.action}: ${b.success ? JSON.stringify(b.result).slice(0, 300) : b.error}`)
+          .join('\n')
+
+        allBlocks.push({
+          type: 'delegate_result',
+          workspace: targetWs,
+          success: true,
+          result: textContent || actionResults || '(no output)',
+        })
+      } catch (err) {
+        logger.warn(`OS Cortex delegation to ${targetWs} failed`, { error: err.message })
+        allBlocks.push({ type: 'delegate_result', workspace: targetWs, success: false, error: err.message })
+      }
     }
 
     // Execute actions — dedup + skip previously failed actions
@@ -462,10 +500,18 @@ async function runTask(taskId, userMessages, { workspace }) {
       blocks,
     })
 
+    // Collect delegation results into the feedback
+    const delegationResults = allBlocks
+      .filter(b => b.type === 'delegate_result')
+      .map(b => `[${b.workspace}] ${b.success ? b.result : `ERROR: ${b.error}`}`)
+
     // Feed results back — but cap total message count to prevent context overflow
-    const feedbackContent = resultParts.join('\n\n')
+    const feedbackParts = [...resultParts, ...delegationResults].filter(Boolean)
+    const feedbackContent = feedbackParts.join('\n\n')
     messages.push({ role: 'assistant', content: assistantContent || 'Executing actions...' })
-    messages.push({ role: 'user', content: `Action results:\n${feedbackContent}\n\nContinue working or signal done.` })
+    if (feedbackContent) {
+      messages.push({ role: 'user', content: `Results:\n${feedbackContent}\n\nContinue working or signal done.` })
+    }
 
     // If messages are getting too long, trim oldest non-system messages
     const MAX_MESSAGES = 40
