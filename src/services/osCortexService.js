@@ -1,17 +1,27 @@
 /**
  * OS Cortex Service — practical operations assistant.
  * Completely separate from organism cortexService.js.
- * Zero organism imports. Uses only: callDeepSeek, capabilityRegistry, db, logger.
+ * Zero organism imports. Uses only: callDeepSeek, capabilityRegistry, db, logger, wsManager.
+ *
+ * The Command workspace runs an orchestration engine inspired by Claude Code:
+ * - Unlimited reasoning steps (think blocks)
+ * - Parallel delegations to multiple departments simultaneously
+ * - Mid-plan questions to the human
+ * - Adaptive replanning based on intermediate results
+ * - Direct capability execution (no delegation needed for simple actions)
+ * - Real-time WebSocket streaming of orchestration progress
  */
 
 const { callDeepSeek } = require('./deepseekService')
 const registry = require('./capabilityRegistry')
 const db = require('../config/db')
 const logger = require('../config/logger')
+const { broadcast } = require('../websocket/wsManager')
 const { getWorkspace, listWorkspaces } = require('./osWorkspaceDefinitions')
 
 const MAX_HISTORY_TURNS = parseInt(process.env.OS_MAX_HISTORY_TURNS || '20')
 const TASK_TIMEOUT_MS = parseInt(process.env.OS_TASK_TIMEOUT_MS || '280000') // under nginx 300s
+const COMMAND_MAX_ROUNDS = parseInt(process.env.COMMAND_MAX_ROUNDS || '50') // command gets way more rounds
 
 // ═══════════════════════════════════════════════════════════════════════
 // PROMPT BUILDING — focused, small, workspace-scoped
@@ -70,7 +80,7 @@ async function listAllDocs(workspace) {
 }
 
 async function buildSystemPrompt(workspaceName) {
-  const ws = workspaceName ? getWorkspace(workspaceName) : null
+  let ws = workspaceName ? getWorkspace(workspaceName) : null
 
   // Load core facts always
   const coreFacts = await getCoreContext()
@@ -128,16 +138,17 @@ ACTIONS:
 ${capsBlock}
 
 FORMAT: JSON array of blocks. Types:
-  text: {"type":"text","content":"..."}
-  action: {"type":"action_card","action":"name","params":{...}}
-  delegate: {"type":"delegate","workspace":"name","prompt":"task description"} — runs a sub-task in another workspace
+  think: {"type":"think","content":"..."} — your reasoning process, visible to human as live thinking
+  text: {"type":"text","content":"..."} — response to human
+  action: {"type":"action_card","action":"name","params":{...}} — execute a capability
+  delegate: {"type":"delegate","workspace":"name","prompt":"task description"} — runs a sub-task in another workspace (multiple delegations run in parallel)
   load doc: {"type":"need_doc","docKey":"..."}
   save doc: {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."}
   update fact: {"type":"update_context","key":"...","value":"..."}
-  ask human: {"type":"question","content":"..."}
-  done: {"type":"done","summary":"..."}
+  ask human: {"type":"question","content":"..."} — pauses and asks the human
+  done: {"type":"done","summary":"..."} — signals task completion
 
-Return ONLY the JSON array. Execute immediately. Multiple actions per response OK. After results come back, continue or signal done.`
+Return ONLY the JSON array. Execute immediately. Multiple actions + delegations per response OK. After results come back, continue or signal done.`
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -300,11 +311,112 @@ async function updateCoreContextFact(key, value) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// MAIN EXECUTION LOOP — no round limits, runs until done
+// WEBSOCKET PROGRESS STREAMING — live updates to frontend
+// ═══════════════════════════════════════════════════════════════════════
+
+function emitProgress(taskId, event, data) {
+  try {
+    broadcast('os:progress', { taskId, event, ...data, ts: Date.now() })
+  } catch { /* WS failure must never crash the task */ }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DELEGATION EXECUTION — runs sub-tasks, supports parallel execution
+// ═══════════════════════════════════════════════════════════════════════
+
+async function executeDelegation(del, taskId) {
+  const targetWs = del.workspace
+  const targetPrompt = del.prompt
+  if (!targetWs || !targetPrompt) {
+    return { type: 'delegate_result', workspace: targetWs, success: false, error: 'Missing workspace or prompt' }
+  }
+
+  try {
+    logger.info(`OS Cortex delegating to ${targetWs}: ${targetPrompt.slice(0, 80)}`)
+    emitProgress(taskId, 'delegation_start', { workspace: targetWs, prompt: targetPrompt.slice(0, 200) })
+
+    const subResult = await runTask(null, [{ role: 'user', content: targetPrompt }], { workspace: targetWs })
+    const subBlocks = subResult.blocks || []
+    const textContent = subBlocks
+      .filter(b => b.type === 'text' || b.type === 'done')
+      .map(b => b.content || b.summary || '')
+      .join('\n')
+    const actionResults = subBlocks
+      .filter(b => b.type === 'action_result')
+      .map(b => `${b.action}: ${b.success ? JSON.stringify(b.result).slice(0, 500) : b.error}`)
+      .join('\n')
+
+    const result = {
+      type: 'delegate_result',
+      workspace: targetWs,
+      prompt: targetPrompt.slice(0, 200),
+      success: true,
+      result: textContent || actionResults || '(no output)',
+      rounds: subResult.rounds,
+    }
+    emitProgress(taskId, 'delegation_complete', { workspace: targetWs, success: true, rounds: subResult.rounds })
+    return result
+  } catch (err) {
+    logger.warn(`OS Cortex delegation to ${targetWs} failed`, { error: err.message })
+    emitProgress(taskId, 'delegation_complete', { workspace: targetWs, success: false, error: err.message })
+    return { type: 'delegate_result', workspace: targetWs, prompt: targetPrompt.slice(0, 200), success: false, error: err.message }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ACTION EXECUTION — run capability registry actions with dedup
+// ═══════════════════════════════════════════════════════════════════════
+
+async function executeActions(actions, failedActions, taskId) {
+  const resultParts = []
+  const resultBlocks = []
+  const seenThisRound = new Set()
+
+  for (const action of actions) {
+    const actionKey = `${action.action}:${JSON.stringify(action.params || {})}`
+
+    if (seenThisRound.has(actionKey)) {
+      resultParts.push(`⊘ ${action.action}: skipped duplicate`)
+      continue
+    }
+    seenThisRound.add(actionKey)
+
+    const priorFailures = failedActions.get(actionKey) || 0
+    if (priorFailures >= 1) {
+      resultParts.push(`⊘ ${action.action}: skipped — already failed. Try different params or approach.`)
+      resultBlocks.push({ type: 'action_result', action: action.action, success: false, error: 'Already failed — skipped retry' })
+      continue
+    }
+
+    emitProgress(taskId, 'action_start', { action: action.action })
+
+    try {
+      const result = await registry.execute(action.action, action.params, { source: 'os' })
+      if (result && result.success === false) {
+        failedActions.set(actionKey, priorFailures + 1)
+        resultParts.push(`✗ ${action.action}: ${result.error || 'failed'}`)
+        resultBlocks.push({ type: 'action_result', action: action.action, success: false, error: result.error || 'failed' })
+      } else {
+        resultParts.push(`✓ ${action.action}: ${JSON.stringify(result.result || result).slice(0, 500)}`)
+        resultBlocks.push({ type: 'action_result', action: action.action, success: true, result: result.result || result })
+      }
+    } catch (err) {
+      failedActions.set(actionKey, priorFailures + 1)
+      resultParts.push(`✗ ${action.action}: ${err.message}`)
+      resultBlocks.push({ type: 'action_result', action: action.action, success: false, error: err.message })
+    }
+  }
+
+  return { resultParts, resultBlocks }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN EXECUTION LOOP — orchestration engine for Command, standard loop for others
 // ═══════════════════════════════════════════════════════════════════════
 
 async function runTask(taskId, userMessages, { workspace }) {
   const startTime = Date.now()
+  const isCommand = workspace === 'command'
 
   // Load or create task session
   let session = taskId ? await loadTaskSession(taskId) : null
@@ -317,7 +429,6 @@ async function runTask(taskId, userMessages, { workspace }) {
   const systemPrompt = await buildSystemPrompt(workspace)
 
   // Reconstruct message history from session (last N turns)
-  // Filter: only valid role+content pairs — drop corrupt or system entries
   const history = (session.history || []).slice(-MAX_HISTORY_TURNS)
   const validHistory = history
     .filter(t => t.role && t.content && (t.role === 'user' || t.role === 'assistant'))
@@ -334,35 +445,59 @@ async function runTask(taskId, userMessages, { workspace }) {
   }
 
   const allBlocks = []
-  const failedActions = new Map() // track failed action+params to prevent retries
+  const failedActions = new Map()
   let rounds = 0
   let taskStatus = 'active'
-  const MAX_ROUNDS = 20 // safety net — prevents infinite loops
+  const MAX_ROUNDS = isCommand ? COMMAND_MAX_ROUNDS : 20
+
+  if (isCommand) {
+    emitProgress(taskId, 'orchestration_start', { workspace })
+  }
 
   while (Date.now() - startTime < TASK_TIMEOUT_MS && rounds < MAX_ROUNDS) {
     rounds++
     logger.info(`OS Cortex round ${rounds}`, { taskId, workspace, messageCount: messages.length })
 
-    // Call LLM
+    if (isCommand) {
+      emitProgress(taskId, 'round_start', { round: rounds })
+    }
+
+    // Call LLM — Command gets higher temperature for creative orchestration
     const raw = await callDeepSeek(messages, {
       module: 'os',
       skipRetrieval: true,
       skipLogging: true,
-      temperature: 0.1,
+      temperature: isCommand ? 0.3 : 0.1,
     })
 
     const blocks = parseBlocks(raw)
-    allBlocks.push(...blocks)
 
-    // Process special blocks
+    // Extract block types
+    const thinkBlocks = blocks.filter(b => b.type === 'think')
     const actions = blocks.filter(b => b.type === 'action_card')
+    const delegations = blocks.filter(b => b.type === 'delegate')
     const docRequests = blocks.filter(b => b.type === 'need_doc')
     const docUpdates = blocks.filter(b => b.type === 'update_doc')
     const contextUpdates = blocks.filter(b => b.type === 'update_context')
     const questions = blocks.filter(b => b.type === 'question')
     const doneBlocks = blocks.filter(b => b.type === 'done')
+    const textBlocks = blocks.filter(b => b.type === 'text')
 
-    // Handle doc updates (fire-and-forget-ish)
+    // Stream think blocks to frontend immediately (Command only)
+    if (isCommand && thinkBlocks.length > 0) {
+      for (const t of thinkBlocks) {
+        allBlocks.push(t)
+        emitProgress(taskId, 'think', { content: t.content })
+      }
+    }
+
+    // Stream text blocks immediately
+    for (const t of textBlocks) {
+      allBlocks.push(t)
+      if (isCommand) emitProgress(taskId, 'text', { content: t.content })
+    }
+
+    // Handle doc updates
     for (const du of docUpdates) {
       try {
         await upsertDoc(du.docKey, du.title || du.docKey, du.content, du.workspace || workspace)
@@ -384,115 +519,93 @@ async function runTask(taskId, userMessages, { workspace }) {
 
     // If AI asked a question — pause, return to human
     if (questions.length > 0) {
+      allBlocks.push(...questions)
       taskStatus = 'paused'
+      if (isCommand) emitProgress(taskId, 'question', { content: questions[0].content })
       break
     }
 
     // If AI signaled done
     if (doneBlocks.length > 0) {
+      allBlocks.push(...doneBlocks)
       taskStatus = 'completed'
       const title = doneBlocks[0].summary || null
       if (title) await updateTaskStatus(taskId, 'completed', title)
+      if (isCommand) emitProgress(taskId, 'done', { summary: doneBlocks[0].summary })
       break
     }
 
-    // Handle delegations — run sub-tasks in other workspaces and return their results
-    const delegations = blocks.filter(b => b.type === 'delegate')
+    // ── PARALLEL DELEGATIONS (Command's superpower) ──
+    // Run ALL delegations in parallel — this is what makes Command fast
+    const delegationResults = []
+    if (delegations.length > 0) {
+      allBlocks.push(...delegations.map(d => ({ type: 'delegate', workspace: d.workspace, prompt: d.prompt })))
 
-    // If no actions, no doc requests, and no delegations — AI is done talking
-    if (actions.length === 0 && docRequests.length === 0 && delegations.length === 0) {
-      break
-    }
-    for (const del of delegations) {
-      const targetWs = del.workspace
-      const targetPrompt = del.prompt
-      if (!targetWs || !targetPrompt) {
-        allBlocks.push({ type: 'delegate_result', workspace: targetWs, success: false, error: 'Missing workspace or prompt' })
-        continue
-      }
-
-      try {
-        logger.info(`OS Cortex delegating to ${targetWs}: ${targetPrompt.slice(0, 80)}`)
-        // Run a sub-task in the target workspace — gets its own system prompt + capabilities
-        const subResult = await runTask(null, [{ role: 'user', content: targetPrompt }], { workspace: targetWs })
-        // Extract the text content from the sub-task's response
-        const subBlocks = subResult.blocks || []
-        const textContent = subBlocks
-          .filter(b => b.type === 'text' || b.type === 'done')
-          .map(b => b.content || b.summary || '')
-          .join('\n')
-        const actionResults = subBlocks
-          .filter(b => b.type === 'action_result')
-          .map(b => `${b.action}: ${b.success ? JSON.stringify(b.result).slice(0, 300) : b.error}`)
-          .join('\n')
-
-        allBlocks.push({
-          type: 'delegate_result',
-          workspace: targetWs,
-          success: true,
-          result: textContent || actionResults || '(no output)',
+      if (isCommand && delegations.length > 1) {
+        emitProgress(taskId, 'parallel_start', {
+          count: delegations.length,
+          workspaces: delegations.map(d => d.workspace),
         })
-      } catch (err) {
-        logger.warn(`OS Cortex delegation to ${targetWs} failed`, { error: err.message })
-        allBlocks.push({ type: 'delegate_result', workspace: targetWs, success: false, error: err.message })
-      }
-    }
-
-    // Execute actions — dedup + skip previously failed actions
-    const resultParts = []
-    const seenThisRound = new Set()
-    for (const action of actions) {
-      const actionKey = `${action.action}:${JSON.stringify(action.params || {})}`
-
-      // Skip duplicates within the same round
-      if (seenThisRound.has(actionKey)) {
-        resultParts.push(`⊘ ${action.action}: skipped duplicate`)
-        continue
-      }
-      seenThisRound.add(actionKey)
-
-      // Skip if this exact action+params already failed — don't burn rounds retrying
-      const priorFailures = failedActions.get(actionKey) || 0
-      if (priorFailures >= 1) {
-        resultParts.push(`⊘ ${action.action}: skipped — already failed with these params. Try different params or a different approach.`)
-        allBlocks.push({ type: 'action_result', action: action.action, success: false, error: 'Already failed — skipped retry' })
-        continue
       }
 
-      try {
-        const result = await registry.execute(action.action, action.params, { source: 'os' })
-        if (result && result.success === false) {
-          failedActions.set(actionKey, priorFailures + 1)
-          resultParts.push(`✗ ${action.action}: ${result.error || 'failed'}`)
-          allBlocks.push({ type: 'action_result', action: action.action, success: false, error: result.error || 'failed' })
+      // Run all delegations concurrently with Promise.allSettled
+      const delegationPromises = delegations.map(del => executeDelegation(del, taskId))
+      const settled = await Promise.allSettled(delegationPromises)
+
+      for (const result of settled) {
+        if (result.status === 'fulfilled') {
+          delegationResults.push(result.value)
+          allBlocks.push(result.value)
         } else {
-          resultParts.push(`✓ ${action.action}: ${JSON.stringify(result.result || result).slice(0, 500)}`)
-          allBlocks.push({ type: 'action_result', action: action.action, success: true, result: result.result || result })
+          const failResult = { type: 'delegate_result', workspace: '?', success: false, error: result.reason?.message || 'Unknown error' }
+          delegationResults.push(failResult)
+          allBlocks.push(failResult)
         }
-      } catch (err) {
-        failedActions.set(actionKey, priorFailures + 1)
-        resultParts.push(`✗ ${action.action}: ${err.message}`)
-        allBlocks.push({ type: 'action_result', action: action.action, success: false, error: err.message })
+      }
+
+      if (isCommand && delegations.length > 1) {
+        emitProgress(taskId, 'parallel_complete', {
+          count: delegations.length,
+          successes: delegationResults.filter(r => r.success).length,
+        })
       }
     }
 
-    // If every action this round was skipped or failed, break — nothing useful left
-    if (resultParts.length > 0 && resultParts.every(r => r.startsWith('✗') || r.startsWith('⊘'))) {
-      break
+    // ── DIRECT ACTIONS (Command can also execute capabilities directly) ──
+    const actionResultData = { resultParts: [], resultBlocks: [] }
+    if (actions.length > 0) {
+      allBlocks.push(...actions)
+      const { resultParts, resultBlocks } = await executeActions(actions, failedActions, taskId)
+      actionResultData.resultParts = resultParts
+      actionResultData.resultBlocks = resultBlocks
+      allBlocks.push(...resultBlocks)
     }
 
-    // Load requested docs
+    // ── LOAD DOCS ──
+    const docResultParts = []
     for (const req of docRequests) {
       const doc = await getDoc(req.docKey)
       if (doc) {
-        resultParts.push(`[Document loaded: ${doc.title}]\n${doc.content}`)
+        docResultParts.push(`[Document loaded: ${doc.title}]\n${doc.content}`)
       } else {
-        resultParts.push(`[Document "${req.docKey}" not found]`)
+        docResultParts.push(`[Document "${req.docKey}" not found]`)
       }
     }
 
+    // If nothing actionable happened, AI is done
+    if (actions.length === 0 && docRequests.length === 0 && delegations.length === 0) {
+      break
+    }
+
+    // If every action this round was skipped or failed and no delegations, break
+    if (actions.length > 0 && delegations.length === 0 &&
+        actionResultData.resultParts.length > 0 &&
+        actionResultData.resultParts.every(r => r.startsWith('✗') || r.startsWith('⊘'))) {
+      break
+    }
+
     // Persist assistant turn
-    const assistantContent = blocks.filter(b => b.type === 'text').map(b => b.content).join('\n')
+    const assistantContent = blocks.filter(b => b.type === 'text' || b.type === 'think').map(b => b.content).join('\n')
     await persistTurn(taskId, {
       ts: new Date().toISOString(),
       role: 'assistant',
@@ -500,23 +613,26 @@ async function runTask(taskId, userMessages, { workspace }) {
       blocks,
     })
 
-    // Collect delegation results into the feedback
-    const delegationResults = allBlocks
-      .filter(b => b.type === 'delegate_result')
+    // Build comprehensive feedback for the next round
+    const delegationFeedback = delegationResults
       .map(b => `[${b.workspace}] ${b.success ? b.result : `ERROR: ${b.error}`}`)
 
-    // Feed results back — but cap total message count to prevent context overflow
-    const feedbackParts = [...resultParts, ...delegationResults].filter(Boolean)
+    const feedbackParts = [
+      ...actionResultData.resultParts,
+      ...delegationFeedback,
+      ...docResultParts,
+    ].filter(Boolean)
+
     const feedbackContent = feedbackParts.join('\n\n')
-    messages.push({ role: 'assistant', content: assistantContent || 'Executing actions...' })
+    messages.push({ role: 'assistant', content: assistantContent || 'Executing...' })
     if (feedbackContent) {
       messages.push({ role: 'user', content: `Results:\n${feedbackContent}\n\nContinue working or signal done.` })
     }
 
-    // If messages are getting too long, trim oldest non-system messages
-    const MAX_MESSAGES = 40
+    // Cap message count to prevent context overflow
+    const MAX_MESSAGES = isCommand ? 60 : 40
     if (messages.length > MAX_MESSAGES) {
-      const system = messages[0] // preserve system prompt
+      const system = messages[0]
       const recent = messages.slice(-(MAX_MESSAGES - 1))
       messages.length = 0
       messages.push(system, ...recent)
@@ -551,18 +667,25 @@ async function runTask(taskId, userMessages, { workspace }) {
     await updateTaskStatus(taskId, taskStatus, firstMsg)
   }
 
-  // Reorder blocks: action_cards first (with their results), then text, then done/question
-  // This prevents "Executing actions..." appearing after all results
-  const actionBlocks = allBlocks.filter(b => b.type === 'action_card' || b.type === 'action_result')
-  const textBlocks = allBlocks.filter(b => b.type === 'text')
-  const controlBlocks = allBlocks.filter(b => b.type === 'done' || b.type === 'question')
-  const otherBlocks = allBlocks.filter(b =>
-    b.type !== 'action_card' && b.type !== 'action_result' &&
-    b.type !== 'text' && b.type !== 'done' && b.type !== 'question'
-  )
-  const orderedBlocks = [...actionBlocks, ...textBlocks, ...otherBlocks, ...controlBlocks]
+  if (isCommand) {
+    emitProgress(taskId, 'orchestration_complete', { rounds, status: taskStatus })
+  }
 
-  return { blocks: orderedBlocks, taskId, status: taskStatus, rounds }
+  // Order blocks chronologically — preserve the narrative flow of the orchestration
+  // Don't reorder for command — the think→delegate→result→text sequence IS the story
+  if (!isCommand) {
+    const actionBlks = allBlocks.filter(b => b.type === 'action_card' || b.type === 'action_result')
+    const textBlks = allBlocks.filter(b => b.type === 'text')
+    const controlBlks = allBlocks.filter(b => b.type === 'done' || b.type === 'question')
+    const otherBlks = allBlocks.filter(b =>
+      b.type !== 'action_card' && b.type !== 'action_result' &&
+      b.type !== 'text' && b.type !== 'done' && b.type !== 'question'
+    )
+    const reordered = [...actionBlks, ...textBlks, ...otherBlks, ...controlBlks]
+    return { blocks: reordered, taskId, status: taskStatus, rounds }
+  }
+
+  return { blocks: allBlocks, taskId, status: taskStatus, rounds }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

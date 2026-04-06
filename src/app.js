@@ -80,6 +80,7 @@ app.use('/api/v1/organism/metrics', organismMetricsRoutes)
 app.use('/api/bookkeeping', bookkeepingRoutes)
 app.use('/api/coding', codingRoutes)
 app.use('/api/os', osRoutes)
+app.use('/api/os-session', require('./routes/osSession'))
 
 // Error handler (must be last)
 app.use(errorHandler)

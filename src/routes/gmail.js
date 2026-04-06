@@ -229,8 +229,10 @@ router.post('/threads/:id/unsubscribe', async (req, res, next) => {
 router.post('/batch/archive', async (req, res, next) => {
   try {
     const gmailService = require('../services/gmailService')
-    if (typeof req.body.threadIds === 'string') req.body.threadIds = JSON.parse(req.body.threadIds)
-    res.json(await gmailService.batchArchive(req.body.threadIds))
+    let threadIds = req.body.threadIds
+    if (typeof threadIds === 'string') threadIds = JSON.parse(threadIds)
+    if (!Array.isArray(threadIds)) return res.status(400).json({ error: 'threadIds must be an array' })
+    res.json(await gmailService.batchArchive(threadIds))
   } catch (err) { next(err) }
 })
 
@@ -238,8 +240,10 @@ router.post('/batch/archive', async (req, res, next) => {
 router.post('/batch/trash', async (req, res, next) => {
   try {
     const gmailService = require('../services/gmailService')
-    if (typeof req.body.threadIds === 'string') req.body.threadIds = JSON.parse(req.body.threadIds)
-    res.json(await gmailService.batchTrash(req.body.threadIds))
+    let threadIds = req.body.threadIds
+    if (typeof threadIds === 'string') threadIds = JSON.parse(threadIds)
+    if (!Array.isArray(threadIds)) return res.status(400).json({ error: 'threadIds must be an array' })
+    res.json(await gmailService.batchTrash(threadIds))
   } catch (err) { next(err) }
 })
 
