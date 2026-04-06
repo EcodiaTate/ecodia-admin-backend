@@ -337,4 +337,50 @@ function getTokenUsage() {
   }
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage }
+// ── Recover missed response — returns assistant text after a timestamp ──
+
+async function recoverResponse(sinceTs) {
+  const session = await getOSSession()
+  if (!session) return { found: false, text: '', status: 'idle', streaming: false }
+
+  const streaming = !!activeProcess
+
+  // Fetch logs since the given timestamp (or all recent if no timestamp)
+  const since = sinceTs ? new Date(sinceTs) : new Date(Date.now() - 600_000) // last 10 min
+  const logs = await db`
+    SELECT content, created_at
+    FROM cc_session_logs
+    WHERE session_id = ${session.id} AND created_at > ${since}
+    ORDER BY created_at ASC
+  `
+
+  // Parse NDJSON logs to extract assistant text
+  const textParts = []
+  const chunks = []
+  for (const log of logs) {
+    const line = log.content
+    if (line.startsWith('[USER]')) continue // skip user messages
+    try {
+      const parsed = JSON.parse(line)
+      chunks.push(line)
+      if (parsed.type === 'assistant' && parsed.message?.content) {
+        for (const block of parsed.message.content) {
+          if (block.type === 'text' && block.text) textParts.push(block.text)
+        }
+      }
+    } catch {
+      // Not JSON — raw output
+    }
+  }
+
+  return {
+    found: textParts.length > 0 || chunks.length > 0,
+    text: textParts.join('\n\n'),
+    chunks,
+    status: session.status,
+    streaming,
+    sessionId: session.id,
+  }
+}
+
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse }

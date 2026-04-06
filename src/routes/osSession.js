@@ -55,6 +55,15 @@ router.get('/tokens', (_req, res) => {
   res.json(usage)
 })
 
+// Recover missed response after tab close / disconnect
+router.get('/recover', async (req, res, next) => {
+  try {
+    const since = req.query.since || null
+    const result = await osSession.recoverResponse(since)
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
 // Compact — seamlessly transition to a new session with summary context
 router.post('/compact', async (req, res, next) => {
   res.setTimeout(300_000)
