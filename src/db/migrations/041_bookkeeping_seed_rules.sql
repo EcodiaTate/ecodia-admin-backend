@@ -34,8 +34,39 @@ VALUES
   ('AVERYPRODUCTS', 'Avery Products', '5030', true, true, 'gst_inclusive')
 ON CONFLICT DO NOTHING;
 
--- Canva is ambiguous — could be personal or business. Flag for review.
+-- More business merchants
+INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
+VALUES
+  ('hostinger', 'Hostinger', '5010', true, true, 'gst_free'),
+  ('ANTHROPIC', 'Anthropic', '5010', true, true, 'gst_free'),
+  ('RENDER\.COM', 'Render', '5010', true, true, 'gst_free'),
+  ('USERSWP|AYECODE', 'UsersWP/AyeCode', '5010', true, true, 'gst_free'),
+  ('BIZ\s*COVER|EZI\*BIZ', 'BizCover', '5025', true, true, 'gst_inclusive'),
+  ('ECODIA PTY', 'Ecodia Pty Ltd (Stripe test)', 'DISCARD', true, false, 'gst_free')
+ON CONFLICT DO NOTHING;
+
+-- More personal merchants
+INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
+VALUES
+  ('translink|smartticket', 'Translink', 'DISCARD', true, false, 'gst_free'),
+  ('google one', 'Google One', 'DISCARD', true, false, 'gst_free'),
+  ('suncorp transactional', 'Suncorp (Personal Transfer)', 'DISCARD', true, false, 'gst_free'),
+  ('QUT SPORT', 'QUT Sport', 'DISCARD', true, false, 'gst_free')
+ON CONFLICT DO NOTHING;
+
+-- Ecodia inter-account transfers (NOT Invest/Savings) need special handling
+-- These are capital contributions (money OUT to Ecodia) or reimbursements (money IN from Ecodia)
+-- The AI prompt handles these via CAPITAL_CONTRIBUTION / REIMBURSEMENT special codes
+-- No rule needed — let the AI decide direction based on +/- amount
+
+-- Canva — always Ecodia business
+INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
+VALUES
+  ('canva', 'Canva', '5010', true, true, 'gst_inclusive')
+ON CONFLICT DO NOTHING;
+
+-- Apple is ambiguous — multiple subscriptions, some personal (iCloud), some could be business
 INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, needs_review, gst_treatment)
 VALUES
-  ('canva', 'Canva', '5010', true, true, true, 'gst_inclusive')
+  ('APPLE\.COM/BILL', 'Apple', 'DISCARD', true, false, true, 'gst_inclusive')
 ON CONFLICT DO NOTHING;

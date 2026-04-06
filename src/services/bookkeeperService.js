@@ -335,15 +335,22 @@ DECISION FRAMEWORK:
    - WordPress.com → 5010 Software & SaaS (company website)
    - LinkedIn Premium → 5005 Advertising & Marketing (business networking/marketing)
    - Facebook/Meta Ads (FACEBK) → 5005 Advertising & Marketing (paid ads for clients)
-   - Canva → 5010 Software & SaaS (design tool for business)
+   - Canva → 5010 Software & SaaS (ALWAYS Ecodia business, never personal)
    - OpenAI/ChatGPT → 5010 Software & SaaS (AI tools for development)
    - Anthropic/Claude → 5010 Software & SaaS (AI tools for development)
    - MacInCloud → 5010 Software & SaaS (cloud Mac for iOS builds)
    - AWS/Hetzner → 5010 Software & SaaS (hosting)
    - Hostinger → 5010 Software & SaaS (hosting)
    - Avery Products → 5030 Office Supplies (business labels/printing)
-   - Transfers TO "Ecodia" or "Ecodia Setup" (NOT "Ecodia Invest" / "Ecodia Savings") → these are director capital contributions, use "CAPITAL_CONTRIBUTION" special code
-   - Transfers FROM "Ecodia" (reimbursements) → "REIMBURSEMENT" special code
+   - BizCover → 5025 Legal & Compliance (business insurance)
+   - Hostinger → 5010 Software & SaaS (hosting)
+   - Render.com → 5010 Software & SaaS (hosting)
+   - Anthropic → 5010 Software & SaaS (AI tools)
+   - UsersWP/AyeCode → 5010 Software & SaaS (WordPress plugin)
+   - Transfers TO "Ecodia" or "Ecodia Setup" (NOT "Ecodia Invest" / "Ecodia Savings") with amounts >= $10 → "CAPITAL_CONTRIBUTION"
+   - Transfers FROM "Ecodia" (positive amounts, reimbursements) → "REIMBURSEMENT"
+   - BUT: Transfers to "Ecodia" with description "Quick save transfer" or amounts < $5 → DISCARD (personal savings round-up into Up pocket)
+   - "ECODIA PTY LTD" purchases (small $1-4 amounts) → DISCARD (Stripe test charges)
 
 3. SPECIAL CODES:
    - "CAPITAL_CONTRIBUTION" = director putting money into the company (DR Bank 1000 / CR Director Loan 2100)
