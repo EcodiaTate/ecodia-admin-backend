@@ -66,10 +66,10 @@ async function pollInbox() {
 // ─── Full Sync ───────────────────────────────────────────────────────────────
 
 async function fullSync(gmail, inbox) {
+  // Sync all mail, not just INBOX — captures archived, read, sent, everything
   const res = await gmail.users.threads.list({
     userId: 'me',
     maxResults: 200,
-    labelIds: ['INBOX'],
   })
 
   const threads = res.data.threads || []
@@ -94,14 +94,20 @@ async function incrementalSync(gmail, inbox, historyId) {
     const res = await gmail.users.history.list({
       userId: 'me',
       startHistoryId: historyId,
-      historyTypes: ['messageAdded'],
-      labelId: 'INBOX',
+      historyTypes: ['messageAdded', 'labelAdded', 'labelRemoved'],
     })
 
     const history = res.data.history || []
     const threadIds = new Set()
     for (const h of history) {
       for (const msg of (h.messagesAdded || [])) {
+        threadIds.add(msg.message.threadId)
+      }
+      // Also track label changes (archive, read, trash, star, etc.)
+      for (const msg of (h.labelsAdded || [])) {
+        threadIds.add(msg.message.threadId)
+      }
+      for (const msg of (h.labelsRemoved || [])) {
         threadIds.add(msg.message.threadId)
       }
     }
@@ -129,9 +135,6 @@ async function incrementalSync(gmail, inbox, historyId) {
 // ─── Process Thread ──────────────────────────────────────────────────────────
 
 async function processThread(gmail, inbox, threadId) {
-  const [existing] = await db`SELECT id FROM email_threads WHERE gmail_thread_id = ${threadId}`
-  if (existing) return
-
   const thread = await gmail.users.threads.get({
     userId: 'me',
     id: threadId,
@@ -157,9 +160,31 @@ async function processThread(gmail, inbox, threadId) {
   const messageIds = messages.map(m => m.id)
   const allLabels = [...new Set(messages.flatMap(m => m.labelIds || []))]
   const isUnread = allLabels.includes('UNREAD')
+  const isInInbox = allLabels.includes('INBOX')
+  const isTrashed = allLabels.includes('TRASH')
+  const isSpam = allLabels.includes('SPAM')
   const receivedAt = new Date(parseInt(firstMsg.internalDate))
 
+  // Derive status from labels
+  let status = 'triaged'
+  if (isTrashed) status = 'trashed'
+  else if (isSpam) status = 'spam'
+  else if (isUnread) status = 'unread'
+  else if (!isInInbox) status = 'archived'
+
   const client = await findClientByEmail(fromEmail)
+
+  const [existing] = await db`SELECT id FROM email_threads WHERE gmail_thread_id = ${threadId}`
+
+  if (existing) {
+    // Update labels, status, message count — track archive/read/trash changes
+    await db`
+      UPDATE email_threads SET
+        gmail_message_ids = ${messageIds}, labels = ${allLabels}, status = ${status},
+        snippet = ${snippet}, full_body = ${body}, updated_at = now()
+      WHERE id = ${existing.id}`
+    return
+  }
 
   await db`
     INSERT INTO email_threads (
@@ -168,11 +193,11 @@ async function processThread(gmail, inbox, threadId) {
     ) VALUES (
       ${threadId}, ${messageIds}, ${subject}, ${fromEmail}, ${fromName},
       ${snippet}, ${body}, ${allLabels}, ${client?.id || null}, ${receivedAt},
-      ${isUnread ? 'unread' : 'triaged'}, ${inbox}
+      ${status}, ${inbox}
     )
   `
 
-  // Fire-and-forget KG ingestion
+  // Fire-and-forget KG ingestion — only for new threads
   kgHooks.onEmailProcessed({ threadId, fromEmail, fromName, subject, body, snippet, inbox, clientId: client?.id }).catch(() => {})
 
   logger.info(`[${inbox}] Processed: ${subject} from ${fromEmail}`)
