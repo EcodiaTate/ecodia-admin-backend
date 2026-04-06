@@ -1121,8 +1121,58 @@ registry.registerMany([
     },
   },
   {
+    name: 'bookkeeping_fix_ignored',
+    description: 'Find AND fix ignored transactions that look like business expenses. Scans all ignored items for known business merchants, re-categorizes them automatically, and returns what was fixed. One-shot — no confirmation needed.',
+    tier: 'write',
+    domain: 'bookkeeping',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const bk = require('../services/bookkeeperService')
+
+      // Known business merchant patterns
+      const businessPatterns = [
+        'vercel', 'godaddy', 'google.*workspace', 'google.*cloud', 'gsuite',
+        'linkedin.*prem', 'facebk', 'facebook', 'openai', 'chatgpt', 'anthropic',
+        'canva', 'wordpress', 'hostinger', 'render\\.com', 'macincloud',
+        'asic', 'bizcover', 'ecodia setup', 'avery', 'userswp', 'ayecode',
+        'apple\\.com/bill',
+      ]
+      const patternRegex = businessPatterns.join('|')
+
+      const wronglyIgnored = await db`
+        SELECT id, description, amount_cents, occurred_at
+        FROM staged_transactions
+        WHERE status = 'ignored' AND description ~* ${patternRegex}
+        ORDER BY occurred_at DESC LIMIT 100
+      `
+
+      if (wronglyIgnored.length === 0) return { fixed: 0, message: 'No wrongly-ignored business transactions found.' }
+
+      // Reset them to pending
+      const ids = wronglyIgnored.map(t => t.id)
+      await db`
+        UPDATE staged_transactions
+        SET status = 'pending', category = NULL, is_personal = NULL,
+            confidence = NULL, categorizer_reasoning = NULL
+        WHERE id = ANY(${ids})
+      `
+
+      // Re-categorize
+      await bk.autoCategorize()
+
+      const fixed = wronglyIgnored.map(t => ({
+        description: t.description,
+        amount: `$${Math.abs(t.amount_cents / 100).toFixed(2)}`,
+        date: t.occurred_at ? new Date(t.occurred_at).toLocaleDateString('en-AU') : '?',
+      }))
+
+      return { fixed: fixed.length, transactions: fixed, message: `Fixed ${fixed.length} wrongly-ignored business transactions.` }
+    },
+  },
+  {
     name: 'bookkeeping_bulk_recategorize',
-    description: 'Re-run AI categorization on transactions that were wrongly categorized. Pass an array of transaction IDs to reset to pending and re-categorize.',
+    description: 'Re-run AI categorization on specific transactions. Pass comma-separated IDs to reset and re-categorize.',
     tier: 'write',
     domain: 'bookkeeping',
     params: {
