@@ -30,19 +30,23 @@ const domains = [
   './coding',
 ]
 
+const registry = require('../services/capabilityRegistry')
+
 for (const domain of domains) {
   try {
     require(domain)
   } catch (err) {
+    // Strip leading './' for the domain name recorded in the registry
+    const domainName = domain.replace(/^\.\//, '')
+    registry.recordFailedDomain(domainName)
     logger.error(`CapabilityBootstrap: failed to load ${domain}`, { error: err.message, stack: err.stack })
   }
 }
 
-const registry = require('../services/capabilityRegistry')
-
 const total = registry.list().length
+const failed = registry.getFailedDomains()
 logger.info(`CapabilityRegistry: ${total} capabilities registered across ${
   [...new Set(registry.list().map(c => c.domain))].join(', ')
-}`)
+}${failed.length > 0 ? ` — FAILED domains: ${failed.join(', ')} (will auto-recover on first use)` : ''}`)
 
 module.exports = registry

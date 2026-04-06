@@ -606,31 +606,19 @@ async function performAction(item) {
 
   const registry = require('./capabilityRegistry')
 
-  if (!registry.has(capabilityName)) {
-    const available = registry.list({ enabledOnly: true })
-    logger.warn(`ActionQueue: unknown capability "${capabilityName}" (raw: "${rawType}") — ${available.length} capabilities loaded: ${
-      available.map(c => c.name).join(', ')
-    }`)
-    // If registry is empty, capabilities likely failed to load — attempt recovery
-    if (available.length === 0) {
-      try {
-        require('../capabilities/index')
-        if (registry.has(capabilityName)) {
-          logger.info(`ActionQueue: recovered "${capabilityName}" after re-loading capabilities`)
-          // Fall through to execute below
-        }
-      } catch (err) {
-        logger.error('ActionQueue: capability recovery failed', { error: err.message })
-      }
-    }
-    if (!registry.has(capabilityName)) {
-      return { message: `Action type "${rawType}" is not registered. The system will learn to handle this.`, unhandled: true }
-    }
-  }
-
+  // Registry handles unknown capability recovery (fuzzy match, domain reload) internally
   const outcome = await registry.execute(capabilityName, params, { source: 'action_queue', item })
 
   if (!outcome.success) {
+    // If unknown after registry's own recovery attempt, return gracefully
+    if (outcome.error?.startsWith('Unknown capability')) {
+      logger.warn(`ActionQueue: unregistered capability "${capabilityName}" (raw: "${rawType}")`, {
+        closestMatch: outcome.closestMatch,
+        suggestion: outcome.suggestion,
+        failedDomains: outcome.failedDomains,
+      })
+      return { message: `Action type "${rawType}" is not registered. ${outcome.suggestion || ''}`, unhandled: true }
+    }
     throw new Error(outcome.error || `Capability "${capabilityName}" failed`)
   }
 

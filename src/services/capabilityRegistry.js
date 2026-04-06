@@ -24,6 +24,8 @@ const env = require('../config/env')
 // ═══════════════════════════════════════════════════════════════════════
 
 const registry = new Map()
+const failedDomains = new Set()   // domains that threw during bootstrap
+let _recoveryAttempted = false     // prevent infinite reload loops
 
 // ─── Register ─────────────────────────────────────────────────────────
 // Services call this at require-time (lazy registration pattern).
@@ -59,19 +61,34 @@ async function execute(name, params = {}, context = {}) {
   const cap = registry.get(name)
 
   if (!cap) {
-    // Unknown capability — return structured error, never throw
-    // The system should be able to encounter unknown actions gracefully
-    logger.warn(`CapabilityRegistry: unknown capability "${name}"`, { available: registry.size })
+    // Attempt auto-recovery: reload capability domains if registry looks incomplete
+    const recovered = attemptRecovery(name)
+    if (recovered) {
+      // Re-fetch after recovery
+      return execute(name, params, context)
+    }
+
+    // Fuzzy match — find the closest registered capability name
+    const closest = findClosestCapability(name)
+    const domainCaps = [...registry.values()]
+      .filter(c => !context.domain || c.domain === context.domain)
+      .map(c => c.name)
+
+    logger.warn(`CapabilityRegistry: unknown capability "${name}"`, {
+      available: registry.size,
+      closestMatch: closest?.name || null,
+      closestScore: closest?.score || 0,
+      failedDomains: failedDomains.size > 0 ? [...failedDomains] : undefined,
+    })
+
     return {
       success: false,
       error: `Unknown capability: ${name}`,
-      suggestion: `Available capabilities in domain "${context.domain || 'all'}": ${
-        [...registry.values()]
-          .filter(c => !context.domain || c.domain === context.domain)
-          .map(c => c.name)
-          .slice(0, 10)
-          .join(', ')
-      }`,
+      closestMatch: closest?.name || null,
+      suggestion: closest && closest.score > 0.6
+        ? `Did you mean "${closest.name}"? (${closest.domain} domain)`
+        : `Available in "${context.domain || 'all'}": ${domainCaps.slice(0, 10).join(', ')}`,
+      failedDomains: failedDomains.size > 0 ? [...failedDomains] : undefined,
     }
   }
 
@@ -144,6 +161,76 @@ function has(name) {
   return registry.has(name)
 }
 
+// ─── Fuzzy matching ───────────────────────────────────────────────────
+// When an unknown capability is requested, find the closest registered name.
+// Uses bigram similarity (Dice coefficient) — fast, no dependencies.
+
+function bigrams(str) {
+  const s = str.toLowerCase()
+  const pairs = []
+  for (let i = 0; i < s.length - 1; i++) pairs.push(s.slice(i, i + 2))
+  return pairs
+}
+
+function diceCoefficient(a, b) {
+  const biA = bigrams(a)
+  const biB = bigrams(b)
+  if (biA.length === 0 && biB.length === 0) return 1
+  if (biA.length === 0 || biB.length === 0) return 0
+  const setB = new Set(biB)
+  let intersection = 0
+  for (const bi of biA) { if (setB.has(bi)) intersection++ }
+  return (2 * intersection) / (biA.length + biB.length)
+}
+
+function findClosestCapability(name) {
+  let best = null
+  let bestScore = 0
+  for (const [capName, cap] of registry) {
+    const score = diceCoefficient(name, capName)
+    if (score > bestScore) {
+      bestScore = score
+      best = { name: capName, domain: cap.domain, score }
+    }
+  }
+  return bestScore > 0.4 ? best : null
+}
+
+// ─── Auto-recovery ────────────────────────────────────────────────────
+// If an unknown capability is requested and we have failed domains,
+// attempt to reload capabilities once. Handles transient boot failures.
+
+function attemptRecovery(name) {
+  if (_recoveryAttempted || failedDomains.size === 0) return false
+  _recoveryAttempted = true
+
+  logger.info(`CapabilityRegistry: attempting recovery for "${name}" (${failedDomains.size} failed domains: ${[...failedDomains].join(', ')})`)
+  const recovered = []
+  for (const domain of [...failedDomains]) {
+    try {
+      require(`../capabilities/${domain}`)
+      failedDomains.delete(domain)
+      recovered.push(domain)
+    } catch (err) {
+      logger.warn(`CapabilityRegistry: recovery failed for ${domain}`, { error: err.message })
+    }
+  }
+  if (recovered.length > 0) {
+    logger.info(`CapabilityRegistry: recovered ${recovered.join(', ')} — registry now has ${registry.size} capabilities`)
+  }
+  // Reset recovery flag after 60s so we can retry later if needed
+  setTimeout(() => { _recoveryAttempted = false }, 60_000)
+  return registry.has(name)
+}
+
+function recordFailedDomain(domain) {
+  failedDomains.add(domain)
+}
+
+function getFailedDomains() {
+  return [...failedDomains]
+}
+
 // ─── Pressure gate ────────────────────────────────────────────────────
 // Survival-only gate: at true survival pressure (organism-reported > 0.95),
 // block non-critical writes. This is the absolute last resort — not a
@@ -194,4 +281,4 @@ function describeForAI({ domain, tier, verbose } = {}) {
   }).join('\n')
 }
 
-module.exports = { register, registerMany, execute, list, get, has, describeForAI }
+module.exports = { register, registerMany, execute, list, get, has, describeForAI, recordFailedDomain, getFailedDomains }
