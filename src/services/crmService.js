@@ -180,14 +180,14 @@ async function getRevenueOverview({ clientId, period = '30 days' } = {}) {
     ${where}
   `
 
-  // Revenue by stage
+  // Revenue by status
   const byStage = await db`
-    SELECT c.stage, count(DISTINCT p.id)::int AS projects,
+    SELECT c.status, count(DISTINCT p.id)::int AS projects,
            COALESCE(SUM(p.deal_value_aud), 0)::numeric AS value
     FROM projects p
     JOIN clients c ON p.client_id = c.id
     WHERE p.deal_value_aud IS NOT NULL
-    GROUP BY c.stage ORDER BY value DESC
+    GROUP BY c.status ORDER BY value DESC
   `
 
   return { totals, byStage }
@@ -229,12 +229,12 @@ async function searchClients(query, { limit = 20 } = {}) {
 
   const q = `%${query.trim()}%`
   return db`
-    SELECT c.id, c.name, c.company, c.email, c.stage, c.priority, c.health_score,
+    SELECT c.id, c.name, c.contact_email, c.status, c.health_score,
            (SELECT count(*)::int FROM projects WHERE client_id = c.id AND status = 'active') AS active_projects,
            (SELECT count(*)::int FROM tasks WHERE client_id = c.id AND completed_at IS NULL) AS open_tasks
     FROM clients c
     WHERE c.archived_at IS NULL
-      AND (c.name ILIKE ${q} OR c.company ILIKE ${q} OR c.email ILIKE ${q}
+      AND (c.name ILIKE ${q} OR c.contact_email ILIKE ${q}
            OR EXISTS (SELECT 1 FROM crm_contacts cc WHERE cc.client_id = c.id AND (cc.name ILIKE ${q} OR cc.email ILIKE ${q})))
     ORDER BY c.updated_at DESC
     LIMIT ${limit}
@@ -300,8 +300,8 @@ async function addContact({ clientId, name, role, email, phone, linkedinUrl, isP
   // Also update the client's primary email if this is the primary contact and client has no email
   if (isPrimary && email) {
     await db`
-      UPDATE clients SET email = ${email}, updated_at = now()
-      WHERE id = ${clientId} AND (email IS NULL OR email = '')
+      UPDATE clients SET contact_email = ${email}, updated_at = now()
+      WHERE id = ${clientId} AND (contact_email IS NULL OR contact_email = '')
     `.catch(() => {})
   }
 
@@ -319,15 +319,15 @@ async function getContacts(clientId) {
 
 async function getPipelineAnalytics() {
   const pipeline = await db`
-    SELECT c.stage,
+    SELECT c.status,
       count(*)::int AS count,
       COALESCE(SUM(p.deal_value_aud), 0)::numeric AS total_value,
       avg(c.health_score) AS avg_health
     FROM clients c
     LEFT JOIN projects p ON p.client_id = c.id AND p.status = 'active'
     WHERE c.archived_at IS NULL
-    GROUP BY c.stage
-    ORDER BY CASE c.stage
+    GROUP BY c.status
+    ORDER BY CASE c.status
       WHEN 'lead' THEN 0 WHEN 'proposal' THEN 1 WHEN 'contract' THEN 2
       WHEN 'development' THEN 3 WHEN 'live' THEN 4 WHEN 'ongoing' THEN 5
       WHEN 'archived' THEN 6 ELSE 7 END
@@ -356,12 +356,12 @@ async function getPipelineAnalytics() {
 async function buildCRMBrief() {
   const [stats] = await db`
     SELECT
-      count(*) FILTER (WHERE stage = 'lead')::int AS leads,
-      count(*) FILTER (WHERE stage = 'proposal')::int AS proposals,
-      count(*) FILTER (WHERE stage = 'contract')::int AS contracts,
-      count(*) FILTER (WHERE stage = 'development')::int AS development,
-      count(*) FILTER (WHERE stage = 'live')::int AS live,
-      count(*) FILTER (WHERE stage = 'ongoing')::int AS ongoing,
+      count(*) FILTER (WHERE status = 'lead')::int AS leads,
+      count(*) FILTER (WHERE status = 'proposal')::int AS proposals,
+      count(*) FILTER (WHERE status = 'contract')::int AS contracts,
+      count(*) FILTER (WHERE status = 'development')::int AS development,
+      count(*) FILTER (WHERE status = 'live')::int AS live,
+      count(*) FILTER (WHERE status = 'ongoing')::int AS ongoing,
       count(*) FILTER (WHERE archived_at IS NULL)::int AS total_active
     FROM clients
   `

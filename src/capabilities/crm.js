@@ -5,18 +5,15 @@ registry.registerMany([
 
   {
     name: 'create_lead',
-    description: 'Create a new CRM client record from lead data — name, company, contact info, source signal',
+    description: 'Create a new CRM client record from lead data — name, contact info, source signal',
     tier: 'write',
     domain: 'crm',
     params: {
       name: { type: 'string', required: true, description: 'Full name' },
-      company: { type: 'string', required: false, description: 'Company name' },
-      email: { type: 'string', required: false, description: 'Email address' },
-      phone: { type: 'string', required: false, description: 'Phone number' },
-      linkedinUrl: { type: 'string', required: false, description: 'LinkedIn profile URL' },
+      contactEmail: { type: 'string', required: false, description: 'Contact email address' },
+      contactPhone: { type: 'string', required: false, description: 'Contact phone number' },
       source: { type: 'string', required: false, description: 'Where this lead came from: linkedin, gmail, referral, website, manual' },
       notes: { type: 'string', required: false, description: 'Initial notes or context' },
-      leadScore: { type: 'number', required: false, description: 'Lead quality score 0-1' },
     },
     handler: async (params) => {
       const db = require('../config/db')
@@ -25,11 +22,11 @@ registry.registerMany([
         ? JSON.stringify([{ content: `${params.notes} [source: ${params.source || 'ai'}]`, createdAt: new Date().toISOString(), source: params.source || 'ai' }])
         : '[]'
       const [client] = await db`
-        INSERT INTO clients (name, company, email, phone, linkedin_url, stage, priority, notes, tags, source, first_contact_at)
+        INSERT INTO clients (name, contact_email, contact_phone, status, notes, tags, source, first_contact_at)
         VALUES (
-          ${params.name}, ${params.company || null}, ${params.email || null},
-          ${params.phone || null}, ${params.linkedinUrl || null}, 'lead',
-          ${(params.leadScore || 0) > 0.7 ? 'high' : 'medium'}, ${notes}::jsonb,
+          ${params.name}, ${params.contactEmail || null},
+          ${params.contactPhone || null}, 'lead',
+          ${notes}::jsonb,
           ARRAY[]::text[], ${params.source || 'manual'}, now()
         )
         RETURNING id, name
@@ -49,26 +46,26 @@ registry.registerMany([
   },
 
   {
-    name: 'update_crm_stage',
-    description: 'Move a CRM client to a new pipeline stage — lead, proposal, contract, development, live, ongoing, archived',
+    name: 'update_crm_status',
+    description: 'Move a CRM client to a new pipeline status — lead, proposal, contract, development, live, ongoing, archived',
     tier: 'write',
     domain: 'crm',
     params: {
       clientId: { type: 'string', required: true, description: 'Client UUID' },
-      stage: { type: 'string', required: true, description: 'New stage name' },
-      note: { type: 'string', required: false, description: 'Reason for stage change' },
+      status: { type: 'string', required: true, description: 'New status name' },
+      note: { type: 'string', required: false, description: 'Reason for status change' },
     },
     handler: async (params) => {
       const db = require('../config/db')
       const crmService = require('../services/crmService')
 
-      const [current] = await db`SELECT name, stage FROM clients WHERE id = ${params.clientId}`
+      const [current] = await db`SELECT name, status FROM clients WHERE id = ${params.clientId}`
       if (!current) throw new Error(`Client ${params.clientId} not found`)
 
-      await db`UPDATE clients SET stage = ${params.stage}, updated_at = now() WHERE id = ${params.clientId}`
+      await db`UPDATE clients SET status = ${params.status}, updated_at = now() WHERE id = ${params.clientId}`
       await db`
         INSERT INTO pipeline_events (client_id, from_stage, to_stage, note)
-        VALUES (${params.clientId}, ${current.stage}, ${params.stage}, ${params.note || null})
+        VALUES (${params.clientId}, ${current.status}, ${params.status}, ${params.note || null})
       `
 
       if (params.note) {
@@ -82,20 +79,20 @@ registry.registerMany([
       await crmService.logActivity({
         clientId: params.clientId,
         activityType: 'stage_changed',
-        title: `Stage: ${current.stage} → ${params.stage}`,
+        title: `Status: ${current.status} → ${params.status}`,
         description: params.note,
         source: 'crm',
         actor: 'ai',
-        metadata: { from: current.stage, to: params.stage },
+        metadata: { from: current.status, to: params.status },
       })
 
       // Fire KG hook
       try {
         const kgHooks = require('../services/kgIngestionHooks')
-        kgHooks.onClientUpdated({ client: { ...current, id: params.clientId }, previousStage: current.stage }).catch(() => {})
+        kgHooks.onClientUpdated({ client: { ...current, id: params.clientId }, previousStage: current.status }).catch(() => {})
       } catch {}
 
-      return { message: `${current.name} moved from ${current.stage} to ${params.stage}` }
+      return { message: `${current.name} moved from ${current.status} to ${params.status}` }
     },
   },
 
@@ -434,7 +431,7 @@ registry.registerMany([
       `
 
       const unhealthyClients = await db`
-        SELECT id, name, company, stage, health_score, last_contact_at
+        SELECT id, name, status, health_score, last_contact_at
         FROM clients
         WHERE archived_at IS NULL AND health_score IS NOT NULL AND health_score < 0.4
         ORDER BY health_score ASC LIMIT 5

@@ -90,8 +90,17 @@ async function execute(name, params = {}, context = {}) {
     if (pressureBlock) return pressureBlock
   }
 
-  // Coerce stringified arrays/objects — AI often serializes nested params as JSON strings
+  // Validate required params + coerce types
   if (cap.params) {
+    const missing = Object.entries(cap.params)
+      .filter(([k, v]) => v.required && (params[k] === undefined || params[k] === null || params[k] === ''))
+      .map(([k]) => k)
+    if (missing.length) {
+      const msg = `Missing required param${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`
+      logger.warn(`CapabilityRegistry: "${name}" — ${msg}`)
+      return { success: false, error: msg, capability: name }
+    }
+    // Coerce stringified arrays/objects — AI often serializes nested params as JSON strings
     for (const [key, schema] of Object.entries(cap.params)) {
       if (params[key] && typeof params[key] === 'string' && (schema.type === 'array' || schema.type === 'object')) {
         try { params[key] = JSON.parse(params[key]) } catch (_) { /* leave as-is */ }

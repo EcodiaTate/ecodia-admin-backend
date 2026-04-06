@@ -51,7 +51,7 @@ async function getDMById(id) {
     SELECT d.*, p.headline as profile_headline, p.company as profile_company, p.location as profile_location,
            p.about_snippet as profile_about, p.relevance_score as profile_relevance, p.connection_degree as profile_connection_degree,
            p.mutual_connections as profile_mutual_connections, p.profile_image_url as profile_image,
-           c.name as client_name, c.stage as client_stage
+           c.name as client_name, c.status as client_stage
     FROM linkedin_dms d
     LEFT JOIN linkedin_profiles p ON d.profile_id = p.id
     LEFT JOIN clients c ON d.client_id = c.id

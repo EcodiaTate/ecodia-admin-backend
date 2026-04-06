@@ -333,7 +333,7 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
   const contextBlock = kgContext
     ? `\n--- KNOWLEDGE GRAPH ---\n${kgContext}\n--- END ---\n`
     : clientContext
-      ? `Known client: ${clientContext.name} (Stage: ${clientContext.stage})`
+      ? `Known client: ${clientContext.name} (Status: ${clientContext.status})`
       : 'Unknown sender'
 
   const pendingBlock = pendingActionsContext

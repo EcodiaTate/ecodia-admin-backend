@@ -570,7 +570,7 @@ async function _enrichPrompt(rawPrompt, codebaseId, clientId) {
     // Client context (if known)
     if (clientId) {
       const clients = await db`
-        SELECT c.name, c.company, c.stage, p.name AS project_name, p.description AS project_desc
+        SELECT c.name, c.status, p.name AS project_name, p.description AS project_desc
         FROM clients c
         LEFT JOIN projects p ON p.client_id = c.id AND p.status = 'active'
         WHERE c.id = ${clientId}
@@ -581,7 +581,7 @@ async function _enrichPrompt(rawPrompt, codebaseId, clientId) {
       })
       const client = clients[0]
       if (client) {
-        sections.push(`Client: ${client.name}${client.company ? ` (${client.company})` : ''}, stage: ${client.stage}${client.project_name ? `, project: ${client.project_name}` : ''}`)
+        sections.push(`Client: ${client.name}, status: ${client.status}${client.project_name ? `, project: ${client.project_name}` : ''}`)
       }
     }
   } catch (err) {

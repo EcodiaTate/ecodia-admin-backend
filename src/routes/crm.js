@@ -38,13 +38,11 @@ router.get('/clients', async (req, res, next) => {
 // POST /api/crm/clients
 const createClientSchema = z.object({
   name: z.string().min(1),
-  company: z.string().optional(),
-  email: z.string().email().optional(),
-  phone: z.string().optional(),
-  linkedinUrl: z.string().optional(),
-  xeroContactId: z.string().optional(),
-  stage: z.enum(STAGES).default('lead'),
-  priority: z.enum(['low', 'medium', 'high']).default('medium'),
+  contactName: z.string().optional(),
+  contactEmail: z.string().email().optional(),
+  contactPhone: z.string().optional(),
+  status: z.enum(STAGES).default('lead'),
+  source: z.string().optional(),
   tags: z.array(z.string()).default([]),
 })
 
@@ -52,9 +50,9 @@ router.post('/clients', validate(createClientSchema), async (req, res, next) => 
   try {
     const b = req.body
     const [client] = await db`
-      INSERT INTO clients (name, company, email, phone, linkedin_url, xero_contact_id, stage, priority, tags)
-      VALUES (${b.name}, ${b.company || null}, ${b.email || null}, ${b.phone || null},
-              ${b.linkedinUrl || null}, ${b.xeroContactId || null}, ${b.stage}, ${b.priority}, ${b.tags})
+      INSERT INTO clients (name, contact_name, contact_email, contact_phone, status, source, tags)
+      VALUES (${b.name}, ${b.contactName || null}, ${b.contactEmail || null}, ${b.contactPhone || null},
+              ${b.status}, ${b.source || null}, ${b.tags})
       RETURNING *
     `
 
@@ -88,7 +86,7 @@ router.get('/clients/:id', async (req, res, next) => {
 // PATCH /api/crm/clients/:id
 router.patch('/clients/:id', async (req, res, next) => {
   try {
-    const allowed = ['name', 'company', 'email', 'phone', 'linkedin_url', 'xero_contact_id', 'priority', 'tags', 'meta']
+    const allowed = ['name', 'contact_name', 'contact_email', 'contact_phone', 'tags', 'source', 'notes', 'email_domains']
     const updates = {}
     for (const key of allowed) {
       const camel = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
@@ -131,7 +129,7 @@ router.delete('/clients/:id', async (req, res, next) => {
 router.get('/pipeline', async (req, res, next) => {
   try {
     const clients = await db`
-      SELECT c.id, c.name, c.company, c.email, c.stage, c.priority, c.tags,
+      SELECT c.id, c.name, c.contact_name, c.contact_email, c.status, c.tags,
              c.source, c.health_score, c.total_revenue_aud, c.last_contact_at,
              c.updated_at, c.created_at,
              (SELECT count(*)::int FROM tasks WHERE client_id = c.id AND completed_at IS NULL) AS open_tasks,
@@ -144,7 +142,7 @@ router.get('/pipeline', async (req, res, next) => {
 
     const pipeline = {}
     for (const stage of STAGES) {
-      pipeline[stage] = clients.filter(c => c.stage === stage)
+      pipeline[stage] = clients.filter(c => c.status === stage)
     }
 
     res.json(pipeline)
@@ -153,23 +151,23 @@ router.get('/pipeline', async (req, res, next) => {
   }
 })
 
-// PATCH /api/crm/clients/:id/stage
-const stageSchema = z.object({
-  stage: z.enum(STAGES),
+// PATCH /api/crm/clients/:id/status
+const statusSchema = z.object({
+  status: z.enum(STAGES),
   note: z.string().optional(),
 })
 
-router.patch('/clients/:id/stage', validate(stageSchema), async (req, res, next) => {
+router.patch('/clients/:id/status', validate(statusSchema), async (req, res, next) => {
   try {
-    const [client] = await db`SELECT id, stage FROM clients WHERE id = ${req.params.id}`
+    const [client] = await db`SELECT id, status FROM clients WHERE id = ${req.params.id}`
     if (!client) return res.status(404).json({ error: 'Client not found' })
 
-    const fromStage = client.stage
-    const toStage = req.body.stage
+    const fromStage = client.status
+    const toStage = req.body.status
 
     await db.begin(async sql => {
       await sql`
-        UPDATE clients SET stage = ${toStage}, updated_at = now()
+        UPDATE clients SET status = ${toStage}, updated_at = now()
         WHERE id = ${req.params.id}
       `
       await sql`

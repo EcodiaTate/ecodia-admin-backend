@@ -63,9 +63,11 @@ registry.registerMany([
     tier: 'read',
     domain: 'gmail',
     params: {
-      threadId: { type: 'string', required: true, description: 'Thread UUID or gmail_thread_id' },
+      threadId: { type: 'string', required: true, description: 'Thread UUID (id field) or gmail_thread_id from gmail_list_threads' },
     },
-    handler: async ({ threadId }) => {
+    handler: async (params) => {
+      const threadId = params.threadId || params.thread_id || params.id || params.gmail_thread_id
+      if (!threadId) throw new Error('threadId is required — pass the id or gmail_thread_id from gmail_list_threads')
       const db = require('../config/db')
       const isUUID = /^[0-9a-f-]{36}$/.test(threadId)
       const [thread] = isUUID

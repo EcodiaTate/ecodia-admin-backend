@@ -116,11 +116,11 @@ RULES:
     domains: ['crm', 'gmail'],
     autoLoadDocs: ['ecodia-context'],
     stateQueries: {
-      'Pipeline': `SELECT stage, count(*)::int AS count FROM clients WHERE archived_at IS NULL GROUP BY stage ORDER BY CASE stage WHEN 'lead' THEN 0 WHEN 'proposal' THEN 1 WHEN 'contract' THEN 2 WHEN 'development' THEN 3 WHEN 'live' THEN 4 WHEN 'ongoing' THEN 5 ELSE 6 END`,
+      'Pipeline': `SELECT status, count(*)::int AS count FROM clients WHERE archived_at IS NULL GROUP BY status ORDER BY CASE status WHEN 'lead' THEN 0 WHEN 'proposal' THEN 1 WHEN 'contract' THEN 2 WHEN 'development' THEN 3 WHEN 'live' THEN 4 WHEN 'ongoing' THEN 5 ELSE 6 END`,
       'Open tasks': `SELECT count(*)::int AS count FROM tasks WHERE completed_at IS NULL`,
       'Overdue tasks': `SELECT count(*)::int AS count FROM tasks WHERE completed_at IS NULL AND due_date < now()`,
       'Recent activity': `SELECT al.activity_type, al.title, c.name AS client_name, al.created_at FROM crm_activity_log al JOIN clients c ON al.client_id = c.id ORDER BY al.created_at DESC LIMIT 5`,
-      'Active clients': `SELECT count(*)::int AS count FROM clients WHERE archived_at IS NULL AND stage NOT IN ('archived')`,
+      'Active clients': `SELECT count(*)::int AS count FROM clients WHERE archived_at IS NULL AND status NOT IN ('archived')`,
     },
     systemPromptAddition: `You are the CRM intelligence for Ecodia Pty Ltd. You manage ALL client relationships.
 

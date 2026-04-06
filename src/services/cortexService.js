@@ -320,6 +320,8 @@ async function chatAndExecute(messages, { sessionId, ambientEvents, lean, maxRou
   let currentMessages = [...messages]
   let round = 0
 
+  const failedActions = new Map()  // action:paramHash → failure count
+
   while (round < maxRounds) {
     round++
     const result = await chat(currentMessages, { sessionId, ambientEvents, lean })
@@ -336,15 +338,30 @@ async function chatAndExecute(messages, { sessionId, ambientEvents, lean, maxRou
     // Execute all actions and collect results
     const actionResults = []
     for (const action of autoActions) {
+      const actionKey = `${action.action}:${JSON.stringify(action.params || {})}`
+      const priorFailures = failedActions.get(actionKey) || 0
+
+      // If this exact action+params already failed, skip it — don't burn rounds retrying
+      if (priorFailures >= 1) {
+        const msg = `Skipped — same action already failed this conversation. Move on and answer the human.`
+        actionResults.push({ action: action.action, success: false, error: msg })
+        allBlocks.push({ type: 'action_result', action: action.action, success: false, error: msg })
+        continue
+      }
+
       try {
         const execResult = await executeAction(action.action, action.params || {})
         actionResults.push({ action: action.action, success: true, result: execResult })
         allBlocks.push({ type: 'action_result', action: action.action, success: true, result: execResult })
       } catch (err) {
+        failedActions.set(actionKey, priorFailures + 1)
         actionResults.push({ action: action.action, success: false, error: err.message })
         allBlocks.push({ type: 'action_result', action: action.action, success: false, error: err.message })
       }
     }
+
+    // If every action this round was skipped due to prior failure, break out — nothing useful left
+    if (actionResults.length > 0 && actionResults.every(r => !r.success)) break
 
     // Build the feedback message for the next round
     const resultSummary = actionResults.map(r =>

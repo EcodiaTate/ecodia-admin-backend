@@ -199,7 +199,7 @@ async function triagePendingEmails() {
   for (const thread of pending) {
     try {
       const client = thread.client_id
-        ? (await db`SELECT name, stage FROM clients WHERE id = ${thread.client_id}`)[0]
+        ? (await db`SELECT name, status FROM clients WHERE id = ${thread.client_id}`)[0]
         : null
 
       // Pull client's active projects + linked codebases — gives the AI

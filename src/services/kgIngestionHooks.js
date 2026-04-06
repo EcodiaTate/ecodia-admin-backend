@@ -184,35 +184,22 @@ async function onClientUpdated({ client, previousStage }) {
       label: 'Person',
       name: client.name,
       properties: {
-        email: client.email,
-        company: client.company,
-        phone: client.phone,
-        stage: client.stage,
-        priority: client.priority,
+        email: client.contact_email,
+        phone: client.contact_phone,
+        status: client.status,
       },
       sourceModule: 'crm',
       sourceId: client.id,
     })
 
-    if (client.company) {
-      await kg.ensureRelationship({
-        fromLabel: 'Person',
-        fromName: client.name,
-        toLabel: 'Organisation',
-        toName: client.company,
-        relType: 'WORKS_AT',
-        sourceModule: 'crm',
-      })
-    }
-
-    if (previousStage && previousStage !== client.stage) {
+    if (previousStage && previousStage !== client.status) {
       await kg.ensureRelationship({
         fromLabel: 'Person',
         fromName: client.name,
         toLabel: 'Event',
-        toName: `Pipeline: ${previousStage} → ${client.stage}`,
+        toName: `Pipeline: ${previousStage} → ${client.status}`,
         relType: 'MOVED_STAGE',
-        properties: { from: previousStage, to: client.stage, when: new Date().toISOString() },
+        properties: { from: previousStage, to: client.status, when: new Date().toISOString() },
         sourceModule: 'crm',
       })
     }
