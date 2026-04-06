@@ -6,7 +6,7 @@
 -- Personal merchants → DISCARD (auto-ignore)
 INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
 VALUES
-  ('africa.*25|save up challenge|quick save|round up', 'Personal Savings', 'DISCARD', true, false, 'gst_free'),
+  ('africa.*25|save up challenge|quick save transfer', 'Personal Savings', 'DISCARD', true, false, 'gst_free'),
   ('ecodia invest|ecodia savings', 'Ecodia Invest (Personal)', 'DISCARD', true, false, 'gst_free'),
   ('superhero', 'Superhero (Personal)', 'DISCARD', true, false, 'gst_free'),
   ('centrelink', 'Centrelink', 'DISCARD', true, false, 'gst_free'),

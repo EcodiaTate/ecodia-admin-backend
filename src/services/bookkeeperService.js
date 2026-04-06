@@ -404,7 +404,9 @@ async function categorizeTransactions(transactions) {
 }
 
 function _tryRuleMatch(tx, rules) {
-  const desc = `${tx.description} ${tx.long_description || ''}`.toLowerCase()
+  // Match against description + payee/transaction_type only — NOT the full long_description
+  // which contains CSV metadata columns (Round Up AUD, etc.) that cause false matches
+  const desc = `${tx.description} ${tx.transaction_type || ''}`.toLowerCase()
   for (const rule of rules) {
     try {
       if (new RegExp(rule.pattern, 'i').test(desc)) {
