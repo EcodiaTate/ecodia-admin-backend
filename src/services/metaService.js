@@ -275,7 +275,11 @@ Respond as JSON:
   "suggestedAction": "reply|ignore|escalate|create_task",
   "draftReply": "reply text or null",
   "surfaceToHuman": true/false,
-  "surfaceReason": "why, or null"
+  "surfaceReason": "why, or null",
+  "isCodeWorkRequest": true/false,
+  "factoryPrompt": "detailed description of the code work requested, or null",
+  "codeWorkType": "feature|bugfix|update|investigation|refactor or null",
+  "suggestedCodebase": "codebase name if identifiable, or null"
 }`
 
       const raw = await deepseekService.callDeepSeek(
@@ -310,6 +314,32 @@ Respond as JSON:
           context: { from: conv.participant_name, email: conv.participant_id ? `${conv.participant_id}@${conv.platform || 'meta'}` : null, platform: conv.platform, pageName: conv.page_name, participantName: conv.participant_name },
           priority: triage.priority === 'spam' ? 'low' : triage.priority,
         }).catch(() => {})
+      }
+
+      // Code work detection — if the DM contains a code/feature request, bridge to Factory
+      const hasCodeWork = triage.isCodeWorkRequest === true
+        && typeof triage.factoryPrompt === 'string'
+        && triage.factoryPrompt.trim().length >= 10
+      if (hasCodeWork) {
+        const codeRequestService = require('./codeRequestService')
+        await codeRequestService.createFromSocial({
+          source: 'meta',
+          sourceRefId: String(conv.id),
+          clientId: null,
+          summary: triage.summary || triage.factoryPrompt.slice(0, 200),
+          factoryPrompt: triage.factoryPrompt.trim(),
+          codeWorkType: triage.codeWorkType,
+          suggestedCodebase: (typeof triage.suggestedCodebase === 'string' && triage.suggestedCodebase.trim()) || null,
+          confidence: 0.5,
+          surfaceToHuman: true,
+          replyContext: {
+            platform: conv.platform || 'messenger',
+            conversationId: conv.id,
+            participantName: conv.participant_name,
+            participantId: conv.participant_id,
+            pageName: conv.page_name,
+          },
+        }).catch(err => logger.warn(`Code request creation failed for Meta conversation ${conv.id}`, { error: err.message }))
       }
 
       logger.debug(`Meta DM triaged: ${conv.participant_name} → ${triage.priority}/${triage.suggestedAction}`)

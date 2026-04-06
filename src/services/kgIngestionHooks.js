@@ -829,6 +829,49 @@ function sendCognitiveBroadcast(perceptType, salience, content) {
   }
 }
 
+// ─── Code Request Lifecycle ─────────────────────────────────────────
+
+async function onCodeRequestCreated({ request, source }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Code work request received from ${source}.
+Source: ${source}, Ref: ${request.source_ref_id || 'N/A'}
+Summary: ${request.summary || 'N/A'}
+Type: ${request.code_work_type || 'unknown'}
+Confidence: ${request.confidence || 'N/A'}
+Status: ${request.status}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'code_request',
+      sourceId: String(request.id),
+      context: 'A code work request was detected from a social channel and created in the auto-developer pipeline.',
+    })
+  } catch (err) {
+    logger.debug('KG code request creation ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
+async function onCodeRequestCompleted({ codeRequest, outcome, session }) {
+  if (!isEnabled()) return
+
+  try {
+    const content = `Code request completed: ${outcome}.
+Source: ${codeRequest.source}, Summary: ${(codeRequest.summary || '').slice(0, 200)}
+Session: ${session?.id || 'N/A'}, Codebase: ${session?.codebase_name || 'unknown'}
+Files changed: ${(session?.files_changed || []).join(', ') || 'none'}
+Reply context: ${JSON.stringify(codeRequest.reply_context || {})}`
+
+    await kg.ingestFromLLM(content, {
+      sourceModule: 'code_request_outcome',
+      sourceId: String(codeRequest.id),
+      context: `Auto-developer pipeline completed a ${outcome} cycle from ${codeRequest.source}. Extract patterns about social-originated code requests.`,
+    })
+  } catch (err) {
+    logger.debug('KG code request completion ingestion failed (non-blocking)', { error: err.message })
+  }
+}
+
 module.exports = {
   onEmailProcessed,
   onEmailTriaged,
@@ -852,5 +895,7 @@ module.exports = {
   onDirectAction,
   onFactoryOutcome,
   onSystemEvent,
+  onCodeRequestCreated,
+  onCodeRequestCompleted,
   sendCognitiveBroadcast,
 }

@@ -113,4 +113,66 @@ registry.registerMany([
       return codeRequestService.recoverStuckRequests()
     },
   },
+
+  // ─── Auto-Developer: Social Code Request Intake ─────────────────────
+  {
+    name: 'create_social_code_request',
+    description: 'Create a code request from a social channel message (LinkedIn, Meta, Twitter, etc). Used when the AI detects a code work request in a social DM.',
+    tier: 'write',
+    domain: 'factory',
+    params: {
+      source: { type: 'string', required: true, description: 'Source platform: linkedin, meta, twitter, gmail' },
+      sourceRefId: { type: 'string', required: false, description: 'Platform-specific reference ID (DM id, conversation id, etc.)' },
+      summary: { type: 'string', required: true, description: 'Short summary of the request' },
+      factoryPrompt: { type: 'string', required: true, description: 'Detailed description of the code work to perform' },
+      codeWorkType: { type: 'string', required: false, description: 'Type: feature, bugfix, update, investigation, refactor' },
+      suggestedCodebase: { type: 'string', required: false, description: 'Target codebase name if known' },
+      clientId: { type: 'number', required: false, description: 'CRM client ID if linked' },
+    },
+    handler: async (params) => {
+      const codeRequestService = require('../services/codeRequestService')
+      const result = await codeRequestService.createFromSocial({
+        source: params.source,
+        sourceRefId: params.sourceRefId || null,
+        clientId: params.clientId || null,
+        summary: params.summary,
+        factoryPrompt: params.factoryPrompt,
+        codeWorkType: params.codeWorkType || null,
+        suggestedCodebase: params.suggestedCodebase || null,
+        confidence: 0.6,
+        surfaceToHuman: true,
+        replyContext: { platform: params.source, sourceRefId: params.sourceRefId },
+      })
+      if (!result) return { error: 'Code request creation failed — prompt too short or validation failed' }
+      return { created: true, codeRequestId: result.id, status: result.status }
+    },
+  },
+
+  {
+    name: 'get_auto_developer_status',
+    description: 'Get status of the auto-developer pipeline: social code requests by source, pending/active/completed counts, recent completions with outcomes.',
+    tier: 'read',
+    domain: 'factory',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const bySource = await db`
+        SELECT source, status, count(*)::int AS count
+        FROM code_requests
+        WHERE created_at > now() - interval '30 days'
+        GROUP BY source, status
+        ORDER BY source, status
+      `
+      const recent = await db`
+        SELECT cr.id, cr.source, cr.summary, cr.status, cr.code_work_type,
+               cr.confidence, cr.created_at, cr.resolved_at,
+               cs.status AS session_status, cs.pipeline_stage, cs.confidence_score AS session_confidence
+        FROM code_requests cr
+        LEFT JOIN cc_sessions cs ON cr.session_id = cs.id
+        WHERE cr.created_at > now() - interval '7 days'
+        ORDER BY cr.created_at DESC LIMIT 20
+      `
+      return { bySource, recent, recentCount: recent.length }
+    },
+  },
 ])

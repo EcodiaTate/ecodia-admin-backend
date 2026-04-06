@@ -123,6 +123,31 @@ async function triagePendingDMs() {
         }).catch(() => {})
       }
 
+      // Code work detection — if the DM contains a code/feature request, bridge to Factory
+      const hasCodeWork = triage.isCodeWorkRequest === true
+        && typeof triage.factoryPrompt === 'string'
+        && triage.factoryPrompt.trim().length >= 10
+      if (hasCodeWork) {
+        const codeRequestService = require('./codeRequestService')
+        await codeRequestService.createFromSocial({
+          source: 'linkedin',
+          sourceRefId: dm.id,
+          clientId: dm.client_id || null,
+          summary: triage.summary || triage.factoryPrompt.slice(0, 200),
+          factoryPrompt: triage.factoryPrompt.trim(),
+          codeWorkType: triage.codeWorkType,
+          suggestedCodebase: (typeof triage.suggestedCodebase === 'string' && triage.suggestedCodebase.trim()) || null,
+          confidence: typeof triage.leadScore === 'number' ? triage.leadScore : 0.5,
+          surfaceToHuman: true,
+          replyContext: {
+            platform: 'linkedin',
+            dmId: dm.id,
+            conversationId: dm.conversation_id,
+            participantName: dm.participant_name,
+          },
+        }).catch(err => logger.warn(`Code request creation failed for LinkedIn DM ${dm.id}`, { error: err.message }))
+      }
+
       logger.debug(`Triaged DM ${dm.id}: ${triage.category}/${triage.priority}`)
     } catch (err) {
       logger.warn(`Failed to triage DM ${dm.id}: ${err.message}`)

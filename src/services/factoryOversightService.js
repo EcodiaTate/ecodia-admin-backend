@@ -640,6 +640,67 @@ async function reportToTriggerSource(session, result) {
       logger.debug('Failed to report to organism via symbridge', { error: err.message })
     }
   }
+
+  // Close the loop for social-originated code requests
+  const socialSources = ['gmail', 'linkedin', 'meta', 'twitter']
+  if (socialSources.includes(session.trigger_source)) {
+    try {
+      const codeRequestService = require('./codeRequestService')
+      // Find the code request linked to this session
+      const [codeRequest] = await db`
+        SELECT * FROM code_requests WHERE session_id = ${session.id} LIMIT 1
+      `
+      if (codeRequest) {
+        if (result.success) {
+          await codeRequestService.markCompleted(codeRequest.id)
+        }
+
+        // Enqueue notification to the requester via the action queue
+        const replyContext = codeRequest.reply_context || {}
+        if (replyContext.platform || session.trigger_source === 'gmail') {
+          const actionQueue = require('./actionQueueService')
+          const statusMsg = result.success
+            ? `Completed: ${(codeRequest.summary || '').slice(0, 100)}. Changes deployed.`
+            : `Update on "${(codeRequest.summary || '').slice(0, 80)}": ${result.error || result.stage || 'needs attention'}`
+
+          const notifyActionMap = {
+            linkedin: 'send_linkedin_reply',
+            meta: 'send_meta_message',
+            messenger: 'send_meta_message',
+            instagram: 'send_meta_message',
+            gmail: 'send_gmail_reply',
+          }
+          const actionType = notifyActionMap[replyContext.platform || session.trigger_source] || 'follow_up'
+
+          await actionQueue.enqueue({
+            source: session.trigger_source,
+            sourceRefId: codeRequest.source_ref_id || String(codeRequest.id),
+            actionType,
+            title: `Notify requester: ${(codeRequest.summary || '').slice(0, 60)}`,
+            summary: statusMsg,
+            preparedData: {
+              message: statusMsg,
+              ...replyContext,
+              codeRequestId: codeRequest.id,
+              sessionId: session.id,
+              outcome: result.success ? 'success' : 'failed',
+            },
+            context: { source: session.trigger_source, autoDevNotification: true },
+            priority: result.success ? 'medium' : 'low',
+          }).catch(err => logger.debug('Failed to enqueue requester notification', { error: err.message }))
+        }
+
+        // KG ingestion for the completed auto-developer cycle
+        kgHooks.onCodeRequestCompleted({
+          codeRequest,
+          outcome: result.success ? 'success' : 'failed',
+          session,
+        }).catch(() => {})
+      }
+    } catch (err) {
+      logger.debug('Failed to close social code request loop', { error: err.message })
+    }
+  }
 }
 
 // ─── Follow-Up Generation ───────────────────────────────────────────

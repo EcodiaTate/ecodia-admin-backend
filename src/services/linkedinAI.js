@@ -44,7 +44,11 @@ Respond as JSON:
   "leadSignals": [] or ["signal1", ...],
   "suggestedAction": "reply|archive|ignore|create_lead",
   "draftReply": "reply text or null",
-  "reasoning": "why"
+  "reasoning": "why",
+  "isCodeWorkRequest": true/false,
+  "factoryPrompt": "detailed description of the code work requested, or null",
+  "codeWorkType": "feature|bugfix|update|investigation|refactor or null",
+  "suggestedCodebase": "codebase name if identifiable, or null"
 }`
 
   const result = await callDeepSeek([{ role: 'user', content: prompt }], { module: MODULE })

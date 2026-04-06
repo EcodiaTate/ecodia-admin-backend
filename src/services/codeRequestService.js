@@ -1,5 +1,6 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
+const kgHooks = require('./kgIngestionHooks')
 
 // ═══════════════════════════════════════════════════════════════════════
 // CODE REQUEST SERVICE — Bridge between intake (email/CRM/Cortex) and Factory
@@ -191,6 +192,154 @@ async function createFromEmail({ threadId, clientId, summary, factoryPrompt, cod
         codeRequestId: request.id, error: err.message,
       })
       // Mark it as needing attention so it shows up in dashboard queries
+      db`UPDATE code_requests SET metadata = metadata || '{"actionQueueFailed": true}'::jsonb WHERE id = ${request.id}`.catch(() => {})
+    })
+  } else {
+    await _dispatch(request)
+  }
+
+  return request
+}
+
+async function createFromSocial({ source, sourceRefId, clientId, summary, factoryPrompt, codeWorkType, suggestedCodebase, confidence, surfaceToHuman, replyContext }) {
+  if (!factoryPrompt || typeof factoryPrompt !== 'string' || factoryPrompt.trim().length < 10) {
+    logger.warn('Social code request rejected: factoryPrompt too short or missing', { source, sourceRefId })
+    return null
+  }
+  if (!summary || typeof summary !== 'string') {
+    summary = factoryPrompt.slice(0, 200)
+  }
+  if (!source || typeof source !== 'string') {
+    logger.warn('Social code request rejected: source required')
+    return null
+  }
+
+  confidence = _validateConfidence(confidence)
+  codeWorkType = _sanitizeCodeWorkType(codeWorkType)
+
+  // Dedup: prevent duplicate code requests from same source item
+  if (sourceRefId) {
+    const [existing] = await db`
+      SELECT id, status FROM code_requests
+      WHERE source = ${source} AND source_ref_id = ${String(sourceRefId)}
+        AND status NOT IN ('rejected', 'completed')
+      LIMIT 1
+    `
+    if (existing) {
+      logger.info(`Duplicate social code request for ${source}/${sourceRefId} — existing ${existing.id} (${existing.status})`)
+      return existing
+    }
+  }
+
+  // Resolve project + codebase from client context (same logic as createFromEmail)
+  let projectId = null
+  let codebaseId = null
+  let disambiguationNeeded = false
+
+  if (clientId) {
+    const projects = await db`
+      SELECT p.id, p.name, p.description, cb.id AS codebase_id, cb.name AS codebase_name, cb.language
+      FROM projects p
+      LEFT JOIN codebases cb ON cb.project_id = p.id
+      WHERE p.client_id = ${clientId} AND p.status = 'active'
+    `
+
+    if (projects.length === 1) {
+      projectId = projects[0].id
+      codebaseId = projects[0].codebase_id
+    } else if (projects.length > 1) {
+      if (suggestedCodebase && typeof suggestedCodebase === 'string') {
+        const normalized = suggestedCodebase.toLowerCase().trim()
+        const match = projects.find(p =>
+          p.codebase_name?.toLowerCase() === normalized ||
+          p.name?.toLowerCase() === normalized
+        )
+        if (match) {
+          projectId = match.id
+          codebaseId = match.codebase_id
+        }
+      }
+
+      if (!codebaseId) {
+        const resolved = await _aiResolveFromProjects(projects, factoryPrompt, summary)
+        if (resolved) {
+          projectId = resolved.projectId
+          codebaseId = resolved.codebaseId
+        } else {
+          disambiguationNeeded = true
+          surfaceToHuman = true
+          projectId = projects[0].id
+          codebaseId = projects[0].codebase_id
+        }
+      }
+    }
+  }
+
+  if (!codebaseId) {
+    codebaseId = await _resolveCodebaseWithContext(suggestedCodebase, factoryPrompt, clientId)
+  }
+
+  const needsConfirmation = surfaceToHuman || (confidence !== null && confidence < 0.7) || disambiguationNeeded
+
+  let request
+  try {
+    const [row] = await db`
+      INSERT INTO code_requests (
+        source, source_ref_id, client_id, project_id, codebase_id,
+        summary, raw_prompt, code_work_type, confidence,
+        needs_confirmation, status, metadata, reply_context
+      ) VALUES (
+        ${source}, ${sourceRefId ? String(sourceRefId) : null}, ${clientId || null}, ${projectId},
+        ${codebaseId}, ${summary}, ${factoryPrompt},
+        ${codeWorkType}, ${confidence},
+        ${needsConfirmation},
+        ${needsConfirmation ? 'pending' : 'confirmed'},
+        ${JSON.stringify({ suggestedCodebase: suggestedCodebase || null, disambiguationNeeded })}::jsonb,
+        ${JSON.stringify(replyContext || {})}::jsonb
+      )
+      RETURNING *
+    `
+    request = row
+  } catch (err) {
+    if (err.code === '23505' && sourceRefId) {
+      const [existing] = await db`
+        SELECT * FROM code_requests WHERE source = ${source} AND source_ref_id = ${String(sourceRefId)} LIMIT 1
+      `
+      if (existing) return existing
+    }
+    throw err
+  }
+
+  logger.info(`Code request created from ${source}: ${request.id}`, {
+    sourceRefId, clientId, codeWorkType, confidence, needsConfirmation, codebaseId,
+  })
+
+  // KG ingestion for code request creation
+  kgHooks.onCodeRequestCreated({ request, source }).catch(() => {})
+
+  if (needsConfirmation) {
+    const actionQueue = require('./actionQueueService')
+    await actionQueue.enqueue({
+      source,
+      sourceRefId: sourceRefId ? String(sourceRefId) : null,
+      actionType: 'confirm_code_request',
+      title: `Code request (${source}): ${summary.slice(0, 80)}`,
+      summary: disambiguationNeeded
+        ? `Multiple codebases — needs disambiguation. ${codeWorkType || 'Code work'}, confidence ${((confidence || 0) * 100).toFixed(0)}%`
+        : `${codeWorkType || 'Code work'} — confidence ${((confidence || 0) * 100).toFixed(0)}%`,
+      preparedData: {
+        codeRequestId: request.id,
+        prompt: factoryPrompt,
+        codeWorkType,
+        codebaseId,
+        suggestedCodebase,
+      },
+      context: { source, sourceRefId },
+      priority: confidence >= 0.5 ? 'medium' : 'low',
+    }).catch(err => {
+      logger.error('CRITICAL: Failed to enqueue social code request for human review', {
+        codeRequestId: request.id, error: err.message,
+      })
       db`UPDATE code_requests SET metadata = metadata || '{"actionQueueFailed": true}'::jsonb WHERE id = ${request.id}`.catch(() => {})
     })
   } else {
@@ -630,6 +779,7 @@ async function recoverStuckRequests() {
 
 module.exports = {
   createFromEmail,
+  createFromSocial,
   createFromCRM,
   createFromCortex,
   confirmAndDispatch,
