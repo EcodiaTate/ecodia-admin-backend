@@ -98,7 +98,7 @@ registry.registerMany([
   },
   {
     name: 'get_cc_session_details',
-    description: 'Get detailed information about a specific CC session including logs, pipeline stage, and files changed',
+    description: 'Get ONE session by UUID (required: sessionId). Use get_factory_status for listing sessions.',
     tier: 'read',
     domain: 'factory',
     params: {

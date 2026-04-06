@@ -334,44 +334,7 @@ Discard: discard_rules`,
     },
   },
 
-  // ─── Get Active CC Session Details ───────────────────────────────
-  {
-    name: 'get_cc_session_details',
-    description: 'Get detailed info about a CC session including logs, status, pipeline stage, files changed, and confidence score.',
-    tier: 'read',
-    domain: 'factory',
-    params: {
-      sessionId: { type: 'number', required: true, description: 'CC session ID' },
-    },
-    handler: async (params) => {
-      const db = require('../config/db')
-
-      const [session] = await db`
-        SELECT cs.*, cb.name AS codebase_name, cb.repo_path
-        FROM cc_sessions cs
-        LEFT JOIN codebases cb ON cs.codebase_id = cb.id
-        WHERE cs.id = ${params.sessionId}
-      `
-      if (!session) throw new Error(`Session ${params.sessionId} not found`)
-
-      const logs = await db`
-        SELECT chunk, created_at FROM cc_session_logs
-        WHERE session_id = ${params.sessionId}
-        ORDER BY id DESC LIMIT 50
-      `
-
-      // Determine if running via heartbeat (session runs in factoryRunner process)
-      const isActive = session.status === 'running' &&
-        session.last_heartbeat_at && (Date.now() - new Date(session.last_heartbeat_at).getTime() < 120_000)
-
-      return {
-        ...session,
-        isRunning: isActive,
-        runningFor: isActive && session.started_at ? Date.now() - new Date(session.started_at).getTime() : null,
-        recentLogs: logs.reverse(),
-      }
-    },
-  },
+  // get_cc_session_details — registered in capabilities/factory.js (single source)
 
   // ─── List Registered Codebases ───────────────────────────────────
   {
