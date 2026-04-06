@@ -511,20 +511,49 @@ registry.registerMany([
 
   {
     name: 'linkedin_set_cookie',
-    description: 'Update the LinkedIn li_at session cookie. Get this from browser DevTools: Application → Cookies → linkedin.com → li_at. Paste the value here.',
+    description: 'Update the LinkedIn li_at session cookie. The user will paste a long string starting with AQ. Pass it as the li_at param.',
     tier: 'write',
     domain: 'linkedin',
     params: {
-      li_at: { type: 'string', required: true, description: 'The li_at cookie value from LinkedIn (starts with AQ...)' },
+      li_at: { type: 'string', required: false, description: 'The li_at cookie value' },
+      cookie: { type: 'string', required: false, description: 'Alias for li_at' },
+      value: { type: 'string', required: false, description: 'Alias for li_at' },
     },
-    handler: async (params) => {
+    handler: async (params, context) => {
       const browser = require('../services/linkedinBrowser')
-      const cookie = params.li_at.trim()
-      if (!cookie || cookie.length < 20) return { error: 'Invalid cookie — too short. The li_at value should be a long string starting with AQ.' }
+
+      // Accept from any param name — AI often puts it in the wrong field
+      let cookie = params.li_at || params.cookie || params.value || ''
+
+      // If no param matched, try to find a long AQ string in any param value
+      if (!cookie || cookie.length < 20) {
+        for (const v of Object.values(params)) {
+          if (typeof v === 'string' && v.length > 20 && v.startsWith('AQ')) {
+            cookie = v
+            break
+          }
+        }
+      }
+
+      // Last resort: check if the calling context has the original user message
+      // (the AI sometimes puts the whole message as a param value)
+      if (!cookie || cookie.length < 20) {
+        for (const v of Object.values(params)) {
+          if (typeof v === 'string') {
+            const match = v.match(/AQ[A-Za-z0-9_-]{20,}/)
+            if (match) { cookie = match[0]; break }
+          }
+        }
+      }
+
+      cookie = (cookie || '').trim()
+      if (!cookie || cookie.length < 20) {
+        return { error: 'Could not find the li_at cookie value. Please paste the cookie string starting with AQ directly.' }
+      }
 
       try {
         await browser.setSessionCookie(cookie)
-        return { message: 'LinkedIn cookie updated. The worker will use this on its next run.' }
+        return { message: `LinkedIn cookie updated (${cookie.slice(0, 10)}...${cookie.slice(-6)}). The worker will use this on its next run.` }
       } catch (err) {
         return { error: `Failed to update cookie: ${err.message}` }
       }
