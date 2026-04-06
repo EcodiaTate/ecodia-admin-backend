@@ -193,3 +193,22 @@ server.listen(env.PORT, async () => {
     }
   }
 })
+
+// ── Boot: Auto-wake OS Session ────────────────────────────────────────
+// After restart, wake the OS session so it recovers immediately
+// rather than waiting for the next scheduled task (up to 30 min).
+// Delay 10s to let all services initialize first.
+setTimeout(async () => {
+  try {
+    const osSession = require('./services/osSessionService')
+    logger.info('Auto-waking OS session after restart...')
+    await osSession.sendMessage(
+      'SYSTEM RESTART — ecodia-api just restarted. You are back online. ' +
+      'Read CLAUDE.md for context. Check kv_store ceo.* keys and ceo_tasks for current state. ' +
+      'Resume whatever you were doing before the restart. If nothing urgent, run the agency loop.'
+    )
+    logger.info('OS session auto-wake complete')
+  } catch (err) {
+    logger.warn('OS session auto-wake failed (may not be configured yet)', { error: err.message })
+  }
+}, 10_000)

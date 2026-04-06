@@ -81,6 +81,7 @@ app.use('/api/bookkeeping', bookkeepingRoutes)
 app.use('/api/coding', codingRoutes)
 app.use('/api/os', osRoutes)
 app.use('/api/os-session', require('./routes/osSession'))
+app.use('/api/sms', require('./routes/smsWebhook'))
 
 // Error handler (must be last)
 app.use(errorHandler)
