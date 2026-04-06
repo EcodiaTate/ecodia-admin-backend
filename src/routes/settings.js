@@ -87,4 +87,29 @@ router.get('/enums', (_req, res) => {
   })
 })
 
+// POST /api/settings/linkedin-cookies — direct cookie setter, no AI needed
+router.post('/linkedin-cookies', async (req, res, next) => {
+  try {
+    const { li_at, JSESSIONID, li_a } = req.body
+    if (!li_at) return res.status(400).json({ error: 'li_at is required' })
+
+    const { encrypt } = require('../utils/encryption')
+    const cookies = [
+      { name: 'li_at', value: li_at.trim(), domain: '.linkedin.com', path: '/', httpOnly: true, secure: true, sameSite: 'None' },
+    ]
+    if (JSESSIONID) cookies.push({ name: 'JSESSIONID', value: JSESSIONID.trim(), domain: '.www.linkedin.com', path: '/', httpOnly: false, secure: true, sameSite: 'None' })
+    if (li_a) cookies.push({ name: 'li_a', value: li_a.trim(), domain: '.linkedin.com', path: '/', httpOnly: true, secure: true, sameSite: 'None' })
+
+    const encrypted = encrypt(JSON.stringify(cookies))
+    await db`
+      UPDATE linkedin_session
+      SET cookies = ${encrypted}, last_active_at = now(), status = 'active', suspend_reason = NULL, updated_at = now()
+      WHERE id = 'default'
+    `
+
+    logger.info('LinkedIn cookies updated via settings API', { cookieCount: cookies.length })
+    res.json({ message: 'LinkedIn cookies updated', cookies: cookies.map(c => c.name) })
+  } catch (err) { next(err) }
+})
+
 module.exports = router

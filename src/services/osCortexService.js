@@ -396,13 +396,13 @@ async function runTask(taskId, userMessages, { workspace }) {
       break
     }
 
+    // Handle delegations — run sub-tasks in other workspaces and return their results
+    const delegations = blocks.filter(b => b.type === 'delegate')
+
     // If no actions, no doc requests, and no delegations — AI is done talking
     if (actions.length === 0 && docRequests.length === 0 && delegations.length === 0) {
       break
     }
-
-    // Handle delegations — run sub-tasks in other workspaces and return their results
-    const delegations = blocks.filter(b => b.type === 'delegate')
     for (const del of delegations) {
       const targetWs = del.workspace
       const targetPrompt = del.prompt
