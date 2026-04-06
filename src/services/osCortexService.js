@@ -20,7 +20,10 @@ const TASK_TIMEOUT_MS = parseInt(process.env.OS_TASK_TIMEOUT_MS || '280000') // 
 async function getCoreContext() {
   const rows = await db`SELECT facts FROM os_core_context LIMIT 1`
   if (!rows.length) return []
-  return rows[0].facts || []
+  const facts = rows[0].facts
+  if (Array.isArray(facts)) return facts
+  if (facts && typeof facts === 'object') return Object.entries(facts).map(([key, value]) => ({ key, value }))
+  return []
 }
 
 async function loadDocs(docKeys) {
