@@ -6,17 +6,21 @@ registry.registerMany([
   // ═══════════════════════════════════════════════════════════════════════
   {
     name: 'bookkeeping_ingest_csv',
-    description: 'Parse and ingest a bank CSV into the bookkeeping staged pipeline. Pass the raw CSV text content. Deduplicates automatically. Auto-categorizes after import. Set source_account to 2100 for personal bank statements (creates director loan entries), or 1000 for company bank.',
+    description: 'Parse and ingest a bank CSV into the bookkeeping staged pipeline. Pass the raw CSV text content. Deduplicates automatically. Auto-categorizes after import. Bank type is auto-detected (Up Bank personal = director loan). Override with source_account if needed.',
     tier: 'write',
     domain: 'bookkeeping',
     params: {
       csvText: { type: 'string', required: true, description: 'Raw CSV file content from any bank — AI auto-detects column format' },
-      source_account: { type: 'string', required: false, description: '1000 = company bank (default), 2100 = personal bank (director loan)' },
+      source_account: { type: 'string', required: false, description: 'Override: 1000 = company bank, 2100 = personal bank. Omit to auto-detect.' },
     },
     handler: async (params) => {
       const bk = require('../services/bookkeeperService')
-      const sourceAccount = params.source_account || '1000'
-      const transactions = await bk.parseAnyBankCSV(params.csvText)
+      const parsed = await bk.parseAnyBankCSV(params.csvText)
+      const transactions = parsed.transactions || parsed
+      const detectedBank = parsed.detectedBank || null
+      let sourceAccount = params.source_account
+      if (!sourceAccount && detectedBank?.isPersonal) sourceAccount = '2100'
+      sourceAccount = sourceAccount || '1000'
       for (const tx of transactions) tx.source_account = sourceAccount
       let created = 0, dupes = 0
       for (const tx of transactions) {

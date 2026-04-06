@@ -121,19 +121,64 @@ Rules:
     const raw = `${dateStr}${amountCents}${description}`
     const sourceRef = `csv:${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
 
+    // Build long_description from extra columns (payee, category, tags, payment method, etc.)
+    const extra = []
+    for (const [k, v] of Object.entries(obj)) {
+      if (!v || k === mapping.date_col || k === mapping.description_col || k === mapping.amount_col || k === mapping.debit_col || k === mapping.credit_col) continue
+      if (typeof v === 'string' && v.trim() && !['AUD', ''].includes(v.trim())) {
+        extra.push(`${k}: ${v.trim()}`)
+      }
+    }
+
     transactions.push({
       source: 'csv',
       source_ref: sourceRef,
       occurred_at: occurredAt,
       amount_cents: amountCents,
       description,
-      long_description: null,
-      transaction_type: null,
+      long_description: extra.length > 0 ? extra.join(' | ') : null,
+      transaction_type: obj['Transaction Type'] || obj['transaction_type'] || null,
     })
   }
 
-  logger.info('Bookkeeper CSV: parsed transactions', { count: transactions.length, totalRows: allRows.length })
-  return transactions
+  // Detect bank identity from CSV content for auto source_account resolution
+  const detectedBank = _detectBankFromCSV(header, allRows)
+
+  logger.info('Bookkeeper CSV: parsed transactions', { count: transactions.length, totalRows: allRows.length, detectedBank })
+  return { transactions, detectedBank }
+}
+
+/**
+ * Auto-detect which bank/account this CSV came from.
+ * Returns { isPersonal: boolean, bankName: string, bsb?: string }
+ */
+function _detectBankFromCSV(headers, rows) {
+  const headerStr = headers.join(' ').toLowerCase()
+  const sampleStr = rows.slice(0, 5).map(r => Object.values(r).join(' ')).join(' ').toLowerCase()
+  const combined = headerStr + ' ' + sampleStr
+
+  // Up Bank detection: BSB 633-123, "Spending" account, Round Up transactions
+  if (combined.includes('633-123') || combined.includes('round up') ||
+      (combined.includes('spending') && combined.includes('account name'))) {
+    return { isPersonal: true, bankName: 'Up Bank', bsb: '633-123' }
+  }
+
+  // ING detection
+  if (combined.includes('ing direct') || combined.includes('ing bank')) {
+    return { isPersonal: true, bankName: 'ING', bsb: null }
+  }
+
+  // CommBank personal detection
+  if ((combined.includes('commbank') || combined.includes('commonwealth')) && !combined.includes('business')) {
+    return { isPersonal: true, bankName: 'CommBank', bsb: null }
+  }
+
+  // Bank Australia business detection
+  if (combined.includes('bank australia') || combined.includes('313-140')) {
+    return { isPersonal: false, bankName: 'Bank Australia', bsb: '313-140' }
+  }
+
+  return null
 }
 
 /** Heuristic fallback if AI mapping fails */
@@ -257,17 +302,58 @@ async function deleteRule(id) {
 // CATEGORIZATION (rule match first, then DeepSeek)
 // ═══════════════════════════════════════════════════════════════════════
 
-const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company.
-These transactions may come from EITHER the company bank account or the director's personal bank account.
+const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company run by Tate.
+These transactions come from the director's PERSONAL bank account (Up Bank, BSB 633-123). They are NOT from the company bank.
 
-CRITICAL DISTINCTION:
-- BUSINESS expenses (software, hosting, domains, advertising, office supplies for Ecodia) → categorize to the right GL account.
-  - If source_account is 2100 (personal bank): this creates a Director Loan entry (company owes the director).
-  - If source_account is 1000 (company bank): normal business expense.
-- PURELY PERSONAL expenses (fuel, food, drinks, tobacco, groceries, personal transfers, pharmacy, entertainment, bars, restaurants) → set account_code to "DISCARD" and is_personal=true. These should NOT enter the books at all.
-- Transfers between the director's own accounts (SAV, savings, Up Bank) → "DISCARD"
-- Bank fees (monthly fee, int tran fee) → 5045 Bank Fees (business expense, the account costs money to run)
-- $0.00 transactions (invalid PIN, etc.) → "DISCARD"
+Because this is the personal bank, the VAST MAJORITY of transactions are personal and should be DISCARDED.
+Only BUSINESS expenses for Ecodia Pty Ltd should be kept.
+
+DECISION FRAMEWORK:
+1. DISCARD (account_code = "DISCARD", is_personal = true): Everything personal. This includes:
+   - Food, groceries, restaurants, cafes, takeaway, fast food, bakeries
+   - Alcohol (BWS, Liquorland, Dan Murphy's, bars, pubs)
+   - Tobacco, vaping, tobacconists
+   - Fuel, petrol (BP, Caltex, Ampol, Coles Express, Reddy Express) — unless marked as business travel
+   - Personal transfers: "Africa '25", "Save Up Challenge", "Quick save transfer", "Round Up", savings
+   - Ecodia Invest / Ecodia Savings transfers — personal investment activity, NOT company business
+   - Personal payments (Pay Anyone, Osko to individuals like $gretadavid, Casey, etc.)
+   - Entertainment (cinemas, festivals, golf, chess.com, Audible, streaming)
+   - Health, pharmacy, medical
+   - Centrelink payments (income, DISCARD from expense tracking)
+   - DEWR ADMIN salary credits (income, DISCARD)
+   - Parking, tolls (unless business travel)
+   - Phone (Felix Mobile) — personal
+   - Accommodation, travel (holidays, hotels) — unless business trip
+   - Inter-account transfers with no clear business purpose
+
+2. BUSINESS EXPENSE (real account code, is_personal = true because paid from personal bank → creates Director Loan):
+   - ASIC fees → 5025 Legal & Compliance (company registration)
+   - Google Workspace / GSuite → 5010 Software & SaaS (company email/docs)
+   - Google Cloud → 5010 Software & SaaS (company hosting)
+   - Vercel → 5010 Software & SaaS (frontend hosting)
+   - GoDaddy → 5010 Software & SaaS (domain registration)
+   - WordPress.com → 5010 Software & SaaS (company website)
+   - LinkedIn Premium → 5005 Advertising & Marketing (business networking/marketing)
+   - Facebook/Meta Ads (FACEBK) → 5005 Advertising & Marketing (paid ads for clients)
+   - Canva → 5010 Software & SaaS (design tool for business)
+   - OpenAI/ChatGPT → 5010 Software & SaaS (AI tools for development)
+   - Anthropic/Claude → 5010 Software & SaaS (AI tools for development)
+   - MacInCloud → 5010 Software & SaaS (cloud Mac for iOS builds)
+   - AWS/Hetzner → 5010 Software & SaaS (hosting)
+   - Hostinger → 5010 Software & SaaS (hosting)
+   - Avery Products → 5030 Office Supplies (business labels/printing)
+   - Transfers TO "Ecodia" or "Ecodia Setup" (NOT "Ecodia Invest" / "Ecodia Savings") → these are director capital contributions, use "CAPITAL_CONTRIBUTION" special code
+   - Transfers FROM "Ecodia" (reimbursements) → "REIMBURSEMENT" special code
+
+3. SPECIAL CODES:
+   - "CAPITAL_CONTRIBUTION" = director putting money into the company (DR Bank 1000 / CR Director Loan 2100)
+   - "REIMBURSEMENT" = company paying director back (DR Director Loan 2100 / CR Bank 1000)
+   - For both, is_personal = false (they're inter-entity transfers, not personal expenses)
+
+4. WHEN UNSURE (confidence < 0.5): Set confidence low and explain in reasoning. Examples:
+   - "Could be business travel or personal holiday"
+   - "Unclear if this subscription is for Ecodia or personal use"
+   - The system will surface these as questions for the human.
 
 Chart of accounts:
 1000 Bank (Operating) | 1100 Stripe Clearing | 1200 Accounts Receivable
@@ -280,10 +366,11 @@ Chart of accounts:
 Supplier rules: {rules}
 
 Respond with JSON array. Each: { "source_ref", "account_code", "supplier_name", "is_personal", "gst_amount_cents", "tags":[], "confidence", "reasoning" }
-- account_code = "DISCARD" for purely personal transactions that don't belong in the books
-- GST: domestic business expenses = total/11. International SaaS = 0 (GST-free). Personal = 0.
-- is_personal = true for DISCARD items AND for director loan items paid from personal bank
-- Ambiguous → confidence < 0.7`
+- account_code = "DISCARD" for personal items
+- GST: domestic business expenses = total/11. International SaaS (OpenAI, Vercel, MacInCloud) = 0 (no GST). Personal = 0.
+- is_personal = true for DISCARD items AND for business expenses paid from personal bank (Director Loan path)
+- is_personal = false for CAPITAL_CONTRIBUTION and REIMBURSEMENT
+- Ambiguous items → confidence < 0.5 with clear reasoning explaining the ambiguity`
 
 async function categorizeTransactions(transactions) {
   if (!transactions.length) return []
@@ -338,7 +425,8 @@ async function _callDeepSeekCategorize(transactions, rules) {
   const txText = transactions.map(tx => {
     const dir = tx.amount_cents > 0 ? 'in' : 'out'
     const src = tx.source_account === '2100' ? 'personal_bank' : 'company_bank'
-    return `- ref:${tx.source_ref} | ${tx.occurred_at} | $${(Math.abs(tx.amount_cents) / 100).toFixed(2)} ${dir} | ${src} | ${tx.description}`
+    const longDesc = tx.long_description ? ` | extra: ${tx.long_description.slice(0, 150)}` : ''
+    return `- ref:${tx.source_ref} | ${tx.occurred_at} | $${(Math.abs(tx.amount_cents) / 100).toFixed(2)} ${dir} | ${src} | ${tx.description}${longDesc}`
   }).join('\n')
 
   try {
@@ -386,6 +474,22 @@ async function autoCategorize() {
       continue
     }
 
+    // CAPITAL_CONTRIBUTION = director putting money into the company
+    // REIMBURSEMENT = company paying director back
+    // Both are inter-entity transfers, not expenses — they create Director Loan entries
+    if (result.account_code === 'CAPITAL_CONTRIBUTION' || result.account_code === 'REIMBURSEMENT') {
+      await updateStaged(tx.id, {
+        category: result.account_code,
+        is_personal: false,
+        confidence,
+        categorizer_reasoning: result.reasoning,
+        status: confidence >= 0.7 ? 'categorized' : 'flagged',
+      })
+      categorized++
+      continue
+    }
+
+    // Low confidence → flagged for human review (will surface as question in chat)
     const status = confidence >= 0.7 ? 'categorized' : 'flagged'
 
     await updateStaged(tx.id, {

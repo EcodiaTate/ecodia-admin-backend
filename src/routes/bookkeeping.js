@@ -2,6 +2,7 @@ const { Router } = require('express')
 const express = require('express')
 const auth = require('../middleware/auth')
 const bk = require('../services/bookkeeperService')
+const logger = require('../config/logger')
 
 const router = Router()
 router.use(auth)
@@ -80,8 +81,18 @@ router.post('/ingest/csv', express.text({ type: '*/*', limit: '10mb' }), async (
     if (!req.body) return res.status(400).json({ error: 'No CSV data' })
     const csvText = typeof req.body === 'string' ? req.body : req.body.toString('utf-8')
     // source_account can be passed as query param: ?source_account=2100 for personal bank
-    const sourceAccount = req.query.source_account || '1000'
-    const transactions = await bk.parseAnyBankCSV(csvText)
+    // If not specified, auto-detect from CSV content (Up Bank BSB 633-123 = personal)
+    const parsed = await bk.parseAnyBankCSV(csvText)
+    const transactions = parsed.transactions || parsed  // backwards compat if plain array
+    const detectedBank = parsed.detectedBank || null
+
+    let sourceAccount = req.query.source_account
+    if (!sourceAccount && detectedBank?.isPersonal) {
+      sourceAccount = '2100'  // Personal bank → Director Loan
+      logger.info(`Auto-detected personal bank: ${detectedBank.bankName} (${detectedBank.bsb || 'no BSB'}) → source_account 2100`)
+    }
+    sourceAccount = sourceAccount || '1000'
+
     // Tag each transaction with the source account
     for (const tx of transactions) tx.source_account = sourceAccount
     let created = 0, dupes = 0

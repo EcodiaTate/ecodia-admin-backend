@@ -70,7 +70,14 @@ router.post('/clients', validate(createClientSchema), async (req, res, next) => 
 // GET /api/crm/clients/:id
 router.get('/clients/:id', async (req, res, next) => {
   try {
-    const [client] = await db`SELECT * FROM clients WHERE id = ${req.params.id}`
+    const [client] = await db`
+      SELECT c.*,
+        (SELECT count(*)::int FROM email_threads WHERE client_id = c.id) AS email_count,
+        (SELECT count(*)::int FROM tasks WHERE client_id = c.id AND completed_at IS NULL) AS open_tasks,
+        (SELECT count(*)::int FROM cc_sessions WHERE client_id = c.id) AS total_sessions,
+        (SELECT count(*)::int FROM projects WHERE client_id = c.id AND status = 'active') AS active_projects
+      FROM clients c WHERE c.id = ${req.params.id}
+    `
     if (!client) return res.status(404).json({ error: 'Client not found' })
     res.json(client)
   } catch (err) {
@@ -124,10 +131,15 @@ router.delete('/clients/:id', async (req, res, next) => {
 router.get('/pipeline', async (req, res, next) => {
   try {
     const clients = await db`
-      SELECT id, name, company, stage, priority, tags, updated_at
-      FROM clients
-      WHERE archived_at IS NULL
-      ORDER BY updated_at DESC
+      SELECT c.id, c.name, c.company, c.email, c.stage, c.priority, c.tags,
+             c.source, c.health_score, c.total_revenue_aud, c.last_contact_at,
+             c.updated_at, c.created_at,
+             (SELECT count(*)::int FROM tasks WHERE client_id = c.id AND completed_at IS NULL) AS open_tasks,
+             (SELECT count(*)::int FROM projects WHERE client_id = c.id AND status = 'active') AS active_projects,
+             (SELECT COALESCE(SUM(deal_value_aud), 0) FROM projects WHERE client_id = c.id AND deal_value_aud IS NOT NULL) AS pipeline_value
+      FROM clients c
+      WHERE c.archived_at IS NULL
+      ORDER BY c.updated_at DESC
     `
 
     const pipeline = {}
