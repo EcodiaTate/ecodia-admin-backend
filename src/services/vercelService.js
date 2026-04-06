@@ -215,6 +215,52 @@ async function getBuildLogs(deploymentId) {
   }))
 }
 
+// ─── Trigger Deploy ────────────────────────────────────────────────────
+
+async function triggerDeploy(projectId) {
+  // If a specific project, redeploy its latest production deployment
+  if (projectId) {
+    const [project] = await db`
+      SELECT vercel_project_id, name FROM vercel_projects WHERE id = ${projectId} LIMIT 1
+    `
+    if (!project) throw new Error(`No Vercel project found with id ${projectId}`)
+
+    const result = await vercelFetch(`/v13/deployments`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: project.name,
+        project: project.vercel_project_id,
+        target: 'production',
+      }),
+    })
+
+    logger.info(`Vercel deploy triggered for ${project.name}`, { deploymentId: result.id })
+    return { triggered: true, project: project.name, deploymentId: result.id, url: result.url }
+  }
+
+  // No projectId — trigger all projects
+  const projects = await db`SELECT id, vercel_project_id, name FROM vercel_projects`
+  const results = []
+  for (const project of projects) {
+    try {
+      const result = await vercelFetch(`/v13/deployments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: project.name,
+          project: project.vercel_project_id,
+          target: 'production',
+        }),
+      })
+      results.push({ project: project.name, deploymentId: result.id, url: result.url })
+    } catch (err) {
+      results.push({ project: project.name, error: err.message })
+    }
+  }
+
+  logger.info(`Vercel deploy triggered for ${results.length} projects`)
+  return { triggered: true, results }
+}
+
 module.exports = {
   poll,
   syncProjects,
@@ -223,4 +269,5 @@ module.exports = {
   getDeployments,
   getStats,
   getBuildLogs,
+  triggerDeploy,
 }

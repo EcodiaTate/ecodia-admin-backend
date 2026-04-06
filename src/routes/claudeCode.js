@@ -49,9 +49,9 @@ const createSessionSchema = z.object({
   projectId: z.string().uuid().optional(),
   clientId: z.string().uuid().optional(),
   codebaseId: z.string().uuid().optional(),
-  triggeredBy: z.enum(['crm_stage', 'manual', 'task', 'simula', 'thymos', 'scheduled', 'cortex']).default('manual'),
+  triggeredBy: z.enum(['crm_stage', 'manual', 'task', 'simula', 'thymos', 'scheduled', 'cortex', 'self_modification', 'self_diagnosis', 'kg_insight', 'kg_prediction', 'proactive', 'email']).default('manual'),
   triggerRefId: z.string().optional(),
-  triggerSource: z.enum(['manual', 'crm_stage', 'kg_insight', 'simula_proposal', 'thymos_incident', 'scheduled', 'cortex']).optional(),
+  triggerSource: z.enum(['manual', 'crm_stage', 'kg_insight', 'simula_proposal', 'thymos_incident', 'scheduled', 'cortex', 'self_modification', 'proactive_improvement', 'gmail']).optional(),
   initialPrompt: z.string().min(1),
   workingDir: z.string().optional(),
 })

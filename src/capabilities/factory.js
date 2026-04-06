@@ -60,7 +60,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const vercel = require('../services/vercelService')
-      const result = await vercel.triggerDeploy ? vercel.triggerDeploy(params.projectId) : { error: 'triggerDeploy not available' }
+      const result = await vercel.triggerDeploy(params.projectId)
       return { message: 'Vercel build triggered', result }
     },
   },

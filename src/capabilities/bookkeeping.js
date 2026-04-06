@@ -1046,7 +1046,8 @@ Intents:
 - "ask_questions" — gets flagged items and returns them as plain English questions for the human.
 - "answer" — resolves a flagged transaction. Needs transactionId + isPersonal (true/false) + accountCode (if business).
 - "status" — returns current counts and what needs attention.
-- "recategorize_all" — resets ALL ignored/flagged items to pending and re-runs AI categorization from scratch.
+- "recategorize_all" — resets ALL ignored/flagged items to pending and re-categorizes one batch (~60). Call again for next batch.
+- "categorize_batch" — processes next batch of pending transactions (no reset). Use after recategorize_all to continue.
 - "post_ready" — batch-posts all categorized transactions that are ready.
 
 This is the PREFERRED capability for bookkeeping actions. Use this instead of the granular ones.`,
@@ -1136,18 +1137,40 @@ This is the PREFERRED capability for bookkeeping actions. Use this instead of th
         }
 
         case 'recategorize_all': {
-          await db`
-            UPDATE staged_transactions
-            SET status = 'pending', category = NULL, is_personal = NULL,
-                confidence = NULL, categorizer_reasoning = NULL
-            WHERE status IN ('ignored', 'flagged')
+          // Count what we're resetting
+          const [{ total: resetCount }] = await db`
+            SELECT count(*)::int AS total FROM staged_transactions WHERE status IN ('ignored', 'flagged')
           `
-          const result = await bk.autoCategorize()
-          return { message: `Reset all ignored/flagged transactions and re-categorized. ${result.categorized} processed.` }
+          if (resetCount > 0) {
+            await db`
+              UPDATE staged_transactions
+              SET status = 'pending', category = NULL, is_personal = NULL,
+                  confidence = NULL, categorizer_reasoning = NULL
+              WHERE status IN ('ignored', 'flagged')
+            `
+          }
+          // Process one batch (60 max) — returns how many are still pending
+          const result = await bk.autoCategorize(60)
+          const msg = resetCount > 0
+            ? `Reset ${resetCount} transactions. Categorized ${result.categorized} so far, ${result.remaining} still pending.`
+            : `Categorized ${result.categorized}, ${result.remaining} still pending.`
+          if (result.remaining > 0) {
+            return { message: `${msg} Call me again to process the next batch — I do ~60 at a time to avoid timeouts.` }
+          }
+          return { message: `${msg} All done.` }
+        }
+
+        case 'categorize_batch': {
+          // Process next batch of pending transactions (no reset)
+          const result = await bk.autoCategorize(60)
+          if (result.remaining > 0) {
+            return { message: `Categorized ${result.categorized}, ${result.remaining} still pending. Call again for the next batch.` }
+          }
+          return { message: `Categorized ${result.categorized}. All done — nothing pending.` }
         }
 
         case 'post_ready': {
-          const ready = await bk.listStaged('categorized', 500)
+          const ready = await bk.listStaged('categorized', 200)
           if (ready.length === 0) return { message: 'Nothing ready to post.' }
           let posted = 0
           for (const tx of ready) {

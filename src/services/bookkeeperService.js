@@ -446,9 +446,11 @@ async function _callDeepSeekCategorize(transactions, rules) {
   }
 }
 
-async function autoCategorize() {
-  const pending = await listStaged('pending', 500)
-  if (!pending.length) return { categorized: 0 }
+async function autoCategorize(maxBatch = 60) {
+  // Process in capped batches to avoid HTTP timeouts
+  // Each batch of 30 = 1 DeepSeek call. Max 2 calls per invocation = ~20-30s
+  const pending = await listStaged('pending', maxBatch)
+  if (!pending.length) return { categorized: 0, remaining: 0 }
 
   const results = await categorizeTransactions(pending)
   let categorized = 0
@@ -526,7 +528,9 @@ async function autoCategorize() {
     }
   }
 
-  return { categorized }
+  // Check how many are still pending after this batch
+  const [{ count: remaining }] = await db`SELECT count(*)::int AS count FROM staged_transactions WHERE status = 'pending'`
+  return { categorized, remaining }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
