@@ -204,6 +204,46 @@ router.post('/sessions/:id/stop', async (req, res, next) => {
   }
 })
 
+// GET /api/cc/health — session health monitoring (stall detection)
+router.get('/health', async (_req, res, next) => {
+  try {
+    const bridge = require('../services/factoryBridge')
+
+    // Get runner-level health
+    const runnerHealth = await bridge.getRunnerHealth()
+
+    // Get per-session health snapshot from Redis (published by factoryRunner watchdog)
+    const sessionHealth = await bridge.getSessionHealth()
+
+    // Also check for orphaned DB sessions (marked running but no heartbeat)
+    const orphanedDb = await db`
+      SELECT id, started_at, initial_prompt, codebase_id, last_heartbeat_at
+      FROM cc_sessions
+      WHERE status IN ('running', 'initializing')
+        AND (
+          (last_heartbeat_at IS NULL AND started_at < now() - interval '5 minutes')
+          OR (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - interval '3 minutes')
+        )
+      ORDER BY started_at ASC
+    `
+
+    res.json({
+      runner: runnerHealth,
+      sessions: sessionHealth || { activeSessions: 0, stalledSessions: 0, healthySessions: 0, sessions: [] },
+      orphanedDbSessions: orphanedDb.length,
+      orphanedSessions: orphanedDb.map(s => ({
+        sessionId: s.id,
+        startedAt: s.started_at,
+        lastHeartbeat: s.last_heartbeat_at,
+        codebaseId: s.codebase_id,
+        prompt: (s.initial_prompt || '').slice(0, 120),
+      })),
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/cc/analytics — Factory performance analytics
 router.get('/analytics', async (req, res, next) => {
   try {

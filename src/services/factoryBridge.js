@@ -202,6 +202,18 @@ async function getRateLimitStatus() {
   }
 }
 
+// ─── Session Health (factory writes, api reads) ────────────────────
+
+const SESSION_HEALTH_KEY = 'factory:runner:session_health'
+
+async function getSessionHealth() {
+  const redis = getRedisClient()
+  if (!redis) return null
+  const val = await redis.get(SESSION_HEALTH_KEY)
+  if (!val) return null
+  try { return JSON.parse(val) } catch { return null }
+}
+
 // ─── Cleanup ────────────────────────────────────────────────────────
 
 async function shutdown() {
@@ -229,5 +241,6 @@ module.exports = {
   getActiveSessionCount,
   setRateLimitStatus,
   getRateLimitStatus,
+  getSessionHealth,
   shutdown,
 }

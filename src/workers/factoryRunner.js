@@ -682,6 +682,8 @@ async function startSession(session) {
     process: proc,
     sessionId: session.id,
     startedAt: Date.now(),
+    lastOutputAt: Date.now(),
+    outputLineCount: 0,
     codebaseId: session.codebase_id,
     timeout: null,
     heartbeatTimer: null,
@@ -721,6 +723,9 @@ async function startSession(session) {
 
   rl.on('line', async (line) => {
     try {
+      sessionData.lastOutputAt = Date.now()
+      sessionData.outputLineCount++
+
       const safeLine = secretSafety.scrubSecrets(line)
       await appendLog(session.id, safeLine)
 
@@ -1191,13 +1196,19 @@ async function stopAllSessions(reason) {
 
 // ─── Session Watchdog ───────────────────────────────────────────────
 
+const STALL_THRESHOLD_MS = parseInt(env.CC_STALL_MINUTES || '5', 10) * 60 * 1000
+
 let watchdogTimer = null
 
 function startWatchdog() {
   if (watchdogTimer) return
   watchdogTimer = setInterval(async () => {
+    const now = Date.now()
+
     for (const [sessionId, sessionData] of activeSessions) {
       const proc = sessionData.process
+
+      // Check for dead child processes
       if (proc.exitCode !== null || proc.killed) {
         clearTimeout(sessionData.timeout)
         clearInterval(sessionData.heartbeatTimer)
@@ -1214,10 +1225,122 @@ function startWatchdog() {
         } catch (err) {
           logger.debug('Watchdog: failed to update dead session', { sessionId, error: err.message })
         }
+        continue
+      }
+
+      // Check for stalled sessions (process alive but no output for >STALL_THRESHOLD_MS)
+      const silentMs = now - sessionData.lastOutputAt
+      if (silentMs > STALL_THRESHOLD_MS) {
+        const silentMin = Math.round(silentMs / 60000)
+        logger.warn(`Watchdog: CC session ${sessionId} stalled — no output for ${silentMin}min, killing for restart`, {
+          sessionId,
+          codebaseId: sessionData.codebaseId,
+          silentMs,
+          outputLineCount: sessionData.outputLineCount,
+        })
+
+        // Kill the stalled process
+        sessionData.stopped = true
+        sessionData._killReason = 'stalled'
+        clearTimeout(sessionData.timeout)
+        clearInterval(sessionData.heartbeatTimer)
+        try {
+          proc.kill('SIGTERM')
+          const forceKill = setTimeout(() => { try { if (!proc.killed) proc.kill('SIGKILL') } catch {} }, 10_000)
+          forceKill.unref()
+        } catch {}
+        activeSessions.delete(sessionId)
+        _updateActiveCount()
+
+        // Mark original session as error
+        try {
+          await updateSessionStatus(sessionId, 'error', {
+            error_message: `Session stalled — no output for ${silentMin} minutes. Auto-restarting.`,
+          })
+          await db`UPDATE cc_sessions SET pipeline_stage = 'failed', completed_at = now() WHERE id = ${sessionId}`
+        } catch {}
+
+        // Re-create and start a fresh session with the same prompt
+        try {
+          const [original] = await db`
+            SELECT project_id, client_id, codebase_id, triggered_by, trigger_ref_id,
+                   trigger_source, initial_prompt, working_dir, stream_source
+            FROM cc_sessions WHERE id = ${sessionId}
+          `
+          if (original) {
+            const [newSession] = await db`
+              INSERT INTO cc_sessions (project_id, client_id, codebase_id, triggered_by, trigger_ref_id,
+                                       trigger_source, initial_prompt, working_dir, stream_source)
+              VALUES (${original.project_id}, ${original.client_id}, ${original.codebase_id},
+                      ${original.triggered_by}, ${original.trigger_ref_id},
+                      ${original.trigger_source || 'scheduled'}, ${original.initial_prompt},
+                      ${original.working_dir}, ${original.stream_source})
+              RETURNING *
+            `
+            logger.info(`Watchdog: restarting stalled session ${sessionId} as ${newSession.id}`)
+            startSession(newSession).catch(err => {
+              logger.error(`Watchdog: failed to restart stalled session`, { originalId: sessionId, newId: newSession.id, error: err.message })
+              db`UPDATE cc_sessions SET status = 'error', error_message = ${err.message}, completed_at = now()
+                 WHERE id = ${newSession.id}`.catch(() => {})
+            })
+          }
+        } catch (err) {
+          logger.error(`Watchdog: failed to create replacement for stalled session ${sessionId}`, { error: err.message })
+        }
       }
     }
+
+    // Publish session health snapshot to Redis for the API health endpoint
+    _publishHealthSnapshot()
   }, 60_000)
   watchdogTimer.unref()
+}
+
+// ─── Session Health Snapshot ────────────────────────────────────────
+
+function getSessionHealthSnapshot() {
+  const now = Date.now()
+  const sessions = []
+
+  for (const [id, data] of activeSessions) {
+    const silentMs = now - data.lastOutputAt
+    const stalled = silentMs > STALL_THRESHOLD_MS
+
+    sessions.push({
+      sessionId: id,
+      startedAt: new Date(data.startedAt).toISOString(),
+      lastOutputAt: new Date(data.lastOutputAt).toISOString(),
+      silentForMs: silentMs,
+      silentForMin: Math.round(silentMs / 60000 * 10) / 10,
+      runningForMin: Math.round((now - data.startedAt) / 60000 * 10) / 10,
+      outputLineCount: data.outputLineCount,
+      codebaseId: data.codebaseId,
+      stalled,
+      hasCliSessionId: !!data.ccCliSessionId,
+    })
+  }
+
+  const stalledCount = sessions.filter(s => s.stalled).length
+  return {
+    activeSessions: sessions.length,
+    stalledSessions: stalledCount,
+    healthySessions: sessions.length - stalledCount,
+    stallThresholdMin: STALL_THRESHOLD_MS / 60000,
+    timestamp: new Date().toISOString(),
+    sessions,
+  }
+}
+
+const SESSION_HEALTH_KEY = 'factory:runner:session_health'
+
+async function _publishHealthSnapshot() {
+  try {
+    const { getRedisClient } = require('../config/redis')
+    const redis = getRedisClient()
+    if (!redis) return
+    const snapshot = getSessionHealthSnapshot()
+    await redis.set(SESSION_HEALTH_KEY, JSON.stringify(snapshot), 'EX', 120)
+  } catch {}
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
