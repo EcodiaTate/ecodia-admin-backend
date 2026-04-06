@@ -119,21 +119,20 @@ async function sendMessage(content) {
   const sessionId = session.id
   emitStatus('streaming', { sessionId })
 
+  // cwd must contain .mcp.json and CLAUDE.md
+  const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
+
   // Build CLI args
   const args = [
     '--print',
     '--verbose',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
+    '--mcp-config', `${cwd}/.mcp.json`,
   ]
   if (isResume && session.cc_cli_session_id) {
     args.push('--resume', session.cc_cli_session_id)
   }
-
-  // cwd must contain .mcp.json and CLAUDE.md
-  // VPS: ~/ecodiaos/ (same dir as backend — CLAUDE.md + .mcp.json + mcp-servers/ live alongside src/)
-  // Local dev: set OS_SESSION_CWD to your monorepo root (e.g. d:/.code/ecodiaos)
-  const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
 
   const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
   delete ccEnv.ANTHROPIC_API_KEY // forces console auth
