@@ -210,7 +210,7 @@ const envSchema = z.object({
   FACTORY_REVIEW_MAX_CONTEXT_FILES: z.string().default('0'),     // 0 = full file context for all
   // Selfhood — introspection, goals, identity
   INTROSPECTION_CYCLE_INTERVAL: z.string().default('10'),        // run full introspection every N maintenance cycles (0 = disabled)
-  GOAL_MAX_ACTIVE: z.string().default('0'),                       // max active goals before generation pauses (0 = unlimited)
+  GOAL_MAX_ACTIVE: z.string().default('10'),                      // max active goals before generation pauses (0 = unlimited)
 })
 
 const parsed = envSchema.safeParse(process.env)

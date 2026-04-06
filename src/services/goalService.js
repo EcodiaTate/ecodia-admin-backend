@@ -422,9 +422,12 @@ Respond as JSON:
   for (const proposal of proposals) {
     if (!proposal.title || !proposal.successCriteria) { skipped++; continue }
 
-    // Dedup: check title similarity against active goals
-    const isDuplicate = activeGoals.some(g =>
-      _titleSimilarity(g.title, proposal.title) > 0.6
+    // Dedup: check title similarity against active AND recent goals
+    // Threshold lowered to 0.35 — word overlap misses semantic duplicates
+    // ("action relevance filtering" vs "action suggestion relevance classifier")
+    // Also check recently abandoned/achieved goals to prevent re-proposing consolidated goals
+    const isDuplicate = [...activeGoals, ...history].some(g =>
+      _titleSimilarity(g.title, proposal.title) > 0.35
     )
     if (isDuplicate) {
       logger.debug(`GoalService: skipping duplicate goal proposal — "${proposal.title}"`)
