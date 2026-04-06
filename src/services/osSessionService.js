@@ -44,9 +44,9 @@ function writeStdinSafe(proc, data) {
 
 async function getOSSession() {
   const rows = await db`
-    SELECT id, cc_cli_session_id, status, started_at, updated_at
+    SELECT id, cc_cli_session_id, status, started_at
     FROM cc_sessions
-    WHERE triggered_by = 'os-session'
+    WHERE triggered_by = 'cortex' AND trigger_source = 'cortex' AND initial_prompt = 'OS Session'
     ORDER BY started_at DESC
     LIMIT 1
   `
@@ -59,7 +59,7 @@ async function createOSSession() {
       triggered_by, trigger_source, status, pipeline_stage,
       initial_prompt, started_at
     ) VALUES (
-      'os-session', 'cortex', 'running', 'executing',
+      'cortex', 'cortex', 'running', 'executing',
       'OS Session', now()
     ) RETURNING id, cc_cli_session_id, status
   `
@@ -69,9 +69,9 @@ async function createOSSession() {
 async function updateOSSession(sessionId, updates) {
   const { ccCliSessionId, status } = updates
   if (ccCliSessionId) {
-    await db`UPDATE cc_sessions SET cc_cli_session_id = ${ccCliSessionId}, status = ${status || 'complete'}, updated_at = now() WHERE id = ${sessionId}`
+    await db`UPDATE cc_sessions SET cc_cli_session_id = ${ccCliSessionId}, status = ${status || 'complete'} WHERE id = ${sessionId}`
   } else if (status) {
-    await db`UPDATE cc_sessions SET status = ${status}, updated_at = now() WHERE id = ${sessionId}`
+    await db`UPDATE cc_sessions SET status = ${status} WHERE id = ${sessionId}`
   }
 }
 
