@@ -128,13 +128,12 @@ async function sendMessage(content) {
     '--verbose',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
-    '--mcp-config', `${cwd}/.mcp.json`,
   ]
   if (isResume && session.cc_cli_session_id) {
     args.push('--resume', session.cc_cli_session_id)
   }
 
-  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
+  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8', HOME: '/home/tate' }
   delete ccEnv.ANTHROPIC_API_KEY // forces console auth
 
   logger.info(`OS Session ${isResume ? 'resuming' : 'starting'}`, { sessionId, ccCliSessionId: session.cc_cli_session_id })
