@@ -386,7 +386,15 @@ async function chatAndExecute(messages, { sessionId, ambientEvents, lean, maxRou
     if (allSucceeded && !hasTextBlocks && round > 1) break
   }
 
-  return { blocks: allBlocks, rounds: round }
+  // Reorder: actions first, then text, then done/question — prevents "Executing..." after results
+  const actionBlocks = allBlocks.filter(b => b.type === 'action_card' || b.type === 'action_result')
+  const textBlocks = allBlocks.filter(b => b.type === 'text')
+  const controlBlocks = allBlocks.filter(b => b.type === 'done' || b.type === 'question')
+  const otherBlocks = allBlocks.filter(b =>
+    b.type !== 'action_card' && b.type !== 'action_result' &&
+    b.type !== 'text' && b.type !== 'done' && b.type !== 'question'
+  )
+  return { blocks: [...actionBlocks, ...textBlocks, ...otherBlocks, ...controlBlocks], rounds: round }
 }
 
 /**

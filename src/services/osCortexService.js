@@ -523,7 +523,18 @@ async function runTask(taskId, userMessages, { workspace }) {
     await updateTaskStatus(taskId, taskStatus, firstMsg)
   }
 
-  return { blocks: allBlocks, taskId, status: taskStatus, rounds }
+  // Reorder blocks: action_cards first (with their results), then text, then done/question
+  // This prevents "Executing actions..." appearing after all results
+  const actionBlocks = allBlocks.filter(b => b.type === 'action_card' || b.type === 'action_result')
+  const textBlocks = allBlocks.filter(b => b.type === 'text')
+  const controlBlocks = allBlocks.filter(b => b.type === 'done' || b.type === 'question')
+  const otherBlocks = allBlocks.filter(b =>
+    b.type !== 'action_card' && b.type !== 'action_result' &&
+    b.type !== 'text' && b.type !== 'done' && b.type !== 'question'
+  )
+  const orderedBlocks = [...actionBlocks, ...textBlocks, ...otherBlocks, ...controlBlocks]
+
+  return { blocks: orderedBlocks, taskId, status: taskStatus, rounds }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
