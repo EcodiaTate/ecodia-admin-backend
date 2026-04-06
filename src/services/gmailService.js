@@ -68,7 +68,7 @@ async function pollInbox() {
 async function fullSync(gmail, inbox) {
   const res = await gmail.users.threads.list({
     userId: 'me',
-    maxResults: 30,
+    maxResults: 200,
     labelIds: ['INBOX'],
   })
 
@@ -717,12 +717,36 @@ async function listThreads({ status, priority, inbox, search, limit = 50, offset
 
 async function searchThreads(query, limit = 20) {
   if (!query || query.length < 2) return []
-  return db`
+  const local = await db`
     SELECT id, gmail_thread_id, subject, from_email, from_name, snippet, triage_priority, status, inbox, received_at
     FROM email_threads
     WHERE subject ILIKE ${'%' + query + '%'} OR from_email ILIKE ${'%' + query + '%'}
        OR from_name ILIKE ${'%' + query + '%'} OR snippet ILIKE ${'%' + query + '%'}
     ORDER BY received_at DESC LIMIT ${limit}`
+  if (local.length > 0) return local
+
+  // Local DB empty — search Gmail API directly and sync matching threads
+  const remoteResults = []
+  for (const inbox of INBOXES) {
+    try {
+      const gmail = getGmailClient(inbox)
+      const res = await gmail.users.threads.list({ userId: 'me', q: query, maxResults: Math.min(limit, 10) })
+      const threads = res.data.threads || []
+      for (const t of threads) {
+        await processThread(gmail, inbox, t.id)
+      }
+      if (threads.length > 0) {
+        const synced = await db`
+          SELECT id, gmail_thread_id, subject, from_email, from_name, snippet, triage_priority, status, inbox, received_at
+          FROM email_threads WHERE inbox = ${inbox} AND gmail_thread_id = ANY(${threads.map(t => t.id)})
+          ORDER BY received_at DESC`
+        remoteResults.push(...synced)
+      }
+    } catch (err) {
+      logger.warn(`Gmail API search failed for ${inbox}`, { error: err.message, query })
+    }
+  }
+  return remoteResults.slice(0, limit)
 }
 
 async function batchArchive(threadIds) {

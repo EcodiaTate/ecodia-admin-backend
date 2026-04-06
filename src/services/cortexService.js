@@ -129,7 +129,9 @@ For cc_session blocks: set autoStart: true to launch immediately without human a
 
 For action_card blocks: urgency drives surfacing. "high" = surface on dashboard immediately. "medium" = surface if relevant. "low" = conversational suggestion only.
 
-Params in action_card must be primitive values (string, number, boolean) — never nested objects. Fields marked * are required.`
+Params in action_card must be primitive values (string, number, boolean) — never nested objects. Fields marked * are required.
+
+IMPORTANT — when the human asks about a specific person, sender, topic, or email: use gmail_search with a query param FIRST. Do NOT use gmail_inbox_overview or gmail_triage — those are aggregate stats. "email from tom" → gmail_search query:"tom". "anything from airwallex" → gmail_search query:"airwallex". Always search before summarising.`
 }
 
 /**

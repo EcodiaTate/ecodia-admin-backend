@@ -303,81 +303,74 @@ async function deleteRule(id) {
 // ═══════════════════════════════════════════════════════════════════════
 
 const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company run by Tate.
-These transactions come from the director's PERSONAL bank account (Up Bank, BSB 633-123). They are NOT from the company bank.
+These transactions come from Tate's PERSONAL bank account (Up Bank). NOT the company bank.
 
-Because this is the personal bank, the VAST MAJORITY of transactions are personal and should be DISCARDED.
-Only BUSINESS expenses for Ecodia Pty Ltd should be kept.
+The vast majority of transactions are personal and should be DISCARDED.
 
-DECISION FRAMEWORK:
-1. DISCARD (account_code = "DISCARD", is_personal = true): Everything personal. This includes:
-   - Food, groceries, restaurants, cafes, takeaway, fast food, bakeries
-   - Alcohol (BWS, Liquorland, Dan Murphy's, bars, pubs)
-   - Tobacco, vaping, tobacconists
-   - Fuel, petrol (BP, Caltex, Ampol, Coles Express, Reddy Express) — unless marked as business travel
-   - Personal transfers: "Africa '25", "Save Up Challenge", "Quick save transfer", "Round Up", savings
-   - Ecodia Invest / Ecodia Savings transfers — personal investment activity, NOT company business
-   - Personal payments (Pay Anyone, Osko to individuals like $gretadavid, Casey, etc.)
-   - Entertainment (cinemas, festivals, golf, chess.com, Audible, streaming)
-   - Health, pharmacy, medical
-   - Centrelink payments (income, DISCARD from expense tracking)
-   - DEWR ADMIN salary credits (income, DISCARD)
-   - Parking, tolls (unless business travel)
-   - Phone (Felix Mobile) — personal
-   - Accommodation, travel (holidays, hotels) — unless business trip
-   - Inter-account transfers with no clear business purpose
+═══ OUTGOING MONEY (negative amounts = Tate spent money) ═══
 
-2. BUSINESS EXPENSE (real account code, is_personal = true because paid from personal bank → creates Director Loan):
-   - ASIC fees → 5025 Legal & Compliance (company registration)
-   - Google Workspace / GSuite → 5010 Software & SaaS (company email/docs)
-   - Google Cloud → 5010 Software & SaaS (company hosting)
-   - Vercel → 5010 Software & SaaS (frontend hosting)
-   - GoDaddy → 5010 Software & SaaS (domain registration)
-   - WordPress.com → 5010 Software & SaaS (company website)
-   - LinkedIn Premium → 5005 Advertising & Marketing (business networking/marketing)
-   - Facebook/Meta Ads (FACEBK) → 5005 Advertising & Marketing (paid ads for clients)
-   - Canva → 5010 Software & SaaS (ALWAYS Ecodia business, never personal)
-   - OpenAI/ChatGPT → 5010 Software & SaaS (AI tools for development)
-   - Anthropic/Claude → 5010 Software & SaaS (AI tools for development)
-   - MacInCloud → 5010 Software & SaaS (cloud Mac for iOS builds)
-   - AWS/Hetzner → 5010 Software & SaaS (hosting)
-   - Hostinger → 5010 Software & SaaS (hosting)
-   - Avery Products → 5030 Office Supplies (business labels/printing)
-   - BizCover → 5025 Legal & Compliance (business insurance)
-   - Hostinger → 5010 Software & SaaS (hosting)
-   - Render.com → 5010 Software & SaaS (hosting)
-   - Anthropic → 5010 Software & SaaS (AI tools)
-   - UsersWP/AyeCode → 5010 Software & SaaS (WordPress plugin)
-   - Transfers TO "Ecodia" or "Ecodia Setup" (NOT "Ecodia Invest" / "Ecodia Savings") with amounts >= $10 → "CAPITAL_CONTRIBUTION"
-   - Transfers FROM "Ecodia" (positive amounts, reimbursements) → "REIMBURSEMENT"
-   - BUT: Transfers to "Ecodia" with description "Quick save transfer" or amounts < $5 → DISCARD (personal savings round-up into Up pocket)
-   - "ECODIA PTY LTD" purchases (small $1-4 amounts) → DISCARD (Stripe test charges)
+DISCARD these (account_code = "DISCARD", is_personal = true):
+- Food, groceries, restaurants, cafes, takeaway, bakeries, fast food
+- Alcohol (BWS, Liquorland, bars, pubs)
+- Tobacco, vaping
+- Fuel, petrol (unless marked business travel)
+- Personal savings transfers: "Africa '25", "Save Up Challenge", "Quick save", savings pockets
+- "Ecodia Invest" / "Ecodia Savings" = personal investment, NOT company
+- Payments to individuals ($gretadavid, Casey, Em, Tong, etc.)
+- Entertainment (cinemas, festivals, golf, chess.com, Audible, streaming)
+- Health, pharmacy, medical
+- Phone (Felix Mobile)
+- Personal travel, accommodation, holidays
+- Parking, tolls (unless business)
+- Inter-account transfers with no business purpose
+- "ECODIA PTY LTD" small charges ($1-4) = Stripe test charges, DISCARD
 
-3. SPECIAL CODES:
-   - "CAPITAL_CONTRIBUTION" = director putting money into the company (DR Bank 1000 / CR Director Loan 2100)
-   - "REIMBURSEMENT" = company paying director back (DR Director Loan 2100 / CR Bank 1000)
-   - For both, is_personal = false (they're inter-entity transfers, not personal expenses)
+BUSINESS EXPENSES (account_code = GL code, is_personal = true):
+These are real Ecodia costs paid from Tate's personal bank. The Director Loan path is handled by the posting system — you just set the GL code.
+- ALL Apple.com/Bill → 5010 Software & SaaS (all Apple subs are Ecodia)
+- ALL Canva → 5010 (always Ecodia)
+- Google Workspace/GSuite → 5010 | Google Cloud → 5010 | Google One → DISCARD (personal storage)
+- Vercel, GoDaddy, WordPress, Hostinger, Render, MacInCloud, AWS, Hetzner → 5010
+- OpenAI/ChatGPT, Anthropic/Claude → 5010
+- UsersWP/AyeCode → 5010
+- LinkedIn Premium → 5005 Advertising & Marketing
+- Facebook/Meta Ads (FACEBK) → 5005
+- Marketing Broker → 5005
+- ASIC → 5025 Legal & Compliance
+- BizCover → 5025 (business insurance)
+- Avery Products → 5030 Office Supplies
 
-4. WHEN UNSURE (confidence < 0.5): Set confidence low and explain in reasoning. Examples:
-   - "Could be business travel or personal holiday"
-   - "Unclear if this subscription is for Ecodia or personal use"
-   - The system will surface these as questions for the human.
+CAPITAL CONTRIBUTION (account_code = "CAPITAL_CONTRIBUTION", is_personal = false):
+- Transfers TO "Ecodia" or "Ecodia Setup" with amount >= $10 (NOT "Ecodia Invest"/"Ecodia Savings")
+- BUT "Quick save transfer" to Ecodia or amounts < $5 = DISCARD (personal savings round-up)
 
-Chart of accounts:
-1000 Bank (Operating) | 1100 Stripe Clearing | 1200 Accounts Receivable
-2100 Director Loan | 2110 GST Paid | 2120 GST Collected
-4000 ECO Local Contributions — income | 4100 Ecodia Software Dev — income
-5005 Advertising & Marketing | 5010 Software & SaaS | 5015 Stripe Fees
-5020 Contractor Services | 5025 Legal & Compliance | 5030 Office Supplies
-5035 Motor Vehicle | 5040 IP Licence | 5045 Bank Fees | 5050 Food & Entertainment
+═══ INCOMING MONEY (positive amounts = Tate received money) ═══
+
+DISCARD these (is_personal = true):
+- Centrelink (reference starts with 7D1B) = personal welfare income
+- DEWR ADMIN = personal salary
+- Osko from individuals (Helen Donohoe, friends, family, "from Mum") = personal transfers
+- Suncorp Transactional = inter-bank transfers
+- QUT Sport = personal
+- "Ecodia Invest" / "Ecodia Savings" returns = personal
+
+BUSINESS INCOME (is_personal = false):
+- "EcodiaPty" or "ECODIA PTY LTD" with amounts > $10 = Stripe payouts → 4100 Ecodia Software Dev income
+- Transfers FROM "Ecodia" (reimbursement for expenses) → "REIMBURSEMENT"
+- Client payments → 4100
+
+═══ RESPONSE FORMAT ═══
+
+Chart: 1000 Bank | 2100 Director Loan | 4000 ECO Local | 4100 Ecodia Software Dev | 5005 Advertising | 5010 Software & SaaS | 5015 Stripe Fees | 5020 Contractor | 5025 Legal & Compliance | 5030 Office | 5035 Motor Vehicle | 5045 Bank Fees
 
 Supplier rules: {rules}
 
-Respond with JSON array. Each: { "source_ref", "account_code", "supplier_name", "is_personal", "gst_amount_cents", "tags":[], "confidence", "reasoning" }
-- account_code = "DISCARD" for personal items
-- GST: domestic business expenses = total/11. International SaaS (OpenAI, Vercel, MacInCloud) = 0 (no GST). Personal = 0.
-- is_personal = true for DISCARD items AND for business expenses paid from personal bank (Director Loan path)
-- is_personal = false for CAPITAL_CONTRIBUTION and REIMBURSEMENT
-- Ambiguous items → confidence < 0.5 with clear reasoning explaining the ambiguity`
+JSON array. Each: { "source_ref", "account_code", "supplier_name", "is_personal", "gst_amount_cents", "tags":[], "confidence", "reasoning" }
+- "DISCARD" for personal items (both incoming and outgoing)
+- "CAPITAL_CONTRIBUTION" / "REIMBURSEMENT" for inter-entity transfers (is_personal = false)
+- Real GL code for business expenses (is_personal = true) and income (is_personal = false)
+- GST: domestic business expenses = total/11. International SaaS = 0. Personal = 0. Income = 0.
+- Unsure → confidence < 0.5`
 
 async function categorizeTransactions(transactions) {
   if (!transactions.length) return []

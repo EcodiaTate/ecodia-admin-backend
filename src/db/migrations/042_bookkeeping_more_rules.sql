@@ -27,14 +27,25 @@ ON CONFLICT DO NOTHING;
 UPDATE supplier_rules SET needs_review = false, is_business = true WHERE pattern = 'canva';
 
 -- Fix: "round up" in savings rule was matching "Round Up (AUD)" column in long_description
--- Change to "round up transfer" which only matches the actual Up Bank savings transfer type
 UPDATE supplier_rules SET pattern = 'africa.*25|save up challenge|quick save transfer'
 WHERE pattern = 'africa.*25|save up challenge|quick save|round up';
 
--- Add separate rule for Round Up transaction type (Up Bank specific)
--- These have Transaction Type = "Round Up" and Payee = savings pocket name
+-- Fix Apple: always business (all Apple subs are Ecodia)
+UPDATE supplier_rules SET account_code = '5010', is_business = true, needs_review = false
+WHERE pattern = 'APPLE\.COM/BILL';
+
+-- Marketing Broker = business advertising
 INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
-VALUES
-  ('^Round Up$', 'Up Bank Round Up', 'DISCARD', true, false, 'gst_free')
+VALUES ('MARKETING BROKER', 'Marketing Broker', '5005', true, true, 'gst_inclusive')
+ON CONFLICT DO NOTHING;
+
+-- Centrelink incoming = personal income, DISCARD
+INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
+VALUES ('7D1B0', 'Centrelink (ref pattern)', 'DISCARD', true, false, 'gst_free')
+ON CONFLICT DO NOTHING;
+
+-- "from Mum" transfers = personal
+INSERT INTO supplier_rules (pattern, supplier_name, account_code, is_personal, is_business, gst_treatment)
+VALUES ('from mum', 'Family Transfer', 'DISCARD', true, false, 'gst_free')
 ON CONFLICT DO NOTHING;
 
