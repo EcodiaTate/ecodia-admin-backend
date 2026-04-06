@@ -49,4 +49,26 @@ router.get('/history', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// Get current token usage
+router.get('/tokens', (_req, res) => {
+  const usage = osSession.getTokenUsage()
+  res.json(usage)
+})
+
+// Compact — seamlessly transition to a new session with summary context
+router.post('/compact', async (req, res, next) => {
+  res.setTimeout(300_000)
+  try {
+    const { summary } = req.body
+    if (!summary || typeof summary !== 'string') {
+      return res.status(400).json({ error: 'summary is required' })
+    }
+    const result = await osSession.compact(summary)
+    res.json(result)
+  } catch (err) {
+    console.error('[OS Session /compact] Error:', err.message)
+    next(err)
+  }
+})
+
 module.exports = router

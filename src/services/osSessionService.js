@@ -23,8 +23,13 @@ const CC_CLI = env.CLAUDE_CLI_PATH || 'claude'
 const OS_SESSION_TIMEOUT_MS = parseInt(env.OS_SESSION_TIMEOUT_MS || '300000', 10) // 5min per exchange
 const STDIN_WARNING_RE = /no stdin data received/i
 
+// Token tracking — CC reports usage in result events
+// Claude's context window is ~200K tokens. Compact at 150K to leave headroom.
+const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000', 10)
+
 // In-memory state for the active OS session process
 let activeProcess = null
+let sessionTokenUsage = { input: 0, output: 0 } // accumulated from result events
 
 // ── Backpressure-aware stdin write (from ccService.js) ──
 
@@ -191,9 +196,21 @@ async function sendMessage(content) {
           }
         }
 
-        // Track the last result for completion
+        // Track the last result for completion + token usage
         if (parsed.type === 'result') {
           lastResultJson = parsed
+          // Extract token usage from result
+          if (parsed.total_input_tokens) sessionTokenUsage.input = parsed.total_input_tokens
+          if (parsed.total_output_tokens) sessionTokenUsage.output = parsed.total_output_tokens
+          const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
+          // Broadcast token usage so frontend can track
+          broadcast('os-session:tokens', {
+            input: sessionTokenUsage.input,
+            output: sessionTokenUsage.output,
+            total: totalTokens,
+            threshold: COMPACT_THRESHOLD,
+            needsCompaction: totalTokens > COMPACT_THRESHOLD,
+          })
         }
       } catch {
         // Not JSON — raw text output, still broadcast
@@ -282,4 +299,44 @@ async function getHistory(limit = 100) {
   return logs.reverse()
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory }
+// ── Compact — seamlessly transition to a new session with context ──
+
+async function compact(summary) {
+  // Kill any active process
+  if (activeProcess) {
+    try { activeProcess.process.kill('SIGTERM') } catch {}
+    activeProcess = null
+  }
+
+  // Create a new session
+  const newSession = await createOSSession()
+
+  // Reset token tracking
+  sessionTokenUsage = { input: 0, output: 0 }
+
+  // Send the summary as the first message to establish context in the new session
+  // This is invisible to the user — it primes the new session with prior context
+  const contextMessage = `[CONTEXT FROM PREVIOUS SESSION]\n\n${summary}\n\n[END CONTEXT]\n\nYou are continuing an ongoing conversation. The above is a summary of what was discussed and decided. Continue seamlessly — the human should not notice the session transition.`
+
+  logger.info('OS Session compacting', { newSessionId: newSession.id, summaryLength: summary.length })
+
+  // Don't broadcast this as a user message — it's internal
+  const result = await sendMessage(contextMessage)
+
+  emitStatus('compacted', { sessionId: newSession.id, previousTokens: sessionTokenUsage })
+
+  return { sessionId: newSession.id, ...result }
+}
+
+// ── Get token usage ──
+
+function getTokenUsage() {
+  return {
+    ...sessionTokenUsage,
+    total: sessionTokenUsage.input + sessionTokenUsage.output,
+    threshold: COMPACT_THRESHOLD,
+    needsCompaction: (sessionTokenUsage.input + sessionTokenUsage.output) > COMPACT_THRESHOLD,
+  }
+}
+
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage }
