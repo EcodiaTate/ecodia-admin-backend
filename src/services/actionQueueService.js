@@ -584,6 +584,7 @@ const ACTION_TYPE_ALIASES = {
   start_cc_session: 'start_cc_session',
   trigger_vercel_build: 'trigger_vercel_build',
   follow_up: 'create_task',
+  categorize_all_pending: 'bookkeeping_categorize_pending',
 }
 
 async function performAction(item) {
@@ -618,7 +619,12 @@ async function performAction(item) {
   // before capabilities/index has been required. The registry's internal recovery
   // is one-shot with a cooldown, so we proactively load here.
   if (registry.list().length === 0) {
-    try { require('../capabilities/index') } catch (_) {}
+    try {
+      require('../capabilities/index')
+      logger.info(`ActionQueue: late-loaded ${registry.list().length} capabilities (boot race recovery)`)
+    } catch (err) {
+      logger.warn('ActionQueue: capability bootstrap failed during action execution', { error: err.message })
+    }
   }
 
   const outcome = await registry.execute(capabilityName, params, { source: 'action_queue', item })
@@ -626,7 +632,8 @@ async function performAction(item) {
   if (!outcome.success) {
     // If unknown after registry's own recovery attempt, return gracefully
     if (outcome.error?.startsWith('Unknown capability')) {
-      logger.warn(`ActionQueue: unregistered capability "${capabilityName}" (raw: "${rawType}")`, {
+      const loadedCount = registry.list().length
+      logger.warn(`ActionQueue: unknown capability "${capabilityName}" (raw: "${rawType}") -- ${loadedCount} capabilities loaded`, {
         closestMatch: outcome.closestMatch,
         suggestion: outcome.suggestion,
         failedDomains: outcome.failedDomains,

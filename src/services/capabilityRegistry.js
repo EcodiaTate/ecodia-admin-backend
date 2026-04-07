@@ -209,10 +209,16 @@ function attemptRecovery(name) {
   // Two recovery paths:
   // 1. Failed domains — specific domains threw during bootstrap
   // 2. Empty registry — capabilities/index hasn't been required yet (boot race)
-  if (failedDomains.size === 0 && registry.size === 0) {
-    logger.info(`CapabilityRegistry: registry empty — loading capabilities/index for "${name}"`)
+  if (registry.size === 0) {
+    // Full bootstrap — either first load or all domains failed
+    logger.info(`CapabilityRegistry: registry empty (${failedDomains.size} failed domains) — loading capabilities/index for "${name}"`)
     try {
+      // Clear Node's require cache for capabilities/index so it re-executes
+      // (handles case where first load completed but produced 0 registrations)
+      const indexPath = require.resolve('../capabilities/index')
+      delete require.cache[indexPath]
       require('../capabilities/index')
+      logger.info(`CapabilityRegistry: bootstrap recovery loaded ${registry.size} capabilities`)
     } catch (err) {
       logger.warn(`CapabilityRegistry: full bootstrap recovery failed`, { error: err.message })
     }
@@ -221,6 +227,11 @@ function attemptRecovery(name) {
     const recovered = []
     for (const domain of [...failedDomains]) {
       try {
+        // Clear cache so domain re-executes even if it was required before
+        try {
+          const domainPath = require.resolve(`../capabilities/${domain}`)
+          delete require.cache[domainPath]
+        } catch (_) {}
         require(`../capabilities/${domain}`)
         failedDomains.delete(domain)
         recovered.push(domain)
