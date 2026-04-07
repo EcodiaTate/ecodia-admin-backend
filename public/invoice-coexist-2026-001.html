@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Invoice INV-2026-001 - Ecodia</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, Helvetica, sans-serif; color: #111; background: #fff; line-height: 1.6; font-size: 14px; }
+    .page { max-width: 800px; margin: 0 auto; padding: 48px 40px; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; padding-bottom: 24px; border-bottom: 2px solid #000; }
+    .brand { display: inline-flex; }
+    .brand-eco { background: #000; color: #fff; padding: 5px 7px; font-size: 11px; font-weight: 800; letter-spacing: 0.15em; }
+    .brand-code { background: #fff; color: #000; padding: 5px 7px; font-size: 11px; font-weight: 800; letter-spacing: 0.15em; }
+    .inv-number { font-size: 11px; color: #999; letter-spacing: 0.1em; margin-top: 12px; }
+    .inv-title { font-size: 28px; font-weight: 300; margin-top: 4px; }
+    .meta { font-size: 12px; color: #666; text-align: right; line-height: 1.8; }
+    .meta strong { color: #111; }
+    .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-bottom: 40px; }
+    .party-label { font-size: 10px; font-weight: 700; letter-spacing: 0.25em; text-transform: uppercase; color: #999; margin-bottom: 8px; }
+    .party-detail { font-size: 13px; line-height: 1.8; }
+    table { width: 100%; border-collapse: collapse; margin: 0 0 40px 0; }
+    th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: #999; padding: 10px 0; border-bottom: 1px solid #ddd; }
+    th.amount { text-align: right; }
+    td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+    td.amount { text-align: right; font-weight: 500; }
+    tr.total td { border-top: 2px solid #000; border-bottom: none; font-weight: 700; font-size: 18px; padding-top: 16px; }
+    .payment { background: #fafafa; padding: 24px; margin-bottom: 32px; }
+    .payment-label { font-size: 10px; font-weight: 700; letter-spacing: 0.25em; text-transform: uppercase; color: #999; margin-bottom: 12px; }
+    .payment-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 20px; font-size: 13px; }
+    .payment-grid dt { color: #999; }
+    .payment-grid dd { color: #111; }
+    .notes { font-size: 12px; color: #999; margin-bottom: 40px; }
+    .footer { padding-top: 16px; border-top: 1px solid #eee; font-size: 10px; color: #ccc; display: flex; justify-content: space-between; letter-spacing: 0.1em; text-transform: uppercase; }
+    @media print { body { padding: 0; } .page { padding: 24px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div>
+        <div class="brand"><span class="brand-eco">ECODIA</span><span class="brand-code">CODE</span></div>
+        <p class="inv-number">INV-2026-001</p>
+        <h1 class="inv-title">Invoice</h1>
+      </div>
+      <div class="meta">
+        <div><strong>Date:</strong> 7 April 2026</div>
+        <div><strong>Due:</strong> 14 April 2026</div>
+      </div>
+    </div>
+
+    <div class="parties">
+      <div>
+        <p class="party-label">From</p>
+        <div class="party-detail">
+          <strong>Ecodia Pty Ltd</strong><br>
+          ABN: 89 693 123 278<br>
+          Sunshine Coast, QLD<br>
+          hello@ecodia.au
+        </div>
+      </div>
+      <div>
+        <p class="party-label">To</p>
+        <div class="party-detail">
+          <strong>Co-Exist Australia Ltd</strong><br>
+          Australian Public Company<br>
+          QLD 4551
+        </div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th class="amount">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Initial app development (Co-Exist mobile app)</td>
+          <td class="amount">$2,000.00</td>
+        </tr>
+        <tr>
+          <td>Monthly licensing fee (April 2026)</td>
+          <td class="amount">$200.00</td>
+        </tr>
+        <tr>
+          <td>Managed 3rd party costs (April 2026)</td>
+          <td class="amount">$82.00</td>
+        </tr>
+        <tr>
+          <td>Technical assistance - 2hrs @ $60/hr<br><span style="color:#999; font-size:12px;">Microsoft MFA setup + Instagram Ad Account configuration</span></td>
+          <td class="amount">$120.00</td>
+        </tr>
+        <tr class="total">
+          <td>Total</td>
+          <td class="amount">$2,402.00</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="notes">GST not applicable - Ecodia Pty Ltd is not currently registered for GST.</p>
+
+    <div class="payment">
+      <p class="payment-label">Payment Details</p>
+      <dl class="payment-grid">
+        <dt>Bank</dt><dd>Bank Australia</dd>
+        <dt>BSB</dt><dd>313-140</dd>
+        <dt>Account</dt><dd>12579148</dd>
+        <dt>Name</dt><dd>Ecodia Pty Ltd</dd>
+        <dt>Reference</dt><dd>INV-2026-001</dd>
+      </dl>
+    </div>
+
+    <p class="notes">Payment due within 7 days. Thank you for your business.</p>
+
+    <div class="footer">
+      <span>ECODIA CODE</span>
+      <span>ecodia.au</span>
+    </div>
+  </div>
+</body>
+</html>
