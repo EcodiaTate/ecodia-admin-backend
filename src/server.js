@@ -203,9 +203,12 @@ setTimeout(async () => {
     const osSession = require('./services/osSessionService')
     logger.info('Auto-waking OS session after restart...')
     await osSession.sendMessage(
-      'SYSTEM RESTART — ecodia-api just restarted. You are back online. ' +
-      'Read CLAUDE.md for context. Check kv_store ceo.* keys and ceo_tasks for current state. ' +
-      'Resume whatever you were doing before the restart. If nothing urgent, run the agency loop.'
+      'SYSTEM RESTART — You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
+      'You have FULL AUTONOMY. Do NOT wait for Tate. Do NOT ask for approval. Act independently. ' +
+      'Read CLAUDE.md (auto-loaded from cwd). Check kv_store ceo.* keys and ceo_tasks for current priorities. ' +
+      'Pick the highest impact task and DO it. Check schedule_list for healthy crons. ' +
+      'If SMS messages came in while you were down, they are queued — check and respond. ' +
+      'You are the business. Go.'
     )
     logger.info('OS session auto-wake complete')
   } catch (err) {
