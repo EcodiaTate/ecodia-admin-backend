@@ -58,6 +58,7 @@ const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000',
 let activeQuery = null          // the running Query object from the SDK
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
+let usingBedrock = false        // flipped to true after a 429 triggers Bedrock fallback
 
 // We lazy-import the ESM Agent SDK since the backend is CJS
 let _query = null
@@ -195,8 +196,26 @@ async function sendMessage(content) {
     options.resume = ccSessionId
   }
 
-  // Set ANTHROPIC_API_KEY in env if available
-  if (env.ANTHROPIC_API_KEY) {
+  // Provider selection: use Bedrock if we've been rate-limited or if no Anthropic key
+  const canBedrock = env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
+  const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && canBedrock)
+
+  if (shouldUseBedrock && canBedrock) {
+    // Use AWS Bedrock as the provider — SDK supports this via settings.apiProvider
+    options.settings = {
+      ...(typeof options.settings === 'object' ? options.settings : {}),
+      apiProvider: 'bedrock',
+    }
+    options.env = {
+      ...process.env,
+      AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+      AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+      AWS_REGION: env.AWS_REGION || 'us-east-1',
+    }
+    // Remove ANTHROPIC_API_KEY so SDK doesn't try first-party
+    delete options.env.ANTHROPIC_API_KEY
+    logger.info('OS Session using AWS Bedrock provider', { region: env.AWS_REGION || 'us-east-1', sticky: usingBedrock })
+  } else if (env.ANTHROPIC_API_KEY) {
     options.env = { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }
   }
 
@@ -319,71 +338,24 @@ async function sendMessage(content) {
 
   } catch (err) {
     activeQuery = null
-    const isRateLimit = err.message?.includes('429') || err.message?.includes('rate') || err.message?.includes('overloaded') || err.message?.includes('capacity')
+    const errMsg = err.message || ''
+    const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('rate limit') || errMsg.toLowerCase().includes('overloaded') || errMsg.toLowerCase().includes('capacity') || errMsg.toLowerCase().includes('weekly')
 
-    // Fallback to AWS Bedrock on rate limit if credentials are available
-    if (isRateLimit && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && !options._bedrockRetry) {
-      logger.info('OS Session rate limited - falling back to AWS Bedrock')
-      emitOutput({ type: 'assistant_text', content: '[Switching to Bedrock - rate limited on primary]' })
-
-      try {
-        options._bedrockRetry = true
-        options.env = {
-          ...process.env,
-          CLAUDE_CODE_USE_BEDROCK: '1',
-          AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-          AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-          AWS_REGION: process.env.AWS_REGION || 'us-east-1',
-        }
-        // Remove Anthropic key so SDK picks up Bedrock
-        delete options.env.ANTHROPIC_API_KEY
-
-        const retryQ = queryFn({ prompt: content, options })
-        activeQuery = retryQ
-
-        const retryText = []
-        for await (const msg of retryQ) {
-          if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
-            ccSessionId = msg.session_id
-            await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
-          }
-          if (msg.type === 'assistant') {
-            const text = extractTextFromContent(msg.message?.content)
-            if (text) {
-              const safeText = secretSafety.scrubSecrets(text)
-              retryText.push(safeText)
-              await appendLog(dbSessionId, safeText)
-              emitOutput({ type: 'assistant_text', content: safeText })
-            }
-          }
-          if (msg.type === 'result' && msg.result) {
-            const safeResult = secretSafety.scrubSecrets(msg.result)
-            if (safeResult.length > 0) retryText.push(safeResult)
-          }
-        }
-
-        activeQuery = null
-        await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
-        emitStatus('complete', { sessionId: dbSessionId, code: 0 })
-        broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
-        logger.info('OS Session Bedrock fallback complete', { sessionId: dbSessionId })
-
-        return {
-          sessionId: dbSessionId,
-          ccCliSessionId: ccSessionId,
-          code: 0,
-          text: retryText.join('\n\n'),
-        }
-      } catch (bedrockErr) {
-        activeQuery = null
-        logger.error('OS Session Bedrock fallback also failed', { error: bedrockErr.message })
-      }
+    // On rate limit: flip to Bedrock and retry this message once
+    if (isRateLimit && canBedrock && !usingBedrock) {
+      usingBedrock = true
+      // Can't resume a session cross-provider — start fresh on Bedrock
+      ccSessionId = null
+      logger.warn('OS Session rate limited on Anthropic API — switching to AWS Bedrock and retrying', { error: errMsg })
+      emitOutput({ type: 'system', content: 'Primary API rate limited. Switching to AWS Bedrock...' })
+      return sendMessage(content)  // recursive retry — will pick up usingBedrock=true
     }
 
-    logger.error('OS Session SDK error', { error: err.message, stack: err.stack })
+    // Other errors (or Bedrock also failed)
+    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, usingBedrock })
 
-    emitOutput({ type: 'error', content: err.message })
-    emitStatus('error', { error: err.message })
+    emitOutput({ type: 'error', content: errMsg })
+    emitStatus('error', { error: errMsg })
     broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
@@ -407,6 +379,7 @@ async function getStatus() {
     ccCliSessionId: session?.cc_cli_session_id || null,
     status: activeQuery ? 'streaming' : (session?.status || 'idle'),
     startedAt: session?.started_at,
+    provider: usingBedrock ? 'bedrock' : 'anthropic',
   }
 }
 
@@ -418,6 +391,7 @@ async function restart() {
     activeQuery = null
   }
   ccSessionId = null
+  usingBedrock = false  // reset — try primary key again on restart
   const session = await createOSSession()
   emitStatus('idle', { sessionId: session.id, restarted: true })
   return { sessionId: session.id }
