@@ -28,7 +28,8 @@ server.tool('db_query', 'Execute a read-only SQL query. Returns rows as JSON. Ma
     return { content: [{ type: 'text', text: 'Error: db_query is read-only. Use db_execute for write operations.' }] }
   }
   try {
-    const rows = await db.unsafe(`${trimmed} LIMIT 500`)
+    const hasLimit = /\bLIMIT\s+\d+/i.test(trimmed)
+    const rows = await db.unsafe(hasLimit ? trimmed : `${trimmed} LIMIT 500`)
     return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] }
   } catch (err) {
     return { content: [{ type: 'text', text: `SQL error: ${err.message}` }] }
