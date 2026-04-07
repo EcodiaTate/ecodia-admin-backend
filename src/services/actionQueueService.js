@@ -821,7 +821,7 @@ async function getStats() {
       count(*) FILTER (WHERE status = 'executed' AND executed_at > now() - interval '24 hours')::int AS executed_24h,
       count(*) FILTER (WHERE status = 'dismissed' AND created_at > now() - interval '24 hours')::int AS dismissed_24h,
       EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))))::int AS oldest_pending_seconds,
-      EXTRACT(EPOCH FROM (now() - avg(created_at) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))))::int AS avg_wait_seconds,
+      avg(EXTRACT(EPOCH FROM (now() - created_at))) FILTER (WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > now()))::int AS avg_wait_seconds,
       EXTRACT(EPOCH FROM avg(executed_at - created_at) FILTER (WHERE status = 'executed' AND executed_at > now() - interval '24 hours'))::int AS avg_execution_latency_seconds,
       count(*) FILTER (WHERE status = 'pending' AND error_message IS NOT NULL)::int AS pending_with_errors
     FROM action_queue
