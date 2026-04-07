@@ -2,12 +2,10 @@
 /**
  * Supabase MCP Server — Direct PostgreSQL access to EcodiaOS database.
  * Provides read/write SQL + schema introspection.
- *
- * Required env vars:
- *   DATABASE_URL — PostgreSQL connection string
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { z } from 'zod'
 import postgres from 'postgres'
 
 const db = postgres(process.env.DATABASE_URL, {
@@ -17,25 +15,14 @@ const db = postgres(process.env.DATABASE_URL, {
   connect_timeout: 10,
 })
 
-const server = new McpServer({
-  name: 'supabase',
-  version: '1.0.0',
-})
+const server = new McpServer({ name: 'supabase', version: '1.1.0' })
 
 // ── Read-only SQL ──
 
-server.tool('db_query', {
-  description: 'Execute a read-only SQL query against the EcodiaOS PostgreSQL database. Returns rows as JSON. Use for SELECT queries. Max 500 rows returned.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      sql: { type: 'string', description: 'SQL SELECT query to execute' },
-    },
-    required: ['sql'],
-  },
+server.tool('db_query', 'Execute a read-only SQL query. Returns rows as JSON. Max 500 rows.', {
+  sql: z.string().describe('SQL SELECT query to execute'),
 }, async ({ sql }) => {
   const trimmed = sql.trim().replace(/;$/, '')
-  // Basic safety: reject obviously destructive statements in the read-only tool
   const firstWord = trimmed.split(/\s/)[0].toUpperCase()
   if (['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'CREATE'].includes(firstWord)) {
     return { content: [{ type: 'text', text: 'Error: db_query is read-only. Use db_execute for write operations.' }] }
@@ -50,20 +37,13 @@ server.tool('db_query', {
 
 // ── Write SQL ──
 
-server.tool('db_execute', {
-  description: 'Execute a write SQL statement (INSERT, UPDATE, DELETE). Returns affected row count or returning clause results.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      sql: { type: 'string', description: 'SQL statement to execute' },
-    },
-    required: ['sql'],
-  },
+server.tool('db_execute', 'Execute a write SQL statement (INSERT, UPDATE, DELETE). Returns affected rows.', {
+  sql: z.string().describe('SQL statement to execute'),
 }, async ({ sql }) => {
   const trimmed = sql.trim().replace(/;$/, '')
   const firstWord = trimmed.split(/\s/)[0].toUpperCase()
   if (['DROP', 'TRUNCATE', 'ALTER'].includes(firstWord)) {
-    return { content: [{ type: 'text', text: 'Error: DDL operations (DROP, TRUNCATE, ALTER) are not allowed through this tool.' }] }
+    return { content: [{ type: 'text', text: 'Error: DDL operations (DROP, TRUNCATE, ALTER) are not allowed.' }] }
   }
   try {
     const result = await db.unsafe(trimmed)
@@ -79,13 +59,7 @@ server.tool('db_execute', {
 
 // ── Schema introspection ──
 
-server.tool('db_list_tables', {
-  description: 'List all tables in the database with their columns. Useful for understanding the schema.',
-  inputSchema: {
-    type: 'object',
-    properties: {},
-  },
-}, async () => {
+server.tool('db_list_tables', 'List all tables with their columns.', {}, async () => {
   const tables = await db`
     SELECT t.table_name,
            array_agg(c.column_name || ' ' || c.data_type ORDER BY c.ordinal_position) AS columns
@@ -95,22 +69,11 @@ server.tool('db_list_tables', {
     GROUP BY t.table_name
     ORDER BY t.table_name
   `
-  const result = tables.map(t => ({
-    table: t.table_name,
-    columns: t.columns,
-  }))
-  return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+  return { content: [{ type: 'text', text: JSON.stringify(tables.map(t => ({ table: t.table_name, columns: t.columns })), null, 2) }] }
 })
 
-server.tool('db_describe_table', {
-  description: 'Get detailed schema for a specific table including column types, nullability, defaults, and constraints.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      table: { type: 'string', description: 'Table name' },
-    },
-    required: ['table'],
-  },
+server.tool('db_describe_table', 'Get detailed schema for a specific table.', {
+  table: z.string().describe('Table name'),
 }, async ({ table }) => {
   const columns = await db`
     SELECT column_name, data_type, is_nullable, column_default, character_maximum_length
