@@ -369,9 +369,11 @@ async function sendMessage(content) {
     }
 
     const errMsg = err.message || ''
+    const exhausted = _isUsageExhausted(errMsg)
+    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock })
 
     // On usage exhaustion: flip to Bedrock and retry this message once
-    if (_isUsageExhausted(errMsg) && canBedrock && !usingBedrock) {
+    if (exhausted && canBedrock && !usingBedrock) {
       usingBedrock = true
       ccSessionId = null
       logger.warn('OS Session usage exhausted — switching to AWS Bedrock and retrying', { error: errMsg })
