@@ -14,10 +14,12 @@ import postgres from 'postgres'
 const db = postgres(process.env.DATABASE_URL, { max: 3, idle_timeout: 30 })
 const API_PORT = process.env.PORT || 3001
 const POLL_INTERVAL = 30_000 // 30 seconds
+const TZ_OFFSET_HOURS = 10 // Australia/Brisbane (AEST, no DST)
 
-const server = new McpServer({ name: 'scheduler', version: '1.0.0' })
+const server = new McpServer({ name: 'scheduler', version: '1.1.0' })
 
 // ── Parse human-readable schedules ──
+// All "daily HH:MM" times are interpreted as Brisbane (AEST, UTC+10).
 
 function parseSchedule(schedule) {
   // "every 30m", "every 2h", "every 72h", "daily 09:00"
@@ -30,7 +32,10 @@ function parseSchedule(schedule) {
   }
   const dailyMatch = schedule.match(/^daily\s+(\d{1,2}):(\d{2})$/i)
   if (dailyMatch) {
-    return { type: 'daily', hour: parseInt(dailyMatch[1]), minute: parseInt(dailyMatch[2]) }
+    // Convert AEST to UTC by subtracting offset
+    let utcHour = parseInt(dailyMatch[1]) - TZ_OFFSET_HOURS
+    if (utcHour < 0) utcHour += 24
+    return { type: 'daily', hour: utcHour, minute: parseInt(dailyMatch[2]), localHour: parseInt(dailyMatch[1]) }
   }
   return null
 }
