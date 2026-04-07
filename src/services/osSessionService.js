@@ -215,7 +215,7 @@ async function sendMessage(content) {
     // AWS creds go in settings.env so the child process picks them up.
     // We also explicitly set apiProvider and strip ANTHROPIC_API_KEY so the CLI
     // doesn't try to use the rate-limited OAuth account from ~/.claude.json.
-    const bedrockModel = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-v1'
+    const bedrockModel = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6'
     options.model = bedrockModel
     options.settings = {
       ...(typeof options.settings === 'object' ? options.settings : {}),
