@@ -370,7 +370,7 @@ async function sendMessage(content) {
 
     const errMsg = err.message || ''
     const exhausted = _isUsageExhausted(errMsg)
-    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock })
+    console.error('OS_SESSION_CATCH', JSON.stringify({ errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock }))
 
     // On usage exhaustion: flip to Bedrock and retry this message once
     if (exhausted && canBedrock && !usingBedrock) {
