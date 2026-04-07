@@ -197,16 +197,46 @@ async function fireTask(task) {
 
 // ── Polling loop — check for due tasks every 30s ──
 
+async function isSessionBusy() {
+  try {
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/status`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    const status = await res.json()
+    return status.active === true || status.status === 'streaming'
+  } catch {
+    return false // If we can't check, assume not busy
+  }
+}
+
 async function pollOnce() {
   try {
     const now = new Date()
     const dueTasks = await db`
-      SELECT * FROM os_scheduled_tasks 
+      SELECT * FROM os_scheduled_tasks
       WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ${now}
       ORDER BY next_run_at
     `
-    for (const task of dueTasks) {
-      await fireTask(task)
+    if (dueTasks.length === 0) return
+
+    // Skip if session is already busy — reschedule overdue tasks
+    const busy = await isSessionBusy()
+    if (busy) {
+      console.error(`[Scheduler] Session busy — skipping ${dueTasks.length} due task(s), will retry next poll`)
+      return
+    }
+
+    // Only fire one task per poll cycle to avoid flooding
+    const task = dueTasks[0]
+    await fireTask(task)
+
+    // Reschedule remaining overdue crons to next interval (don't stack them)
+    for (const t of dueTasks.slice(1)) {
+      if (t.type === 'cron') {
+        const nextRun = computeNextRun(t.cron_expression)
+        await db`UPDATE os_scheduled_tasks SET next_run_at = ${nextRun} WHERE id = ${t.id}`
+        console.error(`[Scheduler] Rescheduled overdue "${t.name}" to ${nextRun}`)
+      }
     }
   } catch (err) {
     console.error(`[Scheduler] Poll error: ${err.message}`)
