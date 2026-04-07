@@ -39,6 +39,18 @@
       "type": "stdio",
       "command": "/home/tate/ecodiaos/mcp-servers/scheduler/start.sh",
       "args": []
+    },
+    "neo4j": {
+      "command": "bash",
+      "args": [
+        "/home/tate/ecodiaos/mcp-servers/neo4j/start.sh"
+      ]
+    },
+    "sms": {
+      "command": "bash",
+      "args": [
+        "/home/tate/ecodiaos/mcp-servers/sms/start.sh"
+      ]
     }
   }
 }

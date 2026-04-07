@@ -1,0 +1,9 @@
+{
+  "name": "ecodia-neo4j",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "neo4j-driver": "^5.27.0",
+    "zod": "^3.24.0"
+  }
+}
