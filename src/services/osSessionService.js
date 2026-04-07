@@ -209,20 +209,28 @@ async function sendMessage(content) {
   const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && canBedrock)
 
   if (shouldUseBedrock && canBedrock) {
-    // Use AWS Bedrock as the provider — SDK supports this via settings.apiProvider
+    // Use AWS Bedrock as the provider.
+    // --bare disables OAuth/keychain reads so the SDK doesn't use the rate-limited
+    // Claude Max login from ~/.claude.json. 3P providers (Bedrock) use their own creds.
+    // --bare also disables CLAUDE.md auto-discovery, so we re-add the cwd via extraArgs.
     options.settings = {
       ...(typeof options.settings === 'object' ? options.settings : {}),
       apiProvider: 'bedrock',
     }
-    options.env = {
-      ...process.env,
-      AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
-      AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
-      AWS_REGION: env.AWS_REGION || 'us-east-1',
+    options.extraArgs = {
+      ...(options.extraArgs || {}),
+      bare: null,         // boolean flag — disables OAuth, forces 3P provider creds
+      'add-dir': cwd,     // re-enable CLAUDE.md from the cwd
     }
-    // Remove ANTHROPIC_API_KEY so SDK doesn't try first-party
-    delete options.env.ANTHROPIC_API_KEY
-    logger.info('OS Session using AWS Bedrock provider', { region: env.AWS_REGION || 'us-east-1', sticky: usingBedrock })
+    const bedrockEnv = { ...process.env }
+    delete bedrockEnv.ANTHROPIC_API_KEY
+    bedrockEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
+    bedrockEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
+    bedrockEnv.AWS_REGION = env.AWS_REGION || 'us-east-1'
+    options.env = bedrockEnv
+    // Can't resume cross-provider — clear resume if set
+    delete options.resume
+    logger.info('OS Session using AWS Bedrock provider (bare mode)', { region: env.AWS_REGION || 'us-east-1', sticky: usingBedrock })
   } else if (env.ANTHROPIC_API_KEY) {
     options.env = { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }
   }
