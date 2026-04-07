@@ -319,6 +319,67 @@ async function sendMessage(content) {
 
   } catch (err) {
     activeQuery = null
+    const isRateLimit = err.message?.includes('429') || err.message?.includes('rate') || err.message?.includes('overloaded') || err.message?.includes('capacity')
+
+    // Fallback to AWS Bedrock on rate limit if credentials are available
+    if (isRateLimit && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && !options._bedrockRetry) {
+      logger.info('OS Session rate limited - falling back to AWS Bedrock')
+      emitOutput({ type: 'assistant_text', content: '[Switching to Bedrock - rate limited on primary]' })
+
+      try {
+        options._bedrockRetry = true
+        options.env = {
+          ...process.env,
+          CLAUDE_CODE_USE_BEDROCK: '1',
+          AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+          AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+          AWS_REGION: process.env.AWS_REGION || 'us-east-1',
+        }
+        // Remove Anthropic key so SDK picks up Bedrock
+        delete options.env.ANTHROPIC_API_KEY
+
+        const retryQ = queryFn({ prompt: content, options })
+        activeQuery = retryQ
+
+        const retryText = []
+        for await (const msg of retryQ) {
+          if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
+            ccSessionId = msg.session_id
+            await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
+          }
+          if (msg.type === 'assistant') {
+            const text = extractTextFromContent(msg.message?.content)
+            if (text) {
+              const safeText = secretSafety.scrubSecrets(text)
+              retryText.push(safeText)
+              await appendLog(dbSessionId, safeText)
+              emitOutput({ type: 'assistant_text', content: safeText })
+            }
+          }
+          if (msg.type === 'result' && msg.result) {
+            const safeResult = secretSafety.scrubSecrets(msg.result)
+            if (safeResult.length > 0) retryText.push(safeResult)
+          }
+        }
+
+        activeQuery = null
+        await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
+        emitStatus('complete', { sessionId: dbSessionId, code: 0 })
+        broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
+        logger.info('OS Session Bedrock fallback complete', { sessionId: dbSessionId })
+
+        return {
+          sessionId: dbSessionId,
+          ccCliSessionId: ccSessionId,
+          code: 0,
+          text: retryText.join('\n\n'),
+        }
+      } catch (bedrockErr) {
+        activeQuery = null
+        logger.error('OS Session Bedrock fallback also failed', { error: bedrockErr.message })
+      }
+    }
+
     logger.error('OS Session SDK error', { error: err.message, stack: err.stack })
 
     emitOutput({ type: 'error', content: err.message })
