@@ -33,14 +33,21 @@ async function poll() {
     const newTx = result?.newTransactions ?? result?.count ?? 0
     if (newTx > 0) nextDelayMs = 60 * 60_000
   } catch (e) {
-    logger.error('Finance poller failed', { error: e.message, stack: e.stack })
-    await recordHeartbeat('finance', 'error', e.message)
-    await createNotification({
-      type: 'system',
-      message: `Finance poller failed: ${e.message}`,
-      link: '/finance',
-      metadata: { error: e.message, worker: 'financePoller' },
-    }).catch(notifErr => logger.error('Failed to create finance poller notification', { error: notifErr.message }))
+    // If Xero isn't connected yet, log quietly — not a system error
+    const isNotConnected = e.message?.includes('No Xero tokens') || e.message?.includes('OAuth flow')
+    if (isNotConnected) {
+      logger.debug('Finance poller skipped — Xero not connected', { error: e.message })
+      await recordHeartbeat('finance', 'inactive', e.message)
+    } else {
+      logger.error('Finance poller failed', { error: e.message, stack: e.stack })
+      await recordHeartbeat('finance', 'error', e.message)
+      await createNotification({
+        type: 'system',
+        message: `Finance poller failed: ${e.message}`,
+        link: '/finance',
+        metadata: { error: e.message, worker: 'financePoller' },
+      }).catch(notifErr => logger.error('Failed to create finance poller notification', { error: notifErr.message }))
+    }
     nextDelayMs = 2 * 60 * 60_000  // retry in 2h on error
   }
 
@@ -52,13 +59,16 @@ async function heartbeat() {
     await xeroService.getValidAccessToken()
     logger.info('Xero token heartbeat OK')
   } catch (e) {
-    logger.error('Xero token heartbeat failed — may need to re-authenticate', { error: e.message })
-    await createNotification({
-      type: 'system',
-      message: 'Xero token heartbeat failed — re-authentication may be required',
-      link: '/settings',
-      metadata: { error: e.message },
-    }).catch(notifErr => logger.error('Failed to create heartbeat notification', { error: notifErr.message }))
+    const isNotConnected = e.message?.includes('No Xero tokens') || e.message?.includes('OAuth flow')
+    if (!isNotConnected) {
+      logger.error('Xero token heartbeat failed — may need to re-authenticate', { error: e.message })
+      await createNotification({
+        type: 'system',
+        message: 'Xero token heartbeat failed — re-authentication may be required',
+        link: '/settings',
+        metadata: { error: e.message },
+      }).catch(notifErr => logger.error('Failed to create heartbeat notification', { error: notifErr.message }))
+    }
   }
   if (running) heartbeatTimer = setTimeout(heartbeat, 6 * 60 * 60_000)
 }

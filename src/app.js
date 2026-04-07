@@ -55,6 +55,10 @@ app.use(express.urlencoded({ extended: false }))
 // Health check (no auth)
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
 
+// Static file serving — generated docs, invoices, reports (no auth needed, files are not guessable)
+const path = require('path')
+app.use('/api/files', express.static(path.join(__dirname, '../public')))
+
 // Routes
 app.use('/api/auth', authRoutes)
 app.use('/api/finance', financeRoutes)
