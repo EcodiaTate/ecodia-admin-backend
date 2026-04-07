@@ -65,7 +65,7 @@ function _isUsageExhausted(text) {
   const t = (text || '').toLowerCase()
   return t.includes('429') || t.includes('rate limit') || t.includes('overloaded') ||
     t.includes('capacity') || t.includes('out of extra usage') || t.includes('out of usage') ||
-    t.includes('weekly') || t.includes('resets ')
+    t.includes('weekly') || t.includes('resets ') || t.includes('not logged in')
 }
 
 // We lazy-import the ESM Agent SDK since the backend is CJS
@@ -210,27 +210,33 @@ async function sendMessage(content) {
 
   if (shouldUseBedrock && canBedrock) {
     // Use AWS Bedrock as the provider.
-    // --bare disables OAuth/keychain reads so the SDK doesn't use the rate-limited
-    // Claude Max login from ~/.claude.json. 3P providers (Bedrock) use their own creds.
-    // --bare also disables CLAUDE.md auto-discovery, so we re-add the cwd via extraArgs.
+    // The CLI auto-detects Bedrock from model IDs like "us.anthropic.claude-*".
+    // AWS creds go in settings.env so the child process picks them up.
+    // We also explicitly set apiProvider and strip ANTHROPIC_API_KEY so the CLI
+    // doesn't try to use the rate-limited OAuth account from ~/.claude.json.
+    const bedrockModel = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-v1'
+    options.model = bedrockModel
     options.settings = {
       ...(typeof options.settings === 'object' ? options.settings : {}),
       apiProvider: 'bedrock',
+      env: {
+        AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+        AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+        AWS_REGION: env.AWS_REGION || 'us-east-1',
+        CLAUDE_CODE_USE_BEDROCK: '1',
+      },
     }
-    options.extraArgs = {
-      ...(options.extraArgs || {}),
-      bare: null,         // boolean flag — disables OAuth, forces 3P provider creds
-      'add-dir': cwd,     // re-enable CLAUDE.md from the cwd
-    }
+    // Process env: ensure AWS creds present, ANTHROPIC_API_KEY absent
     const bedrockEnv = { ...process.env }
     delete bedrockEnv.ANTHROPIC_API_KEY
     bedrockEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
     bedrockEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
     bedrockEnv.AWS_REGION = env.AWS_REGION || 'us-east-1'
+    bedrockEnv.CLAUDE_CODE_USE_BEDROCK = '1'
     options.env = bedrockEnv
     // Can't resume cross-provider — clear resume if set
     delete options.resume
-    logger.info('OS Session using AWS Bedrock provider (bare mode)', { region: env.AWS_REGION || 'us-east-1', sticky: usingBedrock })
+    logger.info('OS Session using AWS Bedrock provider', { model: bedrockModel, region: env.AWS_REGION || 'us-east-1', sticky: usingBedrock })
   } else if (env.ANTHROPIC_API_KEY) {
     options.env = { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }
   }
@@ -378,7 +384,7 @@ async function sendMessage(content) {
 
     const errMsg = err.message || ''
     const exhausted = _isUsageExhausted(errMsg)
-    console.error('OS_SESSION_CATCH', JSON.stringify({ errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock }))
+    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock })
 
     // On usage exhaustion: flip to Bedrock and retry this message once
     if (exhausted && canBedrock && !usingBedrock) {
