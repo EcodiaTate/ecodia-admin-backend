@@ -60,6 +60,14 @@ let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
 let usingBedrock = false        // flipped to true after a 429 triggers Bedrock fallback
 
+// Detect usage exhaustion / rate limit errors from any error string
+function _isUsageExhausted(text) {
+  const t = (text || '').toLowerCase()
+  return t.includes('429') || t.includes('rate limit') || t.includes('overloaded') ||
+    t.includes('capacity') || t.includes('out of extra usage') || t.includes('out of usage') ||
+    t.includes('weekly') || t.includes('resets ')
+}
+
 // We lazy-import the ESM Agent SDK since the backend is CJS
 let _query = null
 async function getQuery() {
@@ -294,6 +302,21 @@ async function sendMessage(content) {
               sessionTokenUsage.input = msg.usage.input_tokens || sessionTokenUsage.input
               sessionTokenUsage.output = msg.usage.output_tokens || sessionTokenUsage.output
             }
+
+            // Check for rate-limit / usage-exhaustion errors in the result
+            if (msg.is_error) {
+              const errTexts = (msg.errors || []).join(' ') + ' ' + (msg.result || '') + ' ' + (msg.stop_reason || '')
+              if (_isUsageExhausted(errTexts) && canBedrock && !usingBedrock) {
+                usingBedrock = true
+                ccSessionId = null
+                activeQuery = null
+                logger.warn('OS Session usage exhausted — switching to AWS Bedrock', { errors: msg.errors })
+                emitOutput({ type: 'system', content: 'Usage exhausted on primary API. Switching to AWS Bedrock...' })
+                // Break out of the stream loop — the recursive retry happens after
+                throw { _bedrockRetry: true, message: content }
+              }
+            }
+
             if (msg.result) {
               const safeResult = secretSafety.scrubSecrets(msg.result)
               if (!collectedText.includes(safeResult) && safeResult.length > 0) {
@@ -317,6 +340,7 @@ async function sendMessage(content) {
             break
         }
       } catch (msgErr) {
+        if (msgErr._bedrockRetry) throw msgErr  // let sentinel propagate to outer catch
         logger.debug('OS Session message processing error', { error: msgErr.message })
       }
     }
@@ -338,17 +362,21 @@ async function sendMessage(content) {
 
   } catch (err) {
     activeQuery = null
-    const errMsg = err.message || ''
-    const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('rate limit') || errMsg.toLowerCase().includes('overloaded') || errMsg.toLowerCase().includes('capacity') || errMsg.toLowerCase().includes('weekly')
 
-    // On rate limit: flip to Bedrock and retry this message once
-    if (isRateLimit && canBedrock && !usingBedrock) {
+    // Sentinel from the result handler — Bedrock flag already set, just retry
+    if (err._bedrockRetry) {
+      return sendMessage(err.message)
+    }
+
+    const errMsg = err.message || ''
+
+    // On usage exhaustion: flip to Bedrock and retry this message once
+    if (_isUsageExhausted(errMsg) && canBedrock && !usingBedrock) {
       usingBedrock = true
-      // Can't resume a session cross-provider — start fresh on Bedrock
       ccSessionId = null
-      logger.warn('OS Session rate limited on Anthropic API — switching to AWS Bedrock and retrying', { error: errMsg })
-      emitOutput({ type: 'system', content: 'Primary API rate limited. Switching to AWS Bedrock...' })
-      return sendMessage(content)  // recursive retry — will pick up usingBedrock=true
+      logger.warn('OS Session usage exhausted — switching to AWS Bedrock and retrying', { error: errMsg })
+      emitOutput({ type: 'system', content: 'Usage exhausted on primary API. Switching to AWS Bedrock...' })
+      return sendMessage(content)
     }
 
     // Other errors (or Bedrock also failed)
