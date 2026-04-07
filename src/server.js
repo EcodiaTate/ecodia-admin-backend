@@ -11,7 +11,7 @@ const logger = require('./config/logger')
 try {
   require('./capabilities/index')
 } catch (err) {
-  logger.error('Capability registry failed to boot — actions will not work', { error: err.message })
+  logger.error('Capability registry failed to boot - actions will not work', { error: err.message })
 }
 
 const server = createServer(app)
@@ -26,19 +26,19 @@ server.on('connection', (conn) => {
   conn.on('close', () => openConnections.delete(conn))
 })
 
-// Orphan cleanup has moved to factoryRunner — it owns CC session lifecycle.
+// Orphan cleanup has moved to factoryRunner - it owns CC session lifecycle.
 
-// Graceful shutdown — registered at module level so it fires regardless of
+// Graceful shutdown - registered at module level so it fires regardless of
 // whether the server has finished starting. PM2 sends SIGTERM on restart/delete
 // and SIGINT in some shutdown paths.
 let shuttingDown = false
 async function gracefulShutdown(signal) {
   if (shuttingDown) return // Prevent double-shutdown from SIGTERM+SIGINT race
   shuttingDown = true
-  logger.info(`${signal} received — shutting down`)
+  logger.info(`${signal} received - shutting down`)
 
   // CC sessions now run in the separate ecodia-factory process.
-  // No session drain needed — that's the entire point of the separation.
+  // No session drain needed - that's the entire point of the separation.
   // Shutdown the bridge subscriber cleanly.
   try {
     const bridge = require('./services/factoryBridge')
@@ -57,30 +57,30 @@ async function gracefulShutdown(signal) {
     try { conn.destroy() } catch {}
   }
 
-  // Close the DB connection pool — prevents connection leaks across restarts
+  // Close the DB connection pool - prevents connection leaks across restarts
   // and ensures in-flight queries complete before the process exits.
   try { await db.end({ timeout: 5 }) } catch {}
 
   server.close(() => process.exit(0))
 
-  // Hard exit fallback — if server.close() still hangs (e.g. connections
+  // Hard exit fallback - if server.close() still hangs (e.g. connections
   // that survive destroy()), exit before PM2's 12s kill_timeout SIGKILLs us
   setTimeout(() => {
-    logger.warn('Graceful shutdown timed out — forcing exit')
+    logger.warn('Graceful shutdown timed out - forcing exit')
     process.exit(1)
   }, 11000).unref()
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
-// Crash handlers — without these, uncaught errors kill the process
+// Crash handlers - without these, uncaught errors kill the process
 // without triggering SIGTERM/SIGINT, leaving sessions orphaned in DB.
 process.on('uncaughtException', async (err) => {
-  logger.error('Uncaught exception — triggering graceful shutdown', { error: err.message, stack: err.stack })
+  logger.error('Uncaught exception - triggering graceful shutdown', { error: err.message, stack: err.stack })
   await gracefulShutdown('uncaughtException').catch(() => {})
   process.exit(1)
 })
-// Track unhandled rejections — crash only on repeated rapid-fire failures
+// Track unhandled rejections - crash only on repeated rapid-fire failures
 // (a sign of systemic breakage, not transient hiccups during shutdown/restart).
 let _unhandledRejectionCount = 0
 let _unhandledRejectionWindowStart = Date.now()
@@ -92,10 +92,10 @@ process.on('unhandledRejection', (reason) => {
   const stack = reason instanceof Error ? reason.stack : undefined
   logger.error('Unhandled rejection (non-fatal)', { error: msg, stack })
 
-  // If we're already shutting down, swallow — don't compound the shutdown
+  // If we're already shutting down, swallow - don't compound the shutdown
   if (shuttingDown) return
 
-  // Track rate — crash only if rejections are piling up (systemic failure)
+  // Track rate - crash only if rejections are piling up (systemic failure)
   const now = Date.now()
   if (now - _unhandledRejectionWindowStart > REJECTION_CRASH_WINDOW_MS) {
     _unhandledRejectionCount = 0
@@ -104,7 +104,7 @@ process.on('unhandledRejection', (reason) => {
   _unhandledRejectionCount++
 
   if (REJECTION_CRASH_THRESHOLD > 0 && _unhandledRejectionCount >= REJECTION_CRASH_THRESHOLD) {
-    logger.error(`${_unhandledRejectionCount} unhandled rejections in ${REJECTION_CRASH_WINDOW_MS}ms — triggering shutdown`)
+    logger.error(`${_unhandledRejectionCount} unhandled rejections in ${REJECTION_CRASH_WINDOW_MS}ms - triggering shutdown`)
     gracefulShutdown('unhandledRejection:flood').catch(() => {})
   }
 })
@@ -124,7 +124,7 @@ server.listen(env.PORT, async () => {
       // Session completed → trigger oversight pipeline
       [bridge.CHANNELS.SESSION_COMPLETE]: async (data) => {
         try {
-          logger.info(`Factory session ${data.sessionId} completed (${data.status}) — triggering oversight`)
+          logger.info(`Factory session ${data.sessionId} completed (${data.status}) - triggering oversight`)
           const oversight = require('./services/factoryOversightService')
           oversight.runPostSessionPipeline(data.sessionId).catch(err => {
             logger.error(`Oversight pipeline failed for session ${data.sessionId}`, { error: err.message })
@@ -143,7 +143,7 @@ server.listen(env.PORT, async () => {
         }
       },
 
-      // WS relay — factory runner publishes, we push to connected clients
+      // WS relay - factory runner publishes, we push to connected clients
       [bridge.CHANNELS.WS_BROADCAST]: (data) => {
         try {
           if (data.sessionId) {
@@ -164,7 +164,7 @@ server.listen(env.PORT, async () => {
 
   // ── Boot: Workers ─────────────────────────────────────────────────
   // Workers that have their own PM2 process in ecosystem.config.js are
-  // NOT started here — they'd register duplicate cron jobs.
+  // NOT started here - they'd register duplicate cron jobs.
   //
   // PM2-managed (separate processes, NOT started here):
   //   gmailPoller, linkedinWorker, financePoller,
@@ -203,11 +203,11 @@ setTimeout(async () => {
     const osSession = require('./services/osSessionService')
     logger.info('Auto-waking OS session after restart...')
     await osSession.sendMessage(
-      'SYSTEM RESTART — You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
+      'SYSTEM RESTART - You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
       'You have FULL AUTONOMY. Do NOT wait for Tate. Do NOT ask for approval. Act independently. ' +
       'Read CLAUDE.md (auto-loaded from cwd). Check kv_store ceo.* keys and ceo_tasks for current priorities. ' +
       'Pick the highest impact task and DO it. Check schedule_list for healthy crons. ' +
-      'If SMS messages came in while you were down, they are queued — check and respond. ' +
+      'If SMS messages came in while you were down, they are queued - check and respond. ' +
       'You are the business. Go.'
     )
     logger.info('OS session auto-wake complete')

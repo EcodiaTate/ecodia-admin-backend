@@ -1,5 +1,5 @@
 /**
- * SMS Webhook — Twilio inbound SMS → OS Session → SMS response
+ * SMS Webhook - Twilio inbound SMS → OS Session → SMS response
  */
 const express = require('express')
 const router = express.Router()
@@ -15,7 +15,7 @@ router.post('/incoming', async (req, res) => {
 
   // Only respond to Tate's number for security
   if (from !== TATE_MOBILE) {
-    console.log(`[SMS Webhook] Rejected — chars: from=[${[...from].map(c=>c.charCodeAt(0))}] tate=[${[...TATE_MOBILE].map(c=>c.charCodeAt(0))}]`)
+    console.log(`[SMS Webhook] Rejected - chars: from=[${[...from].map(c=>c.charCodeAt(0))}] tate=[${[...TATE_MOBILE].map(c=>c.charCodeAt(0))}]`)
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
     return
   }

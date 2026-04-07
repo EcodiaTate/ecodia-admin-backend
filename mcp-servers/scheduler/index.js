@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Scheduler MCP Server — persistent, database-backed task scheduling.
+ * Scheduler MCP Server - persistent, database-backed task scheduling.
  * 
  * Two responsibilities:
  * 1. MCP tools for creating/managing scheduled tasks
@@ -152,7 +152,7 @@ server.tool('schedule_run_now', 'Fire a task immediately', {
   return { content: [{ type: 'text', text: `Task "${task.name}" fired.` }] }
 })
 
-// ── Fire a task — POST to OS session ──
+// ── Fire a task - POST to OS session ──
 
 async function fireTask(task) {
   try {
@@ -176,7 +176,7 @@ async function fireTask(task) {
         result = ${JSON.stringify(result).slice(0, 500)}
       WHERE id = ${task.id}`
     } else {
-      // One-shot or chain — mark completed
+      // One-shot or chain - mark completed
       await db`UPDATE os_scheduled_tasks SET 
         last_run_at = ${now}, 
         run_count = run_count + 1, 
@@ -189,10 +189,10 @@ async function fireTask(task) {
       for (const c of chained) await fireTask(c)
     }
     
-    console.error(`[Scheduler] Fired "${task.name}" — success`)
+    console.error(`[Scheduler] Fired "${task.name}" - success`)
   } catch (err) {
     console.error(`[Scheduler] Failed to fire "${task.name}": ${err.message}`)
-    // Don't mark as failed — just skip this run, try next time
+    // Don't mark as failed - just skip this run, try next time
     if (task.type === 'cron') {
       const nextRun = computeNextRun(task.cron_expression)
       await db`UPDATE os_scheduled_tasks SET next_run_at = ${nextRun}, result = ${err.message} WHERE id = ${task.id}`
@@ -200,7 +200,7 @@ async function fireTask(task) {
   }
 }
 
-// ── Polling loop — check for due tasks every 30s ──
+// ── Polling loop - check for due tasks every 30s ──
 
 async function isSessionBusy() {
   try {
@@ -224,10 +224,10 @@ async function pollOnce() {
     `
     if (dueTasks.length === 0) return
 
-    // Skip if session is already busy — reschedule overdue tasks
+    // Skip if session is already busy - reschedule overdue tasks
     const busy = await isSessionBusy()
     if (busy) {
-      console.error(`[Scheduler] Session busy — skipping ${dueTasks.length} due task(s), will retry next poll`)
+      console.error(`[Scheduler] Session busy - skipping ${dueTasks.length} due task(s), will retry next poll`)
       return
     }
 
