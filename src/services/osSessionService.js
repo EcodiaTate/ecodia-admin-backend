@@ -11,11 +11,45 @@
  * Messages stream to the frontend via WebSocket in real-time as they arrive.
  */
 
+const fs = require('fs')
+const path = require('path')
 const db = require('../config/db')
 const logger = require('../config/logger')
 const env = require('../config/env')
 const { broadcast } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
+
+/**
+ * Load MCP servers from .mcp.json in the given cwd and return them in the shape
+ * the Agent SDK expects. Passing mcpServers programmatically bypasses the CLI
+ * trust prompt that otherwise appears on every new project directory.
+ */
+function loadMcpServersFromCwd(cwd) {
+  try {
+    const p = path.join(cwd, '.mcp.json')
+    if (!fs.existsSync(p)) {
+      logger.warn('No .mcp.json found in OS session cwd', { cwd })
+      return {}
+    }
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8'))
+    const servers = raw.mcpServers || {}
+    // Normalize: SDK accepts { type: 'stdio', command, args, env } entries
+    const normalized = {}
+    for (const [name, cfg] of Object.entries(servers)) {
+      normalized[name] = {
+        type: cfg.type || 'stdio',
+        command: cfg.command,
+        args: cfg.args || [],
+        ...(cfg.env ? { env: cfg.env } : {}),
+      }
+    }
+    logger.info('Loaded MCP servers for OS session', { count: Object.keys(normalized).length, names: Object.keys(normalized) })
+    return normalized
+  } catch (err) {
+    logger.error('Failed to load .mcp.json for OS session', { cwd, error: err.message })
+    return {}
+  }
+}
 
 // Token tracking
 const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000', 10)
@@ -135,6 +169,7 @@ async function sendMessage(content) {
   emitOutput({ type: 'user', content })
 
   // Build SDK options
+  const mcpServers = loadMcpServersFromCwd(cwd)
   const options = {
     cwd,
     permissionMode: 'bypassPermissions',
@@ -146,6 +181,13 @@ async function sendMessage(content) {
       preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
     },
     model: env.OS_SESSION_MODEL || undefined,
+    // Pass MCP servers programmatically — bypasses the .mcp.json trust prompt.
+    // SDK-provided servers are implicitly trusted, so no per-project consent needed.
+    mcpServers,
+    // Allow all tools from all MCP servers without per-call approval
+    allowedTools: Object.keys(mcpServers).length > 0
+      ? Object.keys(mcpServers).map(name => `mcp__${name}`)
+      : undefined,
   }
 
   // Resume existing session or start fresh
