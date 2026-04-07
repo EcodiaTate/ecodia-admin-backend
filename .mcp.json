@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "google-workspace": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/google-workspace/start.sh",
+      "args": []
+    },
+    "supabase": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/supabase/start.sh",
+      "args": []
+    },
+    "vps": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/vps/start.sh",
+      "args": []
+    },
+    "business-tools": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/business-tools/start.sh",
+      "args": []
+    },
+    "github": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/github/start.sh",
+      "args": []
+    },
+    "stripe": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/stripe/start.sh",
+      "args": []
+    },
+    "bookkeeping": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/bookkeeping/start.sh",
+      "args": []
+    },
+    "scheduler": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/scheduler/start.sh",
+      "args": []
+    }
+  }
+}
