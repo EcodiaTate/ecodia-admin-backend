@@ -357,10 +357,15 @@ async function ingestSessionFile(jsonlPath, projectKey = OS_PROJECT_KEY) {
  * Only processes .jsonl files (skips plain UUID dirs which are older format).
  *
  * @param {string} [projectKey]  Defaults to OS_PROJECT_KEY
+ * @param {object} [opts]
+ * @param {number} [opts.recentHours]  If set, only consider files modified within this many hours.
+ *   Useful for cheap fire-and-forget calls after an OS session exchange — the full backlog
+ *   scan runs in the codebase index worker cycle instead.
  * @returns {{ processed: number, totalChunks: number }}
  */
-async function ingestProjectDir(projectKey = OS_PROJECT_KEY) {
+async function ingestProjectDir(projectKey = OS_PROJECT_KEY, opts = {}) {
   const dir = path.join(CC_PROJECTS_DIR, projectKey)
+  const cutoffMs = opts.recentHours ? Date.now() - opts.recentHours * 3_600_000 : 0
 
   if (!fs.existsSync(dir)) {
     logger.debug('Session memory: project dir not found', { dir })
@@ -383,7 +388,9 @@ async function ingestProjectDir(projectKey = OS_PROJECT_KEY) {
     } catch {
       return { f, mtime: 0 }
     }
-  }).sort((a, b) => b.mtime - a.mtime)
+  })
+    .filter(x => !cutoffMs || x.mtime >= cutoffMs)
+    .sort((a, b) => b.mtime - a.mtime)
 
   let processed = 0
   let totalChunks = 0

@@ -435,8 +435,9 @@ async function sendMessage(content) {
       .then(energy => broadcast('os-session:energy', energy))
       .catch(() => {})
 
-    // Ingest session transcript into persistent memory (fire-and-forget)
-    sessionMemory.ingestProjectDir()
+    // Ingest current session transcript into persistent memory (fire-and-forget, recent files only)
+    // Full backlog scan runs in the codebase index worker cycle.
+    sessionMemory.ingestProjectDir(undefined, { recentHours: 2 })
       .catch(err => logger.debug('Session memory ingest skipped', { error: err.message }))
 
     logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId })

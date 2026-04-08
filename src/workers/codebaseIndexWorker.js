@@ -55,8 +55,15 @@ async function runIndexCycle() {
 
     // Catch up any session memory chunks that failed to embed
     await sessionMemory.embedStaleChunks(50)
+
+    // Ingest new/changed JSONL session files into persistent memory (full backlog scan)
+    const memResult = await sessionMemory.ingestProjectDir()
+    if (memResult.processed > 0) {
+      logger.info(`Session memory: ingested ${memResult.processed} files (${memResult.totalChunks} chunks)`)
+    }
+
     await recordHeartbeat('codebase_index', 'active')
-    return { indexed: totalIndexed, embedded }
+    return { indexed: totalIndexed, embedded, memIngested: memResult.processed }
   } catch (err) {
     logger.error('Codebase index cycle failed', { error: err.message })
     await recordHeartbeat('codebase_index', 'error', err.message)
@@ -76,7 +83,7 @@ function jitter(ms) {
 
 async function loop() {
   const result = await runIndexCycle()
-  const hadWork = (result?.indexed ?? 0) > 0 || (result?.embedded ?? 0) > 0
+  const hadWork = (result?.indexed ?? 0) > 0 || (result?.embedded ?? 0) > 0 || (result?.memIngested ?? 0) > 0
   const hadError = !!result?.error
 
   let nextMs
