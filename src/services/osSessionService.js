@@ -24,6 +24,7 @@ const env = require('../config/env')
 const { broadcast } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
 const usageEnergy = require('./usageEnergyService')
+const sessionMemory = require('./sessionMemoryService')
 
 // Fire a quota-check on startup to get real usage % immediately
 usageEnergy.refreshQuotaCheck()
@@ -199,6 +200,18 @@ async function sendMessage(content) {
   await appendLog(dbSessionId, `[USER] ${content}`)
   emitOutput({ type: 'user', content })
 
+  // Inject relevant past conversation memory (non-blocking — skip on error)
+  let promptWithMemory = content
+  try {
+    const memoryContext = await sessionMemory.searchMemory(content)
+    if (memoryContext) {
+      promptWithMemory = `${memoryContext}\n\n---\n\n${content}`
+      logger.debug('OS Session: injected session memory context', { chars: memoryContext.length })
+    }
+  } catch (memErr) {
+    logger.debug('OS Session: memory search skipped', { error: memErr.message })
+  }
+
   // Build SDK options
   const mcpServers = loadMcpServersFromCwd(cwd)
   const options = {
@@ -274,7 +287,7 @@ async function sendMessage(content) {
   let newCcSessionId = ccSessionId
 
   try {
-    const q = queryFn({ prompt: content, options })
+    const q = queryFn({ prompt: promptWithMemory, options })
     activeQuery = q
 
     // Stream all messages from the SDK
@@ -421,6 +434,10 @@ async function sendMessage(content) {
       .then(() => usageEnergy.getEnergy())
       .then(energy => broadcast('os-session:energy', energy))
       .catch(() => {})
+
+    // Ingest session transcript into persistent memory (fire-and-forget)
+    sessionMemory.ingestProjectDir()
+      .catch(err => logger.debug('Session memory ingest skipped', { error: err.message }))
 
     logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId })
 

@@ -1,6 +1,7 @@
 const logger = require('../config/logger')
 const db = require('../config/db')
 const codebaseIntelligence = require('../services/codebaseIntelligenceService')
+const sessionMemory = require('../services/sessionMemoryService')
 const { recordHeartbeat } = require('./heartbeat')
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -51,6 +52,9 @@ async function runIndexCycle() {
     if (embedded > 0) {
       logger.info(`Embedded ${embedded} stale code chunks`)
     }
+
+    // Catch up any session memory chunks that failed to embed
+    await sessionMemory.embedStaleChunks(50)
     await recordHeartbeat('codebase_index', 'active')
     return { indexed: totalIndexed, embedded }
   } catch (err) {

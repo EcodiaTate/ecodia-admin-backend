@@ -204,6 +204,12 @@ const envSchema = z.object({
   ACTION_QUEUE_SUPPRESSION_THRESHOLD: z.string().default('0'),    // 0 = disabled (never auto-suppress)
   ACTION_QUEUE_DISMISSAL_SUPPRESSION_RATE: z.string().default('0.7'),
   ACTION_QUEUE_TITLE_SIMILARITY_THRESHOLD: z.string().default('0.5'),
+  // Session memory — persistent conversation recall across OS session resets
+  CC_PROJECTS_DIR: z.string().default(''),              // path to ~/.claude/projects (auto-detected if empty)
+  CC_OS_PROJECT_KEY: z.string().default('-home-tate-ecodiaos'),  // subdir within CC_PROJECTS_DIR for OS session
+  SESSION_MEMORY_MAX_CHUNK_CHARS: z.string().default('3000'),   // max chars per memory chunk
+  SESSION_MEMORY_SEARCH_K: z.string().default('5'),             // top-K results returned by searchMemory
+  SESSION_MEMORY_MIN_SIM: z.string().default('0.35'),           // min cosine similarity for a match
   // CC context budget — 0 = unlimited (default lets entire context flow)
   CC_PROMPT_BUDGET_CHARS: z.string().default('0'),
   CC_STDERR_MAX_LINES: z.string().default('0'),                  // 0 = unlimited stderr capture
