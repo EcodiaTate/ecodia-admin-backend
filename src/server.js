@@ -50,6 +50,11 @@ async function gracefulShutdown(signal) {
     maintenance.stop()
   } catch {}
 
+  try {
+    const schedulerPoller = require('./services/schedulerPollerService')
+    schedulerPoller.stop()
+  } catch {}
+
   // Force-destroy open connections (especially WebSockets) so server.close()
   // doesn't hang waiting for them to end. Without this, PM2 SIGKILLs the
   // process at kill_timeout and sessions that weren't yet marked in DB become orphans.
@@ -193,6 +198,18 @@ server.listen(env.PORT, async () => {
     } catch (err) {
       logger.debug(`${w.name} not started`, { error: err.message })
     }
+  }
+
+  // ── Boot: Scheduler Poller ────────────────────────────────────────
+  // Persistent polling loop for os_scheduled_tasks. The scheduler MCP server
+  // only polls while a Claude Code session is active (stdio process lifetime).
+  // This poller runs 24/7 inside ecodia-api so crons fire even when no session
+  // is active — critical for autonomous operation while Tate is away.
+  try {
+    const schedulerPoller = require('./services/schedulerPollerService')
+    schedulerPoller.start()
+  } catch (err) {
+    logger.warn('Scheduler poller failed to start', { error: err.message })
   }
 })
 

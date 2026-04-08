@@ -146,6 +146,7 @@ FORMAT: JSON array of blocks. Types:
   save doc: {"type":"update_doc","docKey":"...","title":"...","content":"...","workspace":"..."}
   update fact: {"type":"update_context","key":"...","value":"..."}
   ask human: {"type":"question","content":"..."} — pauses and asks the human
+  download: {"type":"download_button","label":"Download Invoice","url":"/api/files/invoice.pdf","filename":"invoice.pdf"} — file download button (url is VPS path or full URL)
   done: {"type":"done","summary":"..."} — signals task completion
 
 Return ONLY the JSON array. Execute immediately. Multiple actions + delegations per response OK. After results come back, continue or signal done.`
