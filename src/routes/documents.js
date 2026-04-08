@@ -174,7 +174,7 @@ function buildHtml(title, type, sections, metadata) {
         <h1 class="inv-title">${esc(title)}</h1>
       </div>
       <div class="meta">
-        ${(metadata || []).map(m => `<div>${m.includes(':') ? '<strong>' + esc(m.split(':')[0]) + ':</strong>' + esc(m.split(':').slice(1).join(':')) : esc(m)}</div>`).join('')}
+        ${(metadata || []).map(m => { const s = String(m); return `<div>${s.includes(':') ? '<strong>' + esc(s.split(':')[0]) + ':</strong>' + esc(s.split(':').slice(1).join(':')) : esc(s)}</div>`; }).join('')}
       </div>
     </div>
     ${sections.map(s => renderSection(s)).join('')}
