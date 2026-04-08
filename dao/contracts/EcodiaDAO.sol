@@ -10,7 +10,10 @@ pragma solidity ^0.8.20;
  *      This contract serves as the publicly available identifier of the DAO
  *      and records membership interests and management structure.
  *
- *      Deployed on Polygon for low cost and permanence.
+ *      Deployed on Base for low cost and permanence.
+ *      Contract address: 0xE5B7F43d70dC5059c1C03BA8B27b3E6CcC3e2D54
+ *      Chain: Base Mainnet (chainId 8453)
+ *      Admin/human member wallet: 0x3B0D2c36Cda34E9a879Ed8C06e944C4d61643Bd
  */
 contract EcodiaDAO {
 
