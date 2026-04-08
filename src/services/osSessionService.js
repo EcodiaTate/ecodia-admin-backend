@@ -309,6 +309,33 @@ async function sendMessage(content) {
             break
           }
 
+          // ─── User message — contains tool_result blocks after tool calls ─
+          case 'user': {
+            const content = msg.message?.content
+            if (!Array.isArray(content)) break
+            for (const block of content) {
+              if (block.type === 'tool_result') {
+                // Extract readable result text (truncate large blobs)
+                let resultText = ''
+                if (typeof block.content === 'string') {
+                  resultText = block.content
+                } else if (Array.isArray(block.content)) {
+                  resultText = block.content
+                    .filter(b => b.type === 'text')
+                    .map(b => b.text)
+                    .join('\n')
+                }
+                if (resultText.length > 2000) resultText = resultText.slice(0, 2000) + '\n… (truncated)'
+                emitOutput({
+                  type: 'tool_result',
+                  tool_use_id: block.tool_use_id,
+                  content: resultText || '(no output)',
+                })
+              }
+            }
+            break
+          }
+
           // ─── Full assistant message — extract text, broadcast ─
           case 'assistant': {
             const text = extractTextFromContent(msg.message?.content)
