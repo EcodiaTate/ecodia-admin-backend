@@ -80,6 +80,10 @@ const envSchema = z.object({
   HEALTH_CHECK_TIMEOUT_MS: z.string().default('0'),    // 0 = 60000ms
   HEALTH_CHECK_RETRIES: z.string().default('0'),        // 0 = 3
   HEALTH_CHECK_INTERVAL_MS: z.string().default('0'),   // 0 = 10000ms
+  // Claude Max weekly energy budget
+  CLAUDE_WEEKLY_INPUT_CAP:  z.string().default('2000000'),  // weighted input token cap per week
+  CLAUDE_WEEKLY_OUTPUT_CAP: z.string().default('200000'),   // output token cap per week (weighted ×10)
+  CLAUDE_OUTPUT_WEIGHT:     z.string().default('10'),        // output tokens cost this many × input tokens
   // Vital signs tuning
   ORGANISM_HEALTH_CHECK_INTERVAL_MS: z.string().default('0'),   // 0 = 15000ms
   ORGANISM_MAX_CONSECUTIVE_FAILURES: z.string().default('0'),   // 0 = 3

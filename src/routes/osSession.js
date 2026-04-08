@@ -5,6 +5,7 @@
 const express = require('express')
 const router = express.Router()
 const osSession = require('../services/osSessionService')
+const usageEnergy = require('../services/usageEnergyService')
 
 // Send a message to the OS session (response streams via WebSocket)
 router.post('/message', async (req, res, next) => {
@@ -78,6 +79,23 @@ router.post('/compact', async (req, res, next) => {
     console.error('[OS Session /compact] Error:', err.message)
     next(err)
   }
+})
+
+// Get weekly energy snapshot (usage %, burn rate, model recommendation)
+router.get('/energy', async (_req, res, next) => {
+  try {
+    const energy = await usageEnergy.getEnergy()
+    res.json(energy)
+  } catch (err) { next(err) }
+})
+
+// Get historical weekly usage
+router.get('/energy/history', async (req, res, next) => {
+  try {
+    const weeks = parseInt(req.query.weeks || '4', 10)
+    const history = await usageEnergy.getWeeklyHistory(weeks)
+    res.json({ history })
+  } catch (err) { next(err) }
 })
 
 module.exports = router

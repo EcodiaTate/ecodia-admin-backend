@@ -23,6 +23,7 @@ const logger = require('../config/logger')
 const env = require('../config/env')
 const { broadcast } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
+const usageEnergy = require('./usageEnergyService')
 
 /**
  * Load MCP servers from .mcp.json in the given cwd and return them in the shape
@@ -303,9 +304,21 @@ async function sendMessage(content) {
             }
 
             // Track usage from per-turn data
+            // assistant messages report per-message token usage (not cumulative) —
+            // log each turn directly so we never double-count on session resume.
             if (msg.message?.usage) {
-              sessionTokenUsage.input = msg.message.usage.input_tokens || sessionTokenUsage.input
-              sessionTokenUsage.output = msg.message.usage.output_tokens || sessionTokenUsage.output
+              const turnInput  = msg.message.usage.input_tokens  || 0
+              const turnOutput = msg.message.usage.output_tokens || 0
+              sessionTokenUsage.input  += turnInput
+              sessionTokenUsage.output += turnOutput
+              if (turnInput > 0 || turnOutput > 0) {
+                const provider = usingBedrockSonnet ? 'bedrock_sonnet' : usingBedrock ? 'bedrock_opus' : 'claude_max'
+                const model    = usingBedrockSonnet ? BEDROCK_SONNET_MODEL : usingBedrock ? BEDROCK_OPUS_MODEL : (env.OS_SESSION_MODEL || null)
+                usageEnergy.logUsage({ sessionId: dbSessionId, source: 'os_session', provider, model, inputTokens: turnInput, outputTokens: turnOutput })
+                  .then(() => usageEnergy.getEnergy())
+                  .then(energy => broadcast('os-session:energy', energy))
+                  .catch(() => {})
+              }
             }
             break
           }
@@ -325,10 +338,12 @@ async function sendMessage(content) {
             break
           }
 
-          // ─── Result — session complete, capture usage ─────────
+          // ─── Result — session complete, capture final usage ───
           case 'result': {
             if (msg.usage) {
-              sessionTokenUsage.input = msg.usage.input_tokens || sessionTokenUsage.input
+              // result.usage is cumulative — use only for the threshold/compaction check,
+              // not for logging (individual turns already logged in 'assistant' case above)
+              sessionTokenUsage.input  = msg.usage.input_tokens  || sessionTokenUsage.input
               sessionTokenUsage.output = msg.usage.output_tokens || sessionTokenUsage.output
             }
 

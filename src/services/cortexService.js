@@ -3,6 +3,7 @@ const db = require('../config/db')
 const env = require('../config/env')
 const deepseekService = require('./deepseekService')
 const kg = require('./knowledgeGraphService')
+const usageEnergy = require('./usageEnergyService')
 
 // ═══════════════════════════════════════════════════════════════════════
 // CORTEX SERVICE
@@ -720,6 +721,8 @@ async function getSystemState() {
     staleEscalations: [],       // Factory escalations awaiting review too long
     // ─── Organism Cognitive State (deep self-knowledge) ─────────
     organismCognitive: null,    // Thread narrative, Nova goals, Equor drives, Evo learning, affect, benchmarks
+    // ─── Claude Energy Budget ─────────────────────────────────────
+    claudeEnergy: null,         // Weekly Claude Max usage %, burn rate, model recommendation
   }
 
   // ─── Local time for the human ──────────────────────────────────
@@ -1093,6 +1096,13 @@ async function getSystemState() {
     logger.debug('Cortex stale escalations failed', { error: err.message })
   }
 
+  // ─── Claude Energy Budget ───────────────────────────────────────────────
+  try {
+    state.claudeEnergy = await usageEnergy.getEnergy()
+  } catch (err) {
+    logger.debug('Cortex claude energy fetch failed', { error: err.message })
+  }
+
   return state
 }
 
@@ -1108,6 +1118,11 @@ function formatSystemState(state) {
     const lv = state.lastVisit
     const ago = formatDuration(lv.secondsSince)
     lines.push(`Last conversation: ${ago} ago${lv.lastTopic ? ` — "${lv.lastTopic.slice(0, 120)}"` : ''} (${lv.exchangeCount} exchanges)`)
+  }
+
+  // ─── Claude Energy Budget ──────────────────────────────────────
+  if (state.claudeEnergy) {
+    lines.push(state.claudeEnergy.summary)
   }
 
   // ─── Organism State ────────────────────────────────────────────
