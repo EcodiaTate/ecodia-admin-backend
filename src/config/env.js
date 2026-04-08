@@ -209,6 +209,16 @@ const envSchema = z.object({
   // Selfhood — introspection, goals, identity
   INTROSPECTION_CYCLE_INTERVAL: z.string().default('10'),        // run full introspection every N maintenance cycles (0 = disabled)
   GOAL_MAX_ACTIVE: z.string().default('10'),                      // max active goals before generation pauses (0 = unlimited)
+  // Supabase Storage
+  SUPABASE_URL: z.string().default(''),
+  SUPABASE_ANON_KEY: z.string().default(''),
+  SUPABASE_SERVICE_KEY: z.string().default(''),
+  // API base URL for absolute download links
+  API_BASE_URL: z.string().default('https://api.admin.ecodia.au'),
+  // OS Session tuning
+  OS_SESSION_MODEL: z.string().default(''),
+  OS_SESSION_CWD: z.string().default('/home/tate/ecodiaos'),
+  OS_SESSION_COMPACT_THRESHOLD: z.string().default('150000'),
 })
 
 const parsed = envSchema.safeParse(process.env)

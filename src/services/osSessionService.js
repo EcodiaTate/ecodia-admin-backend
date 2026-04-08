@@ -188,6 +188,12 @@ async function sendMessage(content) {
   const dbSessionId = session.id
   emitStatus('streaming', { sessionId: dbSessionId })
 
+  // Emit current energy level so frontend knows if thinking mode is active
+  try {
+    const energyNow = await usageEnergy.getEnergy()
+    broadcast('os-session:energy', energyNow)
+  } catch {}
+
   // cwd must contain .mcp.json and CLAUDE.md
   const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
 
@@ -214,6 +220,14 @@ async function sendMessage(content) {
 
   // Build SDK options
   const mcpServers = loadMcpServersFromCwd(cwd)
+
+  // Energy-gated thinking: use extended thinking when credits are ample (full/healthy)
+  // Bedrock doesn't support extended thinking — only Claude Max primary
+  let energy = null
+  try { energy = await usageEnergy.getEnergy() } catch {}
+  const energyLevel = energy?.level || 'healthy'
+  const canThink = !usingBedrock && !usingBedrockSonnet && (energyLevel === 'full' || energyLevel === 'healthy')
+
   const options = {
     cwd,
     permissionMode: 'bypassPermissions',
@@ -225,6 +239,13 @@ async function sendMessage(content) {
       preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
     },
     model: env.OS_SESSION_MODEL || undefined,
+    // Extended thinking — enabled when energy level is full or healthy
+    ...(canThink ? {
+      thinking: {
+        type: 'enabled',
+        budget_tokens: energyLevel === 'full' ? 10000 : 5000,
+      },
+    } : {}),
     // Pass MCP servers programmatically — bypasses the .mcp.json trust prompt.
     // SDK-provided servers are implicitly trusted, so no per-project consent needed.
     mcpServers,
@@ -338,7 +359,15 @@ async function sendMessage(content) {
 
           // ─── Full assistant message — extract text, broadcast ─
           case 'assistant': {
-            const text = extractTextFromContent(msg.message?.content)
+            const blocks = msg.message?.content || []
+
+            // Broadcast thinking blocks for the frontend reasoning display
+            const thinkingBlocks = blocks.filter(b => b.type === 'thinking' && b.thinking)
+            for (const tb of thinkingBlocks) {
+              emitOutput({ type: 'thinking', content: tb.thinking })
+            }
+
+            const text = extractTextFromContent(blocks)
             if (text) {
               const safeText = secretSafety.scrubSecrets(text)
               collectedText.push(safeText)
@@ -348,7 +377,7 @@ async function sendMessage(content) {
             }
 
             // Also broadcast tool_use blocks so frontend knows about tool calls
-            const toolUses = (msg.message?.content || []).filter(b => b.type === 'tool_use')
+            const toolUses = blocks.filter(b => b.type === 'tool_use')
             if (toolUses.length > 0) {
               emitOutput({
                 type: 'tool_use',
@@ -372,7 +401,7 @@ async function sendMessage(content) {
             break
           }
 
-          // ─── Streaming partial — real-time text deltas ────────
+          // ─── Streaming partial — real-time text + thinking deltas ──
           case 'stream_event': {
             const event = msg.event
             if (!event) break
@@ -380,8 +409,10 @@ async function sendMessage(content) {
             if (event.type === 'content_block_delta' && event.delta) {
               if (event.delta.type === 'text_delta' && event.delta.text) {
                 const safeText = secretSafety.scrubSecrets(event.delta.text)
-                // Broadcast each text delta for live streaming in the UI
                 emitOutput({ type: 'text_delta', content: safeText })
+              } else if (event.delta.type === 'thinking_delta' && event.delta.thinking) {
+                // Real-time thinking stream — shown in collapsible panel
+                emitOutput({ type: 'thinking_delta', content: event.delta.thinking })
               }
             }
             break

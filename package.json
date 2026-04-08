@@ -27,6 +27,7 @@
     "postgres": "^3.4.4",
     "puppeteer": "^24.40.0",
     "twilio": "^5.13.1",
+    "@supabase/supabase-js": "^2.49.0",
     "winston": "^3.14.0",
     "zod": "^3.23.0"
   },

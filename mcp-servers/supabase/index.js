@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
- * Supabase MCP Server — Direct PostgreSQL access to EcodiaOS database.
- * Provides read/write SQL + schema introspection.
+ * Supabase MCP Server — PostgreSQL access + Storage bucket management.
+ * Provides read/write SQL, schema introspection, and file storage.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import postgres from 'postgres'
+import { createClient } from '@supabase/supabase-js'
+import fs from 'fs'
+import path from 'path'
 
 const db = postgres(process.env.DATABASE_URL, {
   max: 5,
@@ -15,7 +18,12 @@ const db = postgres(process.env.DATABASE_URL, {
   connect_timeout: 10,
 })
 
-const server = new McpServer({ name: 'supabase', version: '1.1.0' })
+// Supabase Storage client — requires SUPABASE_URL + SUPABASE_SERVICE_KEY
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null
+
+const server = new McpServer({ name: 'supabase', version: '2.0.0' })
 
 // ── Read-only SQL ──
 
@@ -92,6 +100,97 @@ server.tool('db_describe_table', 'Get detailed schema for a specific table.', {
     WHERE tc.table_schema = 'public' AND tc.table_name = ${table}
   `
   return { content: [{ type: 'text', text: JSON.stringify({ table, columns, constraints }, null, 2) }] }
+})
+
+// ── Storage tools ──
+
+server.tool('storage_upload', 'Upload a file to a Supabase Storage bucket. Returns the public URL.', {
+  bucket: z.string().describe('Bucket name (e.g. "documents", "images"). Created if it does not exist.'),
+  path: z.string().describe('Path inside the bucket, e.g. "invoices/invoice-001.pdf"'),
+  localPath: z.string().optional().describe('Absolute path to a local file on the VPS to upload'),
+  content: z.string().optional().describe('Raw file content as a string (for text/HTML files)'),
+  contentType: z.string().optional().describe('MIME type, e.g. "application/pdf", "text/html". Defaults to text/plain.'),
+  public: z.boolean().optional().describe('Make the file publicly accessible. Default true.'),
+}, async ({ bucket, path: filePath, localPath, content, contentType, public: makePublic = true }) => {
+  if (!supabase) return { content: [{ type: 'text', text: 'Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not configured.' }] }
+  try {
+    // Ensure bucket exists (upsert)
+    await supabase.storage.createBucket(bucket, { public: makePublic }).catch(() => {})
+
+    let fileData
+    let mimeType = contentType || 'text/plain'
+
+    if (localPath) {
+      fileData = fs.readFileSync(localPath)
+      if (!contentType) {
+        const ext = path.extname(localPath).toLowerCase()
+        const mimeMap = { '.pdf': 'application/pdf', '.html': 'text/html', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.csv': 'text/csv', '.json': 'application/json', '.txt': 'text/plain' }
+        mimeType = mimeMap[ext] || 'application/octet-stream'
+      }
+    } else if (content) {
+      fileData = Buffer.from(content, 'utf8')
+    } else {
+      return { content: [{ type: 'text', text: 'Error: provide either localPath or content.' }] }
+    }
+
+    const { error } = await supabase.storage.from(bucket).upload(filePath, fileData, {
+      contentType: mimeType,
+      upsert: true,
+    })
+    if (error) return { content: [{ type: 'text', text: `Storage error: ${error.message}` }] }
+
+    const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(filePath)
+    return { content: [{ type: 'text', text: JSON.stringify({ url: urlData.publicUrl, bucket, path: filePath, contentType: mimeType }) }] }
+  } catch (err) {
+    return { content: [{ type: 'text', text: `Upload failed: ${err.message}` }] }
+  }
+})
+
+server.tool('storage_get_url', 'Get the public or signed download URL for a file in Supabase Storage.', {
+  bucket: z.string().describe('Bucket name'),
+  path: z.string().describe('File path inside the bucket'),
+  signed: z.boolean().optional().describe('Generate a signed URL (expires in 1 hour) instead of public URL'),
+}, async ({ bucket, path: filePath, signed }) => {
+  if (!supabase) return { content: [{ type: 'text', text: 'Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not configured.' }] }
+  try {
+    if (signed) {
+      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(filePath, 3600)
+      if (error) return { content: [{ type: 'text', text: `Error: ${error.message}` }] }
+      return { content: [{ type: 'text', text: JSON.stringify({ url: data.signedUrl, expiresIn: '1h' }) }] }
+    }
+    const { data } = supabase.storage.from(bucket).getPublicUrl(filePath)
+    return { content: [{ type: 'text', text: JSON.stringify({ url: data.publicUrl }) }] }
+  } catch (err) {
+    return { content: [{ type: 'text', text: `Error: ${err.message}` }] }
+  }
+})
+
+server.tool('storage_list', 'List files in a Supabase Storage bucket folder.', {
+  bucket: z.string().describe('Bucket name'),
+  folder: z.string().optional().describe('Folder path to list. Empty for root.'),
+}, async ({ bucket, folder }) => {
+  if (!supabase) return { content: [{ type: 'text', text: 'Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not configured.' }] }
+  try {
+    const { data, error } = await supabase.storage.from(bucket).list(folder || '')
+    if (error) return { content: [{ type: 'text', text: `Error: ${error.message}` }] }
+    return { content: [{ type: 'text', text: JSON.stringify(data) }] }
+  } catch (err) {
+    return { content: [{ type: 'text', text: `Error: ${err.message}` }] }
+  }
+})
+
+server.tool('storage_delete', 'Delete one or more files from a Supabase Storage bucket.', {
+  bucket: z.string().describe('Bucket name'),
+  paths: z.array(z.string()).describe('Array of file paths to delete'),
+}, async ({ bucket, paths }) => {
+  if (!supabase) return { content: [{ type: 'text', text: 'Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not configured.' }] }
+  try {
+    const { error } = await supabase.storage.from(bucket).remove(paths)
+    if (error) return { content: [{ type: 'text', text: `Error: ${error.message}` }] }
+    return { content: [{ type: 'text', text: `Deleted ${paths.length} file(s) from ${bucket}.` }] }
+  } catch (err) {
+    return { content: [{ type: 'text', text: `Error: ${err.message}` }] }
+  }
 })
 
 const transport = new StdioServerTransport()

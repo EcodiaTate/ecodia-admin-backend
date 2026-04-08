@@ -1,62 +1,129 @@
 /**
  * Document generation routes.
- * POST /api/docs/render - generate HTML + PDF from a spec
- * GET /api/docs/:filename - serve generated files
+ * POST /api/docs/render   — generate HTML + PDF, upload to Supabase Storage
+ * POST /api/docs/render-html — render arbitrary HTML string, upload to Storage
+ * GET  /api/docs/files/*  — serve locally generated files (fallback)
+ * GET  /api/docs/preview/:slug — return raw HTML for iframe rendering
  */
 const express = require('express')
 const path = require('path')
 const fs = require('fs')
+const env = require('../config/env')
 const router = express.Router()
 
 const DOCS_DIR = path.join(__dirname, '../../public/docs')
+const API_BASE = env.API_BASE_URL || 'https://api.admin.ecodia.au'
 
-// Serve generated documents
+// Lazy Supabase client for storage uploads
+let _supabase = null
+function getSupabase() {
+  if (_supabase) return _supabase
+  if (!env.SUPABASE_URL || !(env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)) return null
+  const { createClient } = require('@supabase/supabase-js')
+  _supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)
+  return _supabase
+}
+
+async function uploadToStorage(slug, buffer, contentType) {
+  const sb = getSupabase()
+  if (!sb) return null
+  try {
+    await sb.storage.createBucket('documents', { public: true }).catch(() => {})
+    const { error } = await sb.storage.from('documents').upload(`${slug}`, buffer, { contentType, upsert: true })
+    if (error) return null
+    const { data } = sb.storage.from('documents').getPublicUrl(`${slug}`)
+    return data?.publicUrl || null
+  } catch { return null }
+}
+
+// Ensure docs dir exists
+fs.mkdirSync(DOCS_DIR, { recursive: true })
+
+// Serve generated documents (fallback local serving)
 router.use('/files', express.static(DOCS_DIR))
 
-// Generate a document (HTML + PDF)
+// Return raw HTML for iframe preview
+router.get('/preview/:slug', (req, res) => {
+  const slug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '')
+  const htmlPath = path.join(DOCS_DIR, `${slug}.html`)
+  if (!fs.existsSync(htmlPath)) return res.status(404).send('Not found')
+  res.setHeader('Content-Type', 'text/html')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.send(fs.readFileSync(htmlPath))
+})
+
+// Render arbitrary HTML string and return download URL
+router.post('/render-html', async (req, res) => {
+  const { html, filename, title } = req.body
+  if (!html) return res.status(400).json({ error: 'html required' })
+
+  const slug = (filename || `html-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '-')
+  const htmlPath = path.join(DOCS_DIR, `${slug}.html`)
+  fs.writeFileSync(htmlPath, html)
+
+  // Upload HTML to Supabase Storage
+  const storageUrl = await uploadToStorage(`${slug}.html`, Buffer.from(html, 'utf8'), 'text/html')
+  const localUrl = `${API_BASE}/api/docs/files/${slug}.html`
+  const previewUrl = `${API_BASE}/api/docs/preview/${slug}`
+
+  res.json({
+    html: storageUrl || localUrl,
+    preview: previewUrl,
+    slug,
+    title: title || slug,
+  })
+})
+
+// Generate a document (HTML + PDF) from structured spec
 router.post('/render', async (req, res) => {
   const { title, type, sections, metadata, filename } = req.body
   if (!title || !sections) {
     return res.status(400).json({ error: 'title and sections required' })
   }
 
-  const slug = filename || `doc-${Date.now()}`
+  const slug = (filename || `doc-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '-')
   const html = buildHtml(title, type, sections, metadata)
   const htmlPath = path.join(DOCS_DIR, `${slug}.html`)
   const pdfPath = path.join(DOCS_DIR, `${slug}.pdf`)
 
-  // Write HTML
   fs.writeFileSync(htmlPath, html)
+
+  // Upload HTML to Supabase Storage
+  const htmlStorageUrl = await uploadToStorage(`${slug}.html`, Buffer.from(html, 'utf8'), 'text/html')
+  const htmlLocalUrl = `${API_BASE}/api/docs/files/${slug}.html`
+  const previewUrl = `${API_BASE}/api/docs/preview/${slug}`
 
   // Generate PDF via puppeteer
   try {
     const puppeteer = require('puppeteer')
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    })
+    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
     const page = await browser.newPage()
     await page.setContent(html, { waitUntil: 'networkidle0' })
-    await page.pdf({
-      path: pdfPath,
-      format: 'A4',
-      margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' },
-      printBackground: true,
-    })
+    await page.pdf({ path: pdfPath, format: 'A4', margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' }, printBackground: true })
     await browser.close()
 
+    // Upload PDF to Supabase Storage
+    const pdfBuffer = fs.readFileSync(pdfPath)
+    const pdfStorageUrl = await uploadToStorage(`${slug}.pdf`, pdfBuffer, 'application/pdf')
+    const pdfLocalUrl = `${API_BASE}/api/docs/files/${slug}.pdf`
+
     res.json({
-      html: `/api/docs/files/${slug}.html`,
-      pdf: `/api/docs/files/${slug}.pdf`,
+      html: htmlStorageUrl || htmlLocalUrl,
+      pdf: pdfStorageUrl || pdfLocalUrl,
+      preview: previewUrl,
       filename: slug,
+      // download:// links for the OS to output in chat
+      downloadHtml: `download://${htmlStorageUrl || htmlLocalUrl}`,
+      downloadPdf: `download://${pdfStorageUrl || pdfLocalUrl}`,
     })
   } catch (err) {
-    // PDF failed but HTML still works
     res.json({
-      html: `/api/docs/files/${slug}.html`,
+      html: htmlStorageUrl || htmlLocalUrl,
       pdf: null,
-      error: `PDF generation failed: ${err.message}`,
+      preview: previewUrl,
       filename: slug,
+      downloadHtml: `download://${htmlStorageUrl || htmlLocalUrl}`,
+      error: `PDF generation failed: ${err.message}`,
     })
   }
 })

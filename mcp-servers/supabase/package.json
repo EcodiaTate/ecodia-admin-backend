@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@supabase/supabase-js": "^2.49.0",
     "postgres": "^3.4.4"
   }
 }
