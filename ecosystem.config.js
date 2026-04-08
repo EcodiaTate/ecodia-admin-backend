@@ -11,6 +11,10 @@ const COMMON = {
 module.exports = {
   apps: [
     { ...COMMON, name: 'ecodia-api', script: 'src/server.js', max_memory_restart: '2G', env: { ...COMMON.env, PORT: 3001 } },
+    // Factory runner — owns all CC session child processes.
+    // Runs separately from ecodia-api so CC sessions survive API restarts (e.g. self-modification deploys).
+    // Communicates with ecodia-api via Redis pub/sub (factoryBridge).
+    { ...COMMON, name: 'ecodia-factory', script: 'src/workers/factoryRunner.js', max_memory_restart: '3G', max_restarts: 10, restart_delay: 5000 },
     // Gmail poller is on-demand only — called by autonomousMaintenanceWorker.
     // Not a long-running process; removed from PM2 to stop the restart loop.
     // { ...COMMON, name: 'ecodia-gmail', script: 'src/workers/gmailPoller.js' },

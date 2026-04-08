@@ -601,15 +601,17 @@ async function startSession(session) {
   const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
   delete ccEnv.ANTHROPIC_API_KEY
 
-  // If FACTORY_CC_HOME is set, point CC CLI at a separate account's config.
-  // This lets Factory sessions run on a second Claude Max account, keeping
-  // the OS session's energy budget entirely separate.
-  // Setup: log in with `claude` in the second account's shell, then set
-  // FACTORY_CC_HOME=/home/tate/.claude-factory (or wherever you put it).
-  // The ~/.claude.json in that directory holds the second account's OAuth token.
-  if (env.FACTORY_CC_HOME) {
-    ccEnv.HOME = env.FACTORY_CC_HOME
-    ccEnv.CLAUDE_CONFIG_DIR = env.FACTORY_CC_HOME
+  // Account routing for Factory sessions:
+  // FACTORY_CC_HOME (or CLAUDE_CONFIG_DIR_2) points to a second account's config dir.
+  // This keeps Factory coding sessions on a separate energy budget from the OS session.
+  //
+  // Priority:
+  //   1. FACTORY_CC_HOME — explicit override for factory (e.g. /home/tate/.claude2)
+  //   2. CLAUDE_CONFIG_DIR_2 — shared "account 2" config used by both OS and Factory
+  //   3. default — uses current user's ~/.claude (same account as OS session)
+  const factoryConfigDir = env.FACTORY_CC_HOME || env.CLAUDE_CONFIG_DIR_2
+  if (factoryConfigDir) {
+    ccEnv.CLAUDE_CONFIG_DIR = factoryConfigDir
   }
 
   const proc = spawn(CC_CLI, args, {

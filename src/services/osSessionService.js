@@ -468,26 +468,37 @@ async function sendMessage(content) {
             }
 
             // Check for rate-limit / usage-exhaustion errors in the result
+            // Fallback chain: account1 → account2 → Bedrock Opus → Bedrock Sonnet
             if (msg.is_error) {
               const errTexts = (msg.errors || []).join(' ') + ' ' + (msg.result || '') + ' ' + (msg.stop_reason || '')
-              if (_isUsageExhausted(errTexts) && canBedrock) {
-                if (!usingBedrock) {
-                  // Primary exhausted → switch to Bedrock Opus
+              if (_isUsageExhausted(errTexts)) {
+                if (!usingAccount2 && !usingBedrock && hasAccount2) {
+                  // Account 1 exhausted → switch to account 2
+                  usingAccount2 = true
+                  _exhaustedAt = Date.now()
+                  ccSessionId = null
+                  activeQuery = null
+                  usageEnergy.setProvider('claude_max_2')
+                  logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
+                  emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
+                  throw { _bedrockRetry: true, message: content }
+                } else if (!usingBedrock && canBedrock) {
+                  // Account 2 also exhausted (or not configured) → Bedrock Opus
                   usingBedrock = true
                   ccSessionId = null
                   activeQuery = null
                   usageEnergy.setProvider('bedrock_opus')
                   logger.warn('OS Session usage exhausted — switching to Bedrock Opus', { errors: msg.errors })
-                  emitOutput({ type: 'system', content: 'Usage exhausted — switching to Bedrock Opus...' })
+                  emitOutput({ type: 'system', content: 'Both Claude Max accounts exhausted — switching to Bedrock Opus.' })
                   throw { _bedrockRetry: true, message: content }
-                } else if (!usingBedrockSonnet) {
-                  // Bedrock Opus exhausted → step down to Sonnet
+                } else if (usingBedrock && !usingBedrockSonnet && canBedrock) {
+                  // Bedrock Opus daily limit → Bedrock Sonnet
                   usingBedrockSonnet = true
                   ccSessionId = null
                   activeQuery = null
                   usageEnergy.setProvider('bedrock_sonnet')
                   logger.warn('OS Session Bedrock Opus limit hit — stepping down to Bedrock Sonnet', { errors: msg.errors })
-                  emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6...' })
+                  emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6.' })
                   throw { _bedrockRetry: true, message: content }
                 }
               }
@@ -557,23 +568,32 @@ async function sendMessage(content) {
 
     const errMsg = err.message || ''
     const exhausted = _isUsageExhausted(errMsg)
-    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, canBedrock: !!canBedrock, usingBedrock, usingBedrockSonnet })
+    const hasAccount2Catch = !!(env.CLAUDE_CONFIG_DIR_2)
+    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, hasAccount2: hasAccount2Catch, canBedrock: !!canBedrock, usingAccount2, usingBedrock, usingBedrockSonnet })
 
-    // On usage exhaustion — step through the fallback chain
-    if (exhausted && canBedrock) {
-      if (!usingBedrock) {
+    // On usage exhaustion — step through the fallback chain: account1 → account2 → Bedrock Opus → Bedrock Sonnet
+    if (exhausted) {
+      if (!usingAccount2 && !usingBedrock && hasAccount2Catch) {
+        usingAccount2 = true
+        _exhaustedAt = Date.now()
+        ccSessionId = null
+        usageEnergy.setProvider('claude_max_2')
+        logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
+        emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
+        return sendMessage(content)
+      } else if (!usingBedrock && canBedrock) {
         usingBedrock = true
         ccSessionId = null
         usageEnergy.setProvider('bedrock_opus')
-        logger.warn('OS Session usage exhausted — switching to Bedrock Opus', { error: errMsg })
-        emitOutput({ type: 'system', content: 'Usage exhausted — switching to Bedrock Opus...' })
+        logger.warn('OS Session all Claude Max accounts exhausted — switching to Bedrock Opus', { error: errMsg })
+        emitOutput({ type: 'system', content: 'Both Claude Max accounts exhausted — switching to Bedrock Opus.' })
         return sendMessage(content)
-      } else if (!usingBedrockSonnet) {
+      } else if (usingBedrock && !usingBedrockSonnet && canBedrock) {
         usingBedrockSonnet = true
         ccSessionId = null
         usageEnergy.setProvider('bedrock_sonnet')
         logger.warn('OS Session Bedrock Opus limit — stepping down to Bedrock Sonnet', { error: errMsg })
-        emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6...' })
+        emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6.' })
         return sendMessage(content)
       }
     }

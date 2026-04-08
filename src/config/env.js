@@ -211,9 +211,13 @@ const envSchema = z.object({
   GOAL_MAX_ACTIVE: z.string().default('10'),                      // max active goals before generation pauses (0 = unlimited)
   // Internal MCP server auth token (static, long-lived — set once in .env)
   MCP_INTERNAL_TOKEN: z.string().default(''),
-  // Second Claude account for Factory sessions — set to a home dir with its own ~/.claude.json
-  // e.g. FACTORY_CC_HOME=/home/tate/.claude-factory
-  // Leave empty to use the same account as the OS session
+  // Second Claude Max account config directory.
+  // Point this at a dir where you've run `CLAUDE_CONFIG_DIR=<dir> claude` to log in a second account.
+  // e.g. CLAUDE_CONFIG_DIR_2=/home/tate/.claude2
+  // OS session auto-falls back to this when account 1 exhausts. Factory sessions use it by default.
+  CLAUDE_CONFIG_DIR_1: z.string().default(''),  // explicit account 1 dir (leave empty to use default ~/.claude)
+  CLAUDE_CONFIG_DIR_2: z.string().default(''),  // account 2 dir — enables auto-failover
+  // Explicit Factory override — takes priority over CLAUDE_CONFIG_DIR_2 for Factory sessions only
   FACTORY_CC_HOME: z.string().default(''),
   // Supabase Storage
   SUPABASE_URL: z.string().default(''),
