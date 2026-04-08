@@ -13,7 +13,7 @@ const db = require('../config/db')
 
 router.post('/run', async (req, res, next) => {
   // Set long timeout for multi-turn tasks
-  res.setTimeout(300_000)
+  res.setTimeout(1_800_000) // 30 min
   try {
     const { taskId, workspace, messages } = req.body
     if (!messages || !messages.length) return res.status(400).json({ error: 'messages is required' })

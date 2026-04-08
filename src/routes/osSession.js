@@ -9,7 +9,7 @@ const usageEnergy = require('../services/usageEnergyService')
 
 // Send a message to the OS session (response streams via WebSocket)
 router.post('/message', async (req, res, next) => {
-  res.setTimeout(300_000) // 5 min
+  res.setTimeout(1_800_000) // 30 min
   try {
     const { message } = req.body
     if (!message || typeof message !== 'string') {
@@ -67,7 +67,7 @@ router.get('/recover', async (req, res, next) => {
 
 // Compact — seamlessly transition to a new session with summary context
 router.post('/compact', async (req, res, next) => {
-  res.setTimeout(300_000)
+  res.setTimeout(1_800_000) // 30 min
   try {
     const { summary } = req.body
     if (!summary || typeof summary !== 'string') {

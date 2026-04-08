@@ -64,7 +64,7 @@ async function fireTask(task) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: prompt }),
-      signal: AbortSignal.timeout(300_000), // 5 min
+      signal: AbortSignal.timeout(1_800_000), // 30 min
     })
     const result = await res.json().catch(() => ({}))
 
