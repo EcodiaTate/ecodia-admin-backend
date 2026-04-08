@@ -54,6 +54,19 @@ const SEARCH_MIN_SIM = parseFloat(env.SESSION_MEMORY_MIN_SIM || '0.35')
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
+ * Strip the injected memory context block from a user message.
+ * osSessionService prepends: `## Relevant past conversations\n\n...\n\n---\n\n${realContent}`
+ * We only want the real content — everything after the final `\n\n---\n\n` separator.
+ */
+function stripMemoryInjection(text) {
+  if (!text.startsWith('## Relevant past conversations')) return text
+  const SEP = '\n\n---\n\n'
+  const lastIdx = text.lastIndexOf(SEP)
+  if (lastIdx === -1) return '' // injection only, no real content
+  return text.slice(lastIdx + SEP.length).trim()
+}
+
+/**
  * Extract plain text from a CC CLI content array.
  * Skips IDE-injected metadata blocks (ide_opened_file, ide_selection, etc.)
  */
@@ -171,7 +184,8 @@ async function parseJsonlFile(filePath) {
         currentAssistantParts = []
       }
 
-      const text = extractText(record.message.content)
+      const rawText = extractText(record.message.content)
+      const text = stripMemoryInjection(rawText)
       // Skip empty or pure-IDE user messages
       if (text.length > 10) {
         currentUser = text
