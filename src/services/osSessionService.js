@@ -72,8 +72,29 @@ const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000',
 let activeQuery = null          // the running Query object from the SDK
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
-let usingBedrock = false        // flipped true after primary 429 → use Bedrock Opus
+let usingAccount2 = false       // flipped true after account 1 exhausted → use CLAUDE_CONFIG_DIR_2
+let usingBedrock = false        // flipped true after both accounts exhausted → use Bedrock Opus
 let usingBedrockSonnet = false  // flipped true after Bedrock Opus daily limit → use Bedrock Sonnet
+
+// Weekly reset detection: if it's a new week since we flipped to account2/bedrock,
+// try falling back to account1 again automatically.
+let _exhaustedAt = null  // timestamp when account1 was first marked exhausted
+
+function _shouldRetryPrimary() {
+  if (!_exhaustedAt) return false
+  // Claude Max resets weekly. If it's been >7 days, try account1 again.
+  return (Date.now() - _exhaustedAt) > 7 * 24 * 60 * 60 * 1000
+}
+
+function _resetToAccount1() {
+  usingAccount2 = false
+  usingBedrock = false
+  usingBedrockSonnet = false
+  _exhaustedAt = null
+  usageEnergy.setProvider('claude_max')
+  logger.info('OS Session: weekly reset detected — returning to account 1 (primary)')
+  emitOutput({ type: 'system', content: 'Weekly reset detected — switching back to primary Claude Max account.' })
+}
 
 // Bedrock model IDs
 // Bedrock cross-region inference profile IDs — override via .env if needed
@@ -260,19 +281,28 @@ async function sendMessage(content) {
     options.resume = ccSessionId
   }
 
-  // Provider selection — three-tier fallback:
-  //   primary → Bedrock Opus → Bedrock Sonnet
-  const canBedrock = env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
-  const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && canBedrock)
+  // Provider selection — four-tier fallback:
+  //   account1 (primary) → account2 (CLAUDE_CONFIG_DIR_2) → Bedrock Opus → Bedrock Sonnet
+  //
+  // Account switching uses CLAUDE_CONFIG_DIR in options.env — the SDK reads this
+  // to locate ~/.claude/claude.json (OAuth token). Setting it to a different dir
+  // points the session at a different logged-in account, no API key needed.
 
-  // Keep energy service in sync with current provider
+  // Auto-reset: if it's been >7 days since account1 was exhausted, retry it
+  if (_shouldRetryPrimary()) _resetToAccount1()
+
+  const canBedrock = env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
+  const hasAccount2 = !!(env.CLAUDE_CONFIG_DIR_2)
+  const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && !hasAccount2 && canBedrock)
+  const shouldUseAccount2 = !usingBedrock && usingAccount2 && hasAccount2
+
+  // Keep energy service in sync
   const currentProvider = shouldUseBedrock && canBedrock
     ? (usingBedrockSonnet ? 'bedrock_sonnet' : 'bedrock_opus')
-    : 'claude_max'
+    : shouldUseAccount2 ? 'claude_max_2' : 'claude_max'
   usageEnergy.setProvider(currentProvider)
 
   if (shouldUseBedrock && canBedrock) {
-    // Pick model: Sonnet if Opus daily limit hit, else Opus
     const bedrockModel = usingBedrockSonnet ? BEDROCK_SONNET_MODEL : BEDROCK_OPUS_MODEL
     options.model = bedrockModel
     options.settings = {
@@ -285,7 +315,6 @@ async function sendMessage(content) {
         CLAUDE_CODE_USE_BEDROCK: '1',
       },
     }
-    // Process env: ensure AWS creds present, ANTHROPIC_API_KEY absent
     const bedrockEnv = { ...process.env }
     delete bedrockEnv.ANTHROPIC_API_KEY
     bedrockEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
@@ -293,15 +322,26 @@ async function sendMessage(content) {
     bedrockEnv.AWS_REGION = env.AWS_REGION || 'us-east-1'
     bedrockEnv.CLAUDE_CODE_USE_BEDROCK = '1'
     options.env = bedrockEnv
-    // Can't resume cross-provider — clear resume if set
     delete options.resume
     logger.info('OS Session using AWS Bedrock provider', {
       model: bedrockModel,
       region: env.AWS_REGION || 'us-east-1',
       tier: usingBedrockSonnet ? 'sonnet-fallback' : 'opus',
     })
-  } else if (env.ANTHROPIC_API_KEY) {
-    options.env = { ...process.env, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }
+  } else if (shouldUseAccount2) {
+    // Account 2 — different CLAUDE_CONFIG_DIR, same OAuth flow
+    const sessionEnv = { ...process.env }
+    if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+    sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+    options.env = sessionEnv
+    delete options.resume  // can't resume across config dirs
+    logger.info('OS Session using Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
+  } else {
+    // Account 1 — primary (default CLAUDE_CONFIG_DIR from ~/.claude)
+    const sessionEnv = { ...process.env }
+    if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+    if (env.CLAUDE_CONFIG_DIR_1) sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
+    options.env = sessionEnv
   }
 
   const collectedText = []

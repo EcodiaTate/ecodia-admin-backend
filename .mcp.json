@@ -1,5 +1,10 @@
 {
   "mcpServers": {
+    "factory": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/factory/start.sh",
+      "args": []
+    },
     "google-workspace": {
       "type": "stdio",
       "command": "/home/tate/ecodiaos/mcp-servers/google-workspace/start.sh",

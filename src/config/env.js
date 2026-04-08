@@ -209,6 +209,12 @@ const envSchema = z.object({
   // Selfhood — introspection, goals, identity
   INTROSPECTION_CYCLE_INTERVAL: z.string().default('10'),        // run full introspection every N maintenance cycles (0 = disabled)
   GOAL_MAX_ACTIVE: z.string().default('10'),                      // max active goals before generation pauses (0 = unlimited)
+  // Internal MCP server auth token (static, long-lived — set once in .env)
+  MCP_INTERNAL_TOKEN: z.string().default(''),
+  // Second Claude account for Factory sessions — set to a home dir with its own ~/.claude.json
+  // e.g. FACTORY_CC_HOME=/home/tate/.claude-factory
+  // Leave empty to use the same account as the OS session
+  FACTORY_CC_HOME: z.string().default(''),
   // Supabase Storage
   SUPABASE_URL: z.string().default(''),
   SUPABASE_ANON_KEY: z.string().default(''),

@@ -7,8 +7,16 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ error: 'Missing or invalid authorization header' })
   }
 
+  const token = header.slice(7)
+
+  // Internal MCP servers use a static long-lived token (MCP_INTERNAL_TOKEN env var).
+  // This avoids needing to refresh JWTs inside MCP server processes.
+  if (env.MCP_INTERNAL_TOKEN && token === env.MCP_INTERNAL_TOKEN) {
+    req.user = { id: 'internal', role: 'internal' }
+    return next()
+  }
+
   try {
-    const token = header.slice(7)
     const decoded = jwt.verify(token, env.JWT_SECRET)
     req.user = decoded
     next()

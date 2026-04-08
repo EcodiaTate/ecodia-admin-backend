@@ -380,4 +380,48 @@ router.get('/analytics', async (req, res, next) => {
   }
 })
 
+// ── Factory Review / Approve / Reject — called by Factory MCP server ──
+
+// GET /api/cc/sessions/:id/review
+router.get('/sessions/:id/review', async (req, res, next) => {
+  try {
+    const oversight = require('../services/factoryOversightService')
+    const context = await oversight.prepareReviewContext(req.params.id)
+    res.json(context)
+  } catch (err) { next(err) }
+})
+
+// POST /api/cc/sessions/:id/approve
+router.post('/sessions/:id/approve', async (req, res, next) => {
+  try {
+    const oversight = require('../services/factoryOversightService')
+    const result = await oversight.runDeployFromOSApproval(req.params.id, {
+      notes: req.body?.notes || '',
+      confidence: req.body?.confidence ?? null,
+    })
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// POST /api/cc/sessions/:id/reject
+router.post('/sessions/:id/reject', async (req, res, next) => {
+  try {
+    const oversight = require('../services/factoryOversightService')
+    const result = await oversight.runRejectFromOS(req.params.id, {
+      reason: req.body?.reason || 'Rejected by OS session',
+    })
+    // Optionally re-dispatch with corrected prompt
+    if (req.body?.redispatch && req.body?.correctedPrompt) {
+      const triggers = require('../services/factoryTriggerService')
+      const [original] = await require('../config/db')`SELECT codebase_id, working_dir FROM cc_sessions WHERE id = ${req.params.id}`
+      const newSession = await triggers.dispatchFromCortex(req.body.correctedPrompt, {
+        codebaseId: original?.codebase_id || null,
+        workingDir: original?.working_dir || null,
+      })
+      return res.json({ ...result, redispatched: true, newSessionId: newSession?.id })
+    }
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
 module.exports = router
