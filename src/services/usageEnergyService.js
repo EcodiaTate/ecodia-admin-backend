@@ -40,6 +40,8 @@ let _state = {
   rateLimitType: null,        // seven_day | five_hour | overage | etc.
   isUsingOverage: false,
   headersUpdatedAt: null,     // Date.now() when headers were last captured
+  // Provider state — injected from osSessionService
+  currentProvider: 'claude_max', // 'claude_max' | 'bedrock_opus' | 'bedrock_sonnet'
 }
 
 // Cache the full energy snapshot (60s TTL)
@@ -49,6 +51,20 @@ const CACHE_TTL_MS = 60_000
 
 // How long before we proactively refresh via quota-check (15 min)
 const HEADER_STALE_MS = 15 * 60 * 1000
+
+// ─── Called by osSessionService to keep provider state in sync ───────────────
+function setProvider(provider) {
+  if (_state.currentProvider !== provider) {
+    _state.currentProvider = provider
+    // If we've switched to Bedrock, we know Max is exhausted — mark it
+    if (provider !== 'claude_max' && _state.weeklyUtilization === null) {
+      _state.weeklyUtilization = 1.0  // exhausted (Bedrock fallback = Max is gone)
+      _state.rateLimitStatus = 'rejected'
+    }
+    _cache = null
+    _cacheAt = 0
+  }
+}
 
 // ─── Update state from real Anthropic response headers ────────────────────────
 // Call this from osSessionService whenever we get a response.
@@ -127,7 +143,6 @@ async function _doQuotaCheck() {
         'Authorization': `Bearer ${oauthToken}`,
         'Content-Type': 'application/json',
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'interleaved-thinking-2025-05-14',
       },
       body: JSON.stringify({
         model,
@@ -136,12 +151,21 @@ async function _doQuotaCheck() {
       }),
     })
 
-    // Extract headers regardless of status code
+    // Extract headers regardless of status code — 429 responses still carry utilization headers
     updateFromHeaders(resp.headers)
+
+    // 429 = rate limited / exhausted — mark as such even if headers didn't come through
+    if (resp.status === 429 && _state.weeklyUtilization === null) {
+      _state.weeklyUtilization = 1.0
+      _state.rateLimitStatus = 'rejected'
+      _cache = null
+      _cacheAt = 0
+    }
 
     logger.info('Claude quota-check complete', {
       status: resp.status,
       weeklyUtil: _state.weeklyUtilization,
+      rateLimitStatus: _state.rateLimitStatus,
     })
   } catch (err) {
     logger.debug('quota-check failed', { error: err.message })
@@ -179,9 +203,13 @@ async function getEnergy() {
     refreshQuotaCheck().catch(() => {})
   }
 
-  const pctUsed      = _state.weeklyUtilization ?? 0
+  // If on Bedrock with no real header data yet, assume exhausted
+  const onBedrock = _state.currentProvider !== 'claude_max'
+  const pctUsed      = _state.weeklyUtilization ?? (onBedrock ? 1.0 : 0)
   const pctRemaining = Math.max(0, 1 - pctUsed)
   const energy       = _energyState(pctUsed)
+
+  const hasRealData  = _state.weeklyUtilization !== null || onBedrock
 
   // Time until reset
   let hoursUntilReset = null
@@ -195,11 +223,10 @@ async function getEnergy() {
   // Self-tracked turn count (from our own DB log — useful for activity, not for % calc)
   const selfTracked = await _getSelfTrackedTurns().catch(() => ({ turns: 0 }))
 
-  const hasRealData = _state.weeklyUtilization !== null
-
   _cache = {
     // ─── Real data from Anthropic headers
-    source: hasRealData ? 'anthropic_headers' : 'no_data',
+    source: hasRealData ? (onBedrock && _state.weeklyUtilization === null ? 'bedrock_inferred' : 'anthropic_headers') : 'no_data',
+    currentProvider: _state.currentProvider,
     headersAge: _state.headersUpdatedAt ? Math.round((now - _state.headersUpdatedAt) / 1000) : null,
     pctUsed:       Math.round(pctUsed * 1000) / 10,       // e.g. 42.3
     pctRemaining:  Math.round(pctRemaining * 1000) / 10,  // e.g. 57.7
@@ -213,7 +240,7 @@ async function getEnergy() {
     // ─── Self-tracked activity (supplementary)
     turnsThisWeek: selfTracked.turns,
     // ─── Human-readable summary for AI context
-    summary: _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns: selfTracked.turns }),
+    summary: _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns: selfTracked.turns, onBedrock }),
   }
 
   _cacheAt = now
@@ -243,12 +270,17 @@ function _getWeekStart(date = new Date()) {
   return d.toISOString().slice(0, 10)
 }
 
-function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns }) {
+function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns, onBedrock }) {
   const usedPct = Math.round(pctUsed * 100)
   const remPct  = Math.round(pctRemaining * 100)
 
   if (!hasRealData) {
     return `Claude Max weekly energy: unknown (no API response headers captured yet). Energy level: ${energy.label}. Recommended model: ${energy.modelRec}.`
+  }
+
+  if (onBedrock && _state.weeklyUtilization === null) {
+    const resetStr = hoursUntilReset != null ? ` Resets in ~${Math.round(hoursUntilReset)}h.` : ''
+    return `Claude Max weekly energy: exhausted — currently on AWS Bedrock fallback.${resetStr} When weekly limit resets, OS will automatically return to Claude Max OAuth.`
   }
 
   const lines = [
@@ -312,6 +344,7 @@ function invalidateCache() {
 
 module.exports = {
   updateFromHeaders,
+  setProvider,
   refreshQuotaCheck,
   logUsage,
   getEnergy,

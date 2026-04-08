@@ -231,6 +231,12 @@ async function sendMessage(content) {
   const canBedrock = env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
   const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && canBedrock)
 
+  // Keep energy service in sync with current provider
+  const currentProvider = shouldUseBedrock && canBedrock
+    ? (usingBedrockSonnet ? 'bedrock_sonnet' : 'bedrock_opus')
+    : 'claude_max'
+  usageEnergy.setProvider(currentProvider)
+
   if (shouldUseBedrock && canBedrock) {
     // Pick model: Sonnet if Opus daily limit hit, else Opus
     const bedrockModel = usingBedrockSonnet ? BEDROCK_SONNET_MODEL : BEDROCK_OPUS_MODEL
@@ -359,6 +365,7 @@ async function sendMessage(content) {
                   usingBedrock = true
                   ccSessionId = null
                   activeQuery = null
+                  usageEnergy.setProvider('bedrock_opus')
                   logger.warn('OS Session usage exhausted — switching to Bedrock Opus', { errors: msg.errors })
                   emitOutput({ type: 'system', content: 'Usage exhausted — switching to Bedrock Opus...' })
                   throw { _bedrockRetry: true, message: content }
@@ -367,6 +374,7 @@ async function sendMessage(content) {
                   usingBedrockSonnet = true
                   ccSessionId = null
                   activeQuery = null
+                  usageEnergy.setProvider('bedrock_sonnet')
                   logger.warn('OS Session Bedrock Opus limit hit — stepping down to Bedrock Sonnet', { errors: msg.errors })
                   emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6...' })
                   throw { _bedrockRetry: true, message: content }
@@ -440,12 +448,14 @@ async function sendMessage(content) {
       if (!usingBedrock) {
         usingBedrock = true
         ccSessionId = null
+        usageEnergy.setProvider('bedrock_opus')
         logger.warn('OS Session usage exhausted — switching to Bedrock Opus', { error: errMsg })
         emitOutput({ type: 'system', content: 'Usage exhausted — switching to Bedrock Opus...' })
         return sendMessage(content)
       } else if (!usingBedrockSonnet) {
         usingBedrockSonnet = true
         ccSessionId = null
+        usageEnergy.setProvider('bedrock_sonnet')
         logger.warn('OS Session Bedrock Opus limit — stepping down to Bedrock Sonnet', { error: errMsg })
         emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6...' })
         return sendMessage(content)
@@ -495,6 +505,7 @@ async function restart() {
   ccSessionId = null
   usingBedrock = false        // reset — try primary again on restart
   usingBedrockSonnet = false
+  usageEnergy.setProvider('claude_max')
   const session = await createOSSession()
   emitStatus('idle', { sessionId: session.id, restarted: true })
   return { sessionId: session.id }
