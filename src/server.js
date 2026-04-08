@@ -126,25 +126,73 @@ server.listen(env.PORT, async () => {
     const { broadcastToSession, broadcast } = require('./websocket/wsManager')
 
     bridge.subscribeMany({
-      // Session completed → trigger oversight pipeline
+      // Session completed → OS Session reviews and decides deploy/reject
       [bridge.CHANNELS.SESSION_COMPLETE]: async (data) => {
         try {
-          logger.info(`Factory session ${data.sessionId} completed (${data.status}) - triggering oversight`)
+          logger.info(`Factory session ${data.sessionId} completed (${data.status}) — routing to OS Session for review`)
           const oversight = require('./services/factoryOversightService')
-          oversight.runPostSessionPipeline(data.sessionId).catch(err => {
-            logger.error(`Oversight pipeline failed for session ${data.sessionId}`, { error: err.message })
-            db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'failed' WHERE id = ${data.sessionId}`.catch(() => {})
-            // Clean uncommitted changes
-            if (data.cwd) {
-              try {
-                const { execFileSync } = require('child_process')
-                execFileSync('git', ['checkout', '.'], { cwd: data.cwd, encoding: 'utf-8', timeout: 10_000 })
-                execFileSync('git', ['clean', '-fd'], { cwd: data.cwd, encoding: 'utf-8', timeout: 10_000 })
-              } catch {}
-            }
-          })
+          const osSession = require('./services/osSessionService')
+
+          // For failed sessions: run mechanical cleanup directly (nothing to review)
+          // For completed sessions with changes: hand off to OS Session
+          const [session] = await db`SELECT status, files_changed FROM cc_sessions WHERE id = ${data.sessionId}`
+
+          if (!session || session.status !== 'complete') {
+            // Failed — run mechanical pipeline (stash/clean) directly, no review needed
+            oversight.runPostSessionPipeline(data.sessionId).catch(err => {
+              logger.error(`Oversight pipeline (failure path) failed for session ${data.sessionId}`, { error: err.message })
+            })
+            return
+          }
+
+          const filesChanged = session.files_changed || []
+          if (filesChanged.length === 0) {
+            // No changes — run mechanical no-change handling directly
+            oversight.runPostSessionPipeline(data.sessionId).catch(err => {
+              logger.error(`Oversight pipeline (no-change path) failed for session ${data.sessionId}`, { error: err.message })
+            })
+            return
+          }
+
+          // Has changes — hand to OS Session for judgment
+          const osStatus = await osSession.getStatus().catch(() => null)
+          if (!osStatus || osStatus.status === 'error') {
+            // OS Session not available — fall back to automated pipeline
+            logger.warn(`OS Session unavailable for Factory review (${data.sessionId}) — falling back to automated pipeline`)
+            oversight.runPostSessionPipeline(data.sessionId).catch(err => {
+              logger.error(`Oversight pipeline (fallback) failed for session ${data.sessionId}`, { error: err.message })
+            })
+            return
+          }
+
+          // Send review request to OS Session
+          const [fullSession] = await db`
+            SELECT cs.initial_prompt, cb.name AS codebase_name
+            FROM cc_sessions cs LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+            WHERE cs.id = ${data.sessionId}
+          `
+          const prompt = (fullSession?.initial_prompt || '').slice(0, 300)
+          const codebase = fullSession?.codebase_name || 'unknown'
+
+          await osSession.sendMessage(
+            `FACTORY SESSION COMPLETE — review required.\n\n` +
+            `Session ID: ${data.sessionId}\n` +
+            `Codebase: ${codebase}\n` +
+            `Task: ${prompt}\n` +
+            `Files changed: ${filesChanged.length}\n\n` +
+            `Call review_factory_session("${data.sessionId}") to see the diff and validation results, ` +
+            `then call approve_factory_deploy("${data.sessionId}") to deploy or reject_factory_session("${data.sessionId}", reason) to reject. ` +
+            `After deciding, extract any learnings into the knowledge graph.`
+          )
+
+          logger.info(`Factory session ${data.sessionId} handed to OS Session for review`)
         } catch (err) {
           logger.error('Failed to handle session completion from factory runner', { error: err.message })
+          // Emergency fallback
+          try {
+            const oversight = require('./services/factoryOversightService')
+            oversight.runPostSessionPipeline(data.sessionId).catch(() => {})
+          } catch {}
         }
       },
 

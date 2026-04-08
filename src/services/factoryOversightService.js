@@ -1,7 +1,7 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
 const { broadcastToSession, broadcast } = require('../websocket/wsManager')
-const { callDeepSeek } = require('./deepseekService')
+const { callClaude, callClaudeJSON } = require('./claudeService')
 const kgHooks = require('./kgIngestionHooks')
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -509,7 +509,7 @@ async function reviewChanges(session, filesChanged) {
       ? `\nThis is a self-modification — the Factory editing its own code.\n`
       : ''
 
-    const response = await callDeepSeek([{
+    const response = await callClaude([{
       role: 'user',
       content: `Code review for Factory auto-deployment gate.
 ${selfModNote}
@@ -544,7 +544,7 @@ Respond as JSON:
 }`,
     }], {
       module: 'factory_oversight',
-      contextQuery: session.initial_prompt,
+      model: 'claude-sonnet-4-6',
     })
 
     try {
@@ -554,7 +554,7 @@ Respond as JSON:
       return { approved: true, notes: response.slice(0, 200) }
     }
   } catch (err) {
-    logger.warn('DeepSeek review failed — treating as unapproved for safety', { error: err.message })
+    logger.warn('Claude review failed — treating as unapproved for safety', { error: err.message })
     return { approved: false, notes: 'Review unavailable (API failure)', confidence: 0 }
   }
 }
@@ -931,10 +931,8 @@ Respond as JSON:
 }
 If nothing specific is worth remembering, respond: {"pattern_type": "none", "pattern_description": "", "confidence": 0}`
 
-    const response = await callDeepSeek([{ role: 'user', content: prompt }], {
+    const response = await callClaude([{ role: 'user', content: prompt }], {
       module: 'factory_learning',
-      skipRetrieval: true,
-      skipLogging: true,
     })
 
     const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
@@ -942,7 +940,7 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
     try {
       parsed = JSON.parse(cleaned)
     } catch (parseErr) {
-      logger.debug('Learning extraction: invalid JSON from DeepSeek', { error: parseErr.message, response: cleaned.slice(0, 200) })
+      logger.debug('Learning extraction: invalid JSON from Claude', { error: parseErr.message, response: cleaned.slice(0, 200) })
       return
     }
 
@@ -1404,8 +1402,143 @@ function _extractForcedKeywords(task, error) {
   )].slice(0, 10)
 }
 
+// ─── OS Session Review Interface ────────────────────────────────────
+//
+// Instead of an isolated Claude Haiku call, the OS Session (the CEO)
+// reviews Factory output and decides to deploy, reject, or follow up.
+// These functions handle the mechanical preparation and execution;
+// the judgment call happens inside the OS Session.
+
+async function prepareReviewContext(sessionId) {
+  const [session] = await db`
+    SELECT cs.*, cb.name AS codebase_name, cb.repo_path, cb.meta AS codebase_meta
+    FROM cc_sessions cs
+    LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+    WHERE cs.id = ${sessionId}
+  `
+  if (!session) throw new Error(`Session not found: ${sessionId}`)
+
+  const filesChanged = session.files_changed || []
+  const cwd = session.repo_path
+
+  // Collect git diff
+  let diff = ''
+  if (cwd) {
+    try {
+      const gitDiffOpts = { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 30_000 }
+      const unstaged = execFileSync('git', ['diff'], gitDiffOpts)
+      const staged = execFileSync('git', ['diff', '--cached'], gitDiffOpts)
+      diff = [unstaged, staged].filter(Boolean).join('\n')
+      if (!diff) {
+        // Try last commit diff (may already be committed)
+        diff = execFileSync('git', ['diff', 'HEAD~1', 'HEAD', '-U3', '--no-color'], { cwd, encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }).trim()
+      }
+    } catch (err) {
+      logger.debug('git diff failed during review prep', { error: err.message, cwd })
+    }
+  }
+
+  // Run validation (tests, lint, typecheck)
+  let validation = null
+  try {
+    const validationService = require('./validationService')
+    validation = await validationService.validateChanges(sessionId)
+  } catch (err) {
+    logger.warn(`Validation failed for session ${sessionId}`, { error: err.message })
+  }
+
+  // Get previous learnings for this codebase
+  let learnings = []
+  if (session.codebase_id) {
+    learnings = await db`
+      SELECT pattern_type, pattern_description, confidence
+      FROM factory_learnings
+      WHERE codebase_id = ${session.codebase_id} AND absorbed_into IS NULL
+      ORDER BY confidence DESC LIMIT 8
+    `.catch(() => [])
+  }
+
+  // Mark as awaiting OS review
+  await db`UPDATE cc_sessions SET pipeline_stage = 'awaiting_review' WHERE id = ${sessionId}`
+  broadcastToSession(sessionId, 'cc:stage', { stage: 'awaiting_review', progress: 0.5 })
+
+  return {
+    sessionId,
+    codebaseName: session.codebase_name,
+    task: session.initial_prompt,
+    filesChanged,
+    isSelfMod: !!session.self_modification,
+    validationConfidence: validation?.confidence ?? null,
+    validationDetails: validation,
+    diff: diff.slice(0, 6000),
+    learnings,
+    repoPath: cwd,
+  }
+}
+
+async function runDeployFromOSApproval(sessionId, { notes = '', confidence = null } = {}) {
+  const [session] = await db`
+    SELECT cs.*, cb.name AS codebase_name, cb.repo_path, cb.meta AS codebase_meta
+    FROM cc_sessions cs LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+    WHERE cs.id = ${sessionId}
+  `
+  if (!session) throw new Error(`Session not found: ${sessionId}`)
+  if (session.pipeline_stage === 'deployed') return { alreadyDeployed: true }
+
+  const finalConfidence = confidence ?? session.confidence_score ?? 0.8
+  await db`UPDATE cc_sessions SET confidence_score = ${finalConfidence}, pipeline_stage = 'deploying' WHERE id = ${sessionId}`
+  broadcastToSession(sessionId, 'cc:stage', { stage: 'deploying', progress: 0.8 })
+
+  const deploymentService = require('./deploymentService')
+  const deployResult = await deploymentService.deploySession(sessionId)
+
+  const wasReverted = deployResult.status === 'reverted' || deployResult.status === 'self_healed_revert'
+  if (wasReverted) {
+    await recordOutcome(session, 'deploy_reverted', { confidence: finalConfidence, reason: deployResult.reason || deployResult.status })
+    await reportToTriggerSource(session, { success: false, stage: 'deployment', error: deployResult.reason, confidence: finalConfidence })
+    broadcastToSession(sessionId, 'cc:pipeline_result', { success: false, confidence: finalConfidence, error: deployResult.reason, reverted: true })
+    return { success: false, reverted: true, reason: deployResult.reason }
+  }
+
+  await monitorPostDeploy(session, deployResult)
+  await recordOutcome(session, 'success', { confidence: finalConfidence, commitSha: deployResult.commitSha, notes })
+  await trackValidationOutcome(sessionId, 'success')
+  await reportToTriggerSource(session, { success: true, stage: 'deployed', confidence: finalConfidence, commitSha: deployResult.commitSha })
+  broadcastToSession(sessionId, 'cc:pipeline_result', { success: true, confidence: finalConfidence, commitSha: deployResult.commitSha })
+  emitEvent('factory:session_complete', { sessionId, codebaseName: session.codebase_name, confidence: finalConfidence, outcome: 'deployed' })
+
+  // Learning extraction — fire and forget
+  extractLearningPattern(session, 'success', { confidence: finalConfidence, notes }).catch(() => {})
+
+  return { success: true, commitSha: deployResult.commitSha }
+}
+
+async function runRejectFromOS(sessionId, { reason = 'Rejected by OS review', requeue = false } = {}) {
+  const [session] = await db`
+    SELECT cs.*, cb.name AS codebase_name, cb.repo_path
+    FROM cc_sessions cs LEFT JOIN codebases cb ON cs.codebase_id = cb.id
+    WHERE cs.id = ${sessionId}
+  `
+  if (!session) throw new Error(`Session not found: ${sessionId}`)
+
+  await db`UPDATE cc_sessions SET pipeline_stage = 'failed', deploy_status = 'rejected' WHERE id = ${sessionId}`
+  cleanWorkingDir(session.repo_path)
+  await recordOutcome(session, 'rejected', { reason })
+  await reportToTriggerSource(session, { success: false, stage: 'review', error: reason })
+  broadcastToSession(sessionId, 'cc:pipeline_result', { success: false, error: reason, rejected: true })
+  emitEvent('factory:session_complete', { sessionId, codebaseName: session.codebase_name, outcome: 'rejected', reason })
+
+  // Learning extraction for the rejection — fire and forget
+  extractLearningPattern(session, 'rejected', { reason }).catch(() => {})
+
+  return { rejected: true, reason, requeued: false }
+}
+
 module.exports = {
   runPostSessionPipeline,
+  prepareReviewContext,
+  runDeployFromOSApproval,
+  runRejectFromOS,
   reviewChanges,
   monitorPostDeploy,
   reportToTriggerSource,

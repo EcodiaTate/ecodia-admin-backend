@@ -34,14 +34,17 @@ registry.registerMany([
           FROM transactions WHERE id = ${params.transactionId}
         `
         if (!tx) throw new Error(`Transaction ${params.transactionId} not found`)
-        const deepseek = require('../services/deepseekService')
-        const result = await deepseek.categorize({
-          description: tx.description,
-          amount: tx.amount,
-          type: tx.type,
-          date: tx.date,
-        })
-        category = result?.category || result
+        const { callClaudeJSON } = require('../services/claudeService')
+        const result = await callClaudeJSON([{
+          role: 'user',
+          content: `Categorize this transaction. Respond as JSON: {"category": "...", "confidence": 0.0-1.0}
+
+Date: ${tx.date}
+Type: ${tx.type}
+Amount: ${tx.amount}
+Description: ${tx.description}`,
+        }], { module: 'categorize_transaction', temperature: 0.1 })
+        category = result?.category
         if (typeof category !== 'string') throw new Error(`categorize returned unexpected shape: ${JSON.stringify(result)}`)
       }
 
@@ -63,7 +66,7 @@ registry.registerMany([
     },
     handler: async (params) => {
       const db = require('../config/db')
-      const deepseek = require('../services/deepseekService')
+      const { callClaudeJSON } = require('../services/claudeService')
       const uncategorized = await db`
         SELECT id, description, amount_aud AS amount, type, date
         FROM transactions WHERE status = 'uncategorized'
@@ -73,13 +76,11 @@ registry.registerMany([
       let categorized = 0
       for (const tx of uncategorized) {
         try {
-          const result = await deepseek.categorize({
-            description: tx.description,
-            amount: tx.amount,
-            type: tx.type,
-            date: tx.date,
-          })
-          const category = result?.category || result
+          const result = await callClaudeJSON([{
+            role: 'user',
+            content: `Categorize this transaction. Respond as JSON: {"category": "...", "confidence": 0.0-1.0}\n\nDate: ${tx.date}\nType: ${tx.type}\nAmount: ${tx.amount}\nDescription: ${tx.description}`,
+          }], { module: 'categorize_all_pending', temperature: 0.1 })
+          const category = result?.category
           if (typeof category !== 'string') continue
           await db`
             UPDATE transactions

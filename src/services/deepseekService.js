@@ -107,7 +107,7 @@ function getKG() {
 
 async function callDeepSeek(messages, {
   module = 'general',
-  model = 'deepseek-chat',
+  model = 'claude-haiku-4-5-20251001',
   contextQuery = null,       // what to search the KG for (string)
   skipRetrieval = false,     // skip KG retrieval (for KG ingestion calls to avoid loops)
   skipLogging = false,       // skip KG logging (for KG ingestion calls)
@@ -158,123 +158,12 @@ ${kgContext}
     logger.debug(`KG context injected for ${module} (${kgContext.length} chars)`)
   }
 
-  // ─── 3. EXECUTE: Call provider with retry + timeout ─────────────────
-  const isAnthropic = _isAnthropicModel(model)
-  let content, usage, durationMs
-
-  if (isAnthropic) {
-    // ─── Anthropic via AWS Bedrock ──────────────────────────────────
-    if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
-      throw new Error('AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set but claude model requested')
-    }
-
-    const client = _getBedrockClient()
-
-    // Convert OpenAI-style messages to Anthropic format
-    const systemParts = enrichedMessages.filter(m => m.role === 'system').map(m => m.content)
-    const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
-    const nonSystemMessages = enrichedMessages.filter(m => m.role !== 'system')
-
-    let response
-    for (let attempt = 0; attempt < DEEPSEEK_MAX_RETRIES; attempt++) {
-      try {
-        response = await client.messages.create({
-          model,
-          max_tokens: parseInt(env.ANTHROPIC_MAX_TOKENS || '4096'),
-          ...(systemPrompt && { system: systemPrompt }),
-          messages: nonSystemMessages,
-          ...(temperature !== null && { temperature }),
-        })
-        break
-      } catch (err) {
-        const status = err.status || err.response?.status
-        const retryable = !status || status === 429 || status >= 500
-        if (!retryable || attempt === DEEPSEEK_MAX_RETRIES - 1) throw err
-        const delayMs = DEEPSEEK_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500
-        logger.debug(`Bedrock retry ${attempt + 1}/${DEEPSEEK_MAX_RETRIES} after ${status || 'error'} (${Math.round(delayMs)}ms)`, { module })
-        await new Promise(r => setTimeout(r, delayMs))
-      }
-    }
-
-    durationMs = Date.now() - start
-    const textBlocks = (response.content || []).filter(b => b.type === 'text')
-    if (!textBlocks.length) throw new Error(`Bedrock returned empty response (module: ${module})`)
-    content = textBlocks.map(b => b.text).join('\n').replace(/\u2014/g, '-')
-    usage = {
-      prompt_tokens: response.usage?.input_tokens || 0,
-      completion_tokens: response.usage?.output_tokens || 0,
-    }
-
-    // Detect truncation — Anthropic uses 'end_turn' for complete, 'max_tokens' for truncated
-    if (response.stop_reason === 'max_tokens') {
-      logger.warn(`Bedrock response truncated by max_tokens (module: ${module})`, {
-        contentLength: content.length,
-        completionTokens: usage.completion_tokens,
-        maxTokensSetting: parseInt(env.ANTHROPIC_MAX_TOKENS || '4096'),
-      })
-    }
-
-    // Track usage — Bedrock Sonnet pricing: $3/1M input, $15/1M output
-    const costUsd = (usage.prompt_tokens * parseFloat(env.ANTHROPIC_COST_INPUT_PER_1M || '3') + usage.completion_tokens * parseFloat(env.ANTHROPIC_COST_OUTPUT_PER_1M || '15')) / 1_000_000
-    await db`
-      INSERT INTO deepseek_usage (model, prompt_tokens, completion_tokens, cost_usd, module, duration_ms)
-      VALUES (${model}, ${usage.prompt_tokens}, ${usage.completion_tokens}, ${costUsd}, ${module}, ${durationMs})
-    `.catch(err => logger.warn('Failed to track Bedrock usage', { error: err.message }))
-
-  } else {
-    // ─── DeepSeek API (existing path) ───────────────────────────────
-    let response
-    for (let attempt = 0; attempt < DEEPSEEK_MAX_RETRIES; attempt++) {
-      try {
-        response = await axios.post(
-          DEEPSEEK_API_URL,
-          { model, messages: enrichedMessages, max_tokens: parseInt(env.DEEPSEEK_MAX_TOKENS || '8192'), ...(temperature !== null && { temperature }) },
-          {
-            headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: DEEPSEEK_TIMEOUT_MS,
-          }
-        )
-        break  // success
-      } catch (err) {
-        const status = err.response?.status
-        const retryable = !status || status === 429 || status >= 500
-        if (!retryable || attempt === DEEPSEEK_MAX_RETRIES - 1) throw err
-        const delayMs = DEEPSEEK_RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500
-        logger.debug(`DeepSeek retry ${attempt + 1}/${DEEPSEEK_MAX_RETRIES} after ${status || 'timeout'} (${Math.round(delayMs)}ms)`, { module })
-        await new Promise(r => setTimeout(r, delayMs))
-      }
-    }
-
-    durationMs = Date.now() - start
-    usage = response.data.usage
-    const choices = response.data.choices
-    if (!choices?.length || !choices[0]?.message?.content) {
-      throw new Error(`DeepSeek returned empty response (module: ${module})`)
-    }
-    content = choices[0].message.content.replace(/\u2014/g, '-')
-
-    // Detect truncation — if finish_reason is 'length', the response was cut short by max_tokens
-    const finishReason = choices[0].finish_reason
-    if (finishReason === 'length') {
-      logger.warn(`DeepSeek response truncated by max_tokens (module: ${module})`, {
-        contentLength: content.length,
-        completionTokens: usage?.completion_tokens,
-      })
-    }
-
-    // Track usage
-    await db`
-      INSERT INTO deepseek_usage (model, prompt_tokens, completion_tokens, cost_usd, module, duration_ms)
-      VALUES (${model}, ${usage.prompt_tokens}, ${usage.completion_tokens},
-              ${(usage.prompt_tokens * parseFloat(env.DEEPSEEK_COST_PROMPT_PER_1M || '0.14') + usage.completion_tokens * parseFloat(env.DEEPSEEK_COST_COMPLETION_PER_1M || '0.28')) / 1_000_000},
-              ${module}, ${durationMs})
-    `.catch(err => logger.warn('Failed to track DeepSeek usage', { error: err.message }))
-  }
+  // ─── 3. EXECUTE: Delegate to claudeService (Anthropic API) ─────────
+  const { callClaude } = require('./claudeService')
+  const content = await callClaude(enrichedMessages, { module, temperature })
 
   // ─── 4. LOG: Ingest the exchange back into the KG ──────────────────
-  if (!skipLogging && kg && env.NEO4J_URI && env.DEEPSEEK_API_KEY) {
-    // Fire-and-forget — extract entities/relationships from the LLM's response
-    // Use the user's last message + the response as content
+  if (!skipLogging && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {
     const userMessage = messages.filter(m => m.role === 'user').pop()?.content || ''
     const logContent = `LLM interaction (${module}):
 Input: ${userMessage.slice(0, 500)}

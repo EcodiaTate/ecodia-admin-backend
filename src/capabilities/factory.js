@@ -197,6 +197,53 @@ registry.registerMany([
     },
   },
   {
+    name: 'review_factory_session',
+    description: 'Get the full review context for a completed Factory session — diff, files changed, validation results, previous learnings. Call this before approve_factory_deploy or reject_factory_session.',
+    tier: 'read',
+    domain: 'factory',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID awaiting review' },
+    },
+    handler: async (params) => {
+      const oversight = require('../services/factoryOversightService')
+      return oversight.prepareReviewContext(params.sessionId)
+    },
+  },
+  {
+    name: 'approve_factory_deploy',
+    description: 'Approve and deploy a reviewed Factory session. Commits changes, runs deployment, records outcome.',
+    tier: 'write',
+    domain: 'factory',
+    priority: 'critical',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID to deploy' },
+      notes: { type: 'string', required: false, description: 'Notes about why this was approved' },
+      confidence: { type: 'number', required: false, description: 'Confidence score 0.0-1.0 (uses validation score if omitted)' },
+    },
+    handler: async (params) => {
+      const oversight = require('../services/factoryOversightService')
+      return oversight.runDeployFromOSApproval(params.sessionId, {
+        notes: params.notes || '',
+        confidence: params.confidence ?? null,
+      })
+    },
+  },
+  {
+    name: 'reject_factory_session',
+    description: 'Reject a Factory session — cleans the working directory, records the reason as a learning, and marks the session as failed.',
+    tier: 'write',
+    domain: 'factory',
+    priority: 'critical',
+    params: {
+      sessionId: { type: 'string', required: true, description: 'CC session UUID to reject' },
+      reason: { type: 'string', required: true, description: 'Why this session is being rejected — used for learning extraction' },
+    },
+    handler: async (params) => {
+      const oversight = require('../services/factoryOversightService')
+      return oversight.runRejectFromOS(params.sessionId, { reason: params.reason })
+    },
+  },
+  {
     name: 'list_codebases',
     description: 'List all registered codebases with their language, path, and recent session activity',
     tier: 'read',

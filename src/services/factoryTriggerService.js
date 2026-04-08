@@ -72,8 +72,8 @@ async function resolveCodebase({ codebaseId, codebaseName, prompt, clientId }) {
     const codebaseList = allCodebases.map(cb => `- ${cb.name} (${cb.language || 'unknown'}, ${cb.repo_path})`).join('\n')
 
     try {
-      const { callDeepSeek } = require('./deepseekService')
-      const response = await callDeepSeek([{
+      const { callClaude } = require('./claudeService')
+      const response = await callClaude([{
         role: 'user',
         content: `Which codebase does this task target? Respond with the exact name or "none".
 
@@ -81,7 +81,7 @@ Available codebases:
 ${codebaseList}
 ${clientHint}${activityStr}
 Task: ${prompt.slice(0, 800)}`,
-      }], { module: 'factory_dispatch', skipRetrieval: true, temperature: 0.1 })
+      }], { module: 'factory_dispatch', temperature: 0.1 })
 
       const resolved = response.trim().toLowerCase().replace(/['"]/g, '')
       if (resolved && resolved !== 'none') {
@@ -422,8 +422,8 @@ async function dispatchFromCRM({ clientId, previousStage, newStage, clientName }
 
   // Let the AI decide whether this stage change warrants a CC session
   try {
-    const { callDeepSeek } = require('./deepseekService')
-    const response = await callDeepSeek([{
+    const { callClaudeJSON } = require('./claudeService')
+    const parsed = await callClaudeJSON([{
       role: 'user',
       content: `CRM client "${clientName || 'Unknown'}" just moved from "${previousStage}" to "${newStage}".
 Project: ${project?.name || 'No active project'}
@@ -442,15 +442,10 @@ or
   "shouldTrigger": false,
   "reasoning": "why no code work is needed"
 }`
-    }], { module: 'factory_dispatch', skipRetrieval: true })
-
-    let parsed
-    try {
-      parsed = JSON.parse(response.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
-    } catch (parseErr) {
-      logger.warn('CRM dispatch: failed to parse AI response', { error: parseErr.message, response: response?.slice(0, 200) })
+    }], { module: 'factory_dispatch' }).catch(parseErr => {
+      logger.warn('CRM dispatch: failed to get AI response', { error: parseErr.message })
       return null
-    }
+    })
     if (!parsed || !parsed.shouldTrigger) {
       logger.info(`CRM stage change ${previousStage}→${newStage}: AI decided no CC session needed (${parsed.reasoning})`)
       return null
@@ -701,8 +696,8 @@ async function dispatchFromPrediction(prediction) {
   // before burning a CC session on it. Behavioral/psychological predictions about
   // humans are valid KG output but not Factory work.
   try {
-    const deepseekService = require('./deepseekService')
-    const triageRaw = await deepseekService.callDeepSeek([{
+    const { callClaudeJSON } = require('./claudeService')
+    const triage = await callClaudeJSON([{
       role: 'user',
       content: `A knowledge graph prediction was generated. Should this trigger a coding session?
 
@@ -715,9 +710,7 @@ A coding session cannot: change human behavior, resolve emotional states, provid
 
 Respond as JSON:
 { "actionable": true/false, "reason": "why or why not" }`
-    }], { module: 'prediction_triage', skipRetrieval: true, skipLogging: true, temperature: 0.3 })
-
-    const triage = JSON.parse(triageRaw.replace(/```json?\s*/g, '').replace(/```/g, '').trim())
+    }], { module: 'prediction_triage', temperature: 0.3 })
     if (!triage.actionable) {
       logger.info(`KG prediction skipped (not code-actionable): ${(prediction.description || '').slice(0, 80)} — ${triage.reason || 'AI decided'}`)
       return null
