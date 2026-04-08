@@ -237,15 +237,7 @@ Discard: discard_rules`,
         health.redis = { connected: false, error: err.message }
       }
 
-      // Organism reachability
-      try {
-        const env = require('../config/env')
-        const orgUrl = env.ORGANISM_API_URL || 'http://localhost:8000'
-        const resp = await fetch(`${orgUrl}/health`, { signal: AbortSignal.timeout(5000) })
-        health.organism = { reachable: resp.ok, status: resp.status }
-      } catch (err) {
-        health.organism = { reachable: false, error: err.message }
-      }
+      // Organism health check removed — organism decoupled
 
       return health
     },

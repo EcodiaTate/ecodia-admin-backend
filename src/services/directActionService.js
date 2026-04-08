@@ -139,8 +139,7 @@ async function execute({ actionType, params = {}, correlationId, requestedBy = '
 
 function checkPressureGate(actionType, cap) {
   try {
-    const metabolismBridge = require('./metabolismBridgeService')
-    const pressure = metabolismBridge.getPressure()
+    const pressure = 0 // metabolismBridge removed (organism decoupled)
     const gate = parseFloat(env.METABOLIC_PRESSURE_GATE || '0.85')
     if (gate <= 0 || pressure < gate) return null
     if (cap?.priority === 'critical') return null

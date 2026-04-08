@@ -99,15 +99,6 @@ router.get('/', async (_req, res, next) => {
         GROUP BY 1 ORDER BY total DESC
       `.then(rows => { results.streams = rows }),
 
-      // Goals
-      db`
-        SELECT id, title, progress, priority, status, goal_type, created_at
-        FROM organism_goals
-        WHERE status IN ('active', 'dormant')
-        ORDER BY priority DESC, created_at DESC
-        LIMIT 10
-      `.then(rows => { results.goals = rows }).catch(() => { results.goals = [] }),
-
       // Inner monologue (percepts)
       db`
         SELECT message, metadata->>'stream_name' AS stream, created_at
@@ -158,15 +149,7 @@ router.get('/', async (_req, res, next) => {
       })),
       streams: results.streams || [],
       actions: results.actions || {},
-      goals: (results.goals || []).map(g => ({
-        id: g.id,
-        title: g.title,
-        progress: g.progress,
-        priority: g.priority,
-        status: g.status,
-        goal_type: g.goal_type,
-        created_at: g.created_at,
-      })),
+      goals: [],
       gitActivity: results.gitActivity || [],
       percepts: (results.percepts || []).map(p => ({
         message: p.message,
@@ -189,11 +172,6 @@ router.get('/', async (_req, res, next) => {
             restarts: p.restarts,
             uptime: p.uptime,
           })),
-        },
-        organism: {
-          healthy: results.health.organism?.healthy ?? null,
-          lastResponseMs: results.health.organism?.lastResponseMs ?? null,
-          consecutiveFailures: results.health.organism?.consecutiveFailures || 0,
         },
       } : null,
     })

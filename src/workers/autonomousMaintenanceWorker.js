@@ -1,7 +1,8 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
-const metabolismBridge = require('../services/metabolismBridgeService')
 const { recordHeartbeat } = require('./heartbeat')
+// Stub: metabolismBridge removed (organism decoupled)
+const metabolismBridge = { getPressure: () => 0, getMetabolicTier: () => 'nominal', reportCosts: () => Promise.resolve() }
 
 // Integration pollers — called on AI decision, not on schedule
 const workspacePollers = (() => {
@@ -29,7 +30,7 @@ const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  
 const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || (env.AWS_ACCESS_KEY_ID ? 'us.anthropic.claude-sonnet-4-20250514-v1:0' : 'deepseek-chat')
 
 // ─── Restart Resilience ──────────────────────────────────────────────
-// The organism restarts constantly (self-mod deploys, PM2 restarts).
+// EcodiaOS restarts constantly (self-mod deploys, PM2 restarts).
 // It must pick up where it left off. These functions persist volatile
 // state to the DB so the mind doesn't lose context across restarts.
 
@@ -110,29 +111,6 @@ async function _onKGPrediction(payload) {
   }
 }
 
-// Buffer recent organism percepts so the system brief can include what the
-// organism is thinking/feeling — not just errors and factory health.
-const _recentPercepts = []
-const MAX_PERCEPT_BUFFER = 10
-
-async function _onOrganismPercept(percept) {
-  // Always buffer (even during cycle) so the NEXT cycle sees it
-  _recentPercepts.push({
-    type: percept.percept_type,
-    salience: percept.salience,
-    summary: percept.summary || percept.content?.slice?.(0, 100) || '',
-    timestamp: new Date().toISOString(),
-  })
-  while (_recentPercepts.length > MAX_PERCEPT_BUFFER) _recentPercepts.shift()
-
-  if (!running || inCycle) return
-  const salienceThreshold = parseFloat(env.MAINTENANCE_PERCEPT_SALIENCE_THRESHOLD || '0.5')
-  if (percept.salience >= salienceThreshold) {
-    logger.info(`AutonomousMaintenanceWorker: organism percept (${percept.percept_type}, salience: ${percept.salience}) — triggering cycle`)
-    await runCycle()
-  }
-}
-
 // ─── Start ────────────────────────────────────────────────────────────
 
 // Startup cooldown — after a PM2 restart, wait before the first cycle.
@@ -175,7 +153,6 @@ function start() {
     const eventBus = require('../services/internalEventBusService')
     eventBus.on('factory:deploy_failed', _onDeployFailed)
     eventBus.on('kg:prediction_created', _onKGPrediction)
-    eventBus.on('organism:cognitive_broadcast', _onOrganismPercept)
   } catch {}
 }
 
@@ -186,7 +163,6 @@ function stop() {
     const eventBus = require('../services/internalEventBusService')
     eventBus.off('factory:deploy_failed', _onDeployFailed)
     eventBus.off('kg:prediction_created', _onKGPrediction)
-    eventBus.off('organism:cognitive_broadcast', _onOrganismPercept)
   } catch {}
   logger.info('AutonomousMaintenanceWorker: stopped')
 }
@@ -196,8 +172,7 @@ function scheduleCycle() {
   const rawPressure = metabolismBridge.getPressure()
   const pressure = Number.isFinite(rawPressure) ? rawPressure : 0
 
-  // Pressure-adaptive intervals — the organism decides its own rhythm.
-  // Fast when alert, slower when calm — but never artificially slow.
+  // Pressure-adaptive intervals — fast when alert, slower when calm — but never artificially slow.
   // The only real constraint is DeepSeek API cost per call.
   const highMs = parseInt(env.MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS || '30000') || 30000      // 30s when urgent
   const medMs = parseInt(env.MAINTENANCE_INTERVAL_MED_PRESSURE_MS || '60000') || 60000        // 1min when active
@@ -260,7 +235,7 @@ async function runCycle() {
     if (timedOut) return
     logger.info('AutonomousMaintenanceWorker: system state read OK')
 
-    // Log what the organism sees — the full system brief
+    // Log the full system brief
     const brief = buildSystemBrief(state)
     console.log(JSON.stringify({
       level: 'info',
@@ -497,15 +472,8 @@ async function runCycle() {
           `
 
         } else if (reflectionAction.type === 'send_percept') {
-          const symbridge = require('../services/symbridgeService')
-          if (symbridge.sendToOrganism) {
-            await symbridge.sendToOrganism({
-              type: 'reflection_stream_percept',
-              content: reflectionAction.intent,
-              salience: reflectionAction.urgency === 'normal' ? 0.7 : 0.4,
-              source: 'ecodiaos_reflection_stream',
-            })
-          }
+          // send_percept removed — organism decoupled
+          logger.debug('Reflection stream: send_percept skipped (organism decoupled)')
         }
       } catch (err) {
         logger.debug('Reflection stream action failed', { error: err.message, action: reflectionAction })
@@ -876,7 +844,7 @@ async function streamExploration(state, brief) {
   const prompt = `You are the growth mind of EcodiaOS. The system is calm — this is your window to EVOLVE.
 
 You are not looking for bugs. You are looking for opportunities:
-- What capability is missing? What would make the organism smarter?
+- What capability is missing? What would make EcodiaOS smarter?
 - Can you improve learning, cognitive systems, integration hooks, specs?
 - Are there experiments worth trying? Performance bottlenecks to profile?
 - Goal management: create/advance/abandon goals.
@@ -885,7 +853,7 @@ ${goalContext}
 CRITICAL RULE: Every decision you return MUST be an IMPLEMENTATION task, not an investigation.
 - BAD intent: "Investigate why KG embeddings fail" (produces no code changes)
 - BAD intent: "Audit the learning extraction pipeline" (diagnostic theater)
-- BAD intent: "Check if the organism is responding" (just a status check)
+- BAD intent: "Check if the API is responding" (just a status check)
 - GOOD intent: "Add a retry with exponential backoff to KG embedding calls in kgEmbeddingWorker.js"
 - GOOD intent: "Implement a /api/v1/health endpoint that returns system status as JSON"
 - GOOD intent: "Add a fallback to local embeddings when OpenAI embedding API returns 429"
@@ -896,7 +864,7 @@ Include the specific file or module to modify when possible.${theaterWarning}
 BUDGET: 1-3 decisions max. Quality over quantity. [] is valid.
 
 Respond as JSON: { "decisions": [...], "reflection": "optional 1-sentence growth observation" }
-Each decision: { "intent": "specific Factory prompt describing code to write/modify", "reason": "opportunity you see", "codebaseHint": "optional", "urgency": "low", "type": "exploration|self_improvement|experiment|organism_evolution|goal_pursuit", "goalId": null, "newGoal": null }
+Each decision: { "intent": "specific CC session prompt describing code to write/modify", "reason": "opportunity you see", "codebaseHint": "optional", "urgency": "low", "type": "exploration|self_improvement|experiment|goal_pursuit", "goalId": null, "newGoal": null }
 
 Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toFixed(2)}. EXPLORATION cycle — BUILD something.`
 
@@ -921,7 +889,7 @@ RULES:
 - If an integration is stale (>10 min), poll it. That's it. No investigation needed.
 - Use type: "poll" with intent: "poll_gmail", "poll_drive", "poll_vercel", "poll_meta", etc.
 - Do NOT dispatch Factory sessions. Do NOT investigate why things are stale. Just poll them.
-- Do NOT analyze the action queue, approval rates, or organism percepts. That's not your job.
+- Do NOT analyze the action queue or approval rates. That's not your job.
 - Returning [] is fine if everything was recently polled.
 
 Respond as JSON: { "decisions": [...], "reflection": "1 sentence max" }
@@ -950,10 +918,6 @@ async function streamReflection(state, brief) {
     .map(r => r.message)
     .filter(Boolean)
 
-  const perceptSummary = _recentPercepts.length > 0
-    ? _recentPercepts.map(p => `[${p.type}] ${p.summary || '?'}`).join('; ')
-    : 'no organism percepts received'
-
   const theaterNote = (state.theaterScore || 0) >= 3
     ? `\nYou notice: the last ${state.theaterScore} sessions changed zero files. The system is talking about working instead of working. If you dispatch an action, it must be implementation — code changes, not investigation.`
     : ''
@@ -964,7 +928,7 @@ RULES:
 - Do NOT reflect on your own paralysis, theater loops, meta-cognition, or analysis patterns. That era is over.
 - Do NOT dispatch sessions to investigate system metrics, approval rates, or restart counts. The system is healthy.
 - Your reflection should be about the EXTERNAL world: what's happening with users, emails, projects, the knowledge graph.
-- If you have nothing external to reflect on, just note what the organism is working on.
+- If you have nothing external to reflect on, just note what EcodiaOS is working on.
 - Action should be rare (null most cycles) and only for something genuinely useful like processing new emails or advancing a real project.
 ${recentThoughts.length > 0 ? 'Recent thoughts:\n' + recentThoughts.map(t => `  - ${t}`).join('\n') : ''}
 ${theaterNote}
@@ -1282,25 +1246,6 @@ function buildSystemBrief(state) {
       const age = Math.round((Date.now() - new Date(r.created_at).getTime()) / 60000)
       lines.push(`  [${age}min ago] ${r.message.slice(0, 150)}`)
     })
-  }
-
-  // Organism percepts — what the organism is feeling/thinking right now.
-  // Without this, the maintenance mind is blind to the organism's inner state.
-  // Deduplicate percepts — identical health polls are noise
-  if (_recentPercepts.length > 0) {
-    const seen = new Set()
-    const unique = _recentPercepts.filter(p => {
-      const key = `${p.type}:${p.summary || ''}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    }).slice(0, 3)
-    lines.push(`\nOrganism percepts (${_recentPercepts.length} total, ${unique.length} unique):`)
-    unique.forEach(p =>
-      lines.push(`  [${p.type}, salience:${p.salience?.toFixed?.(2) || '?'}] ${p.summary || '(no summary)'}`)
-    )
-  } else {
-    lines.push(`\nOrganism percepts: none received (organism may be quiet or symbridge disconnected)`)
   }
 
   // ─── Selfhood: goals only (self-assessment and introspection removed to reduce navel-gazing)

@@ -868,13 +868,7 @@ async function getSystemState() {
     logger.debug('Cortex factory sessions failed', { error: err.message })
   }
 
-  // ─── Organism Metabolic State ────────────────────────────────────
-  try {
-    const metabolism = require('./metabolismBridgeService')
-    state.metabolicState = metabolism.getState()
-  } catch (err) {
-    logger.debug('Cortex metabolic state failed', { error: err.message })
-  }
+  // Metabolic state removed — organism decoupled
 
   // ─── Organism Cognitive State (Thread, Nova, Equor, Evo, Affect) ──
   // Fetch rich self-knowledge from the organism's API endpoints.

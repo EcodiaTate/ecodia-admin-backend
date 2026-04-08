@@ -14,25 +14,6 @@ function isEnabled() {
   return !!(env.NEO4J_URI && env.DEEPSEEK_API_KEY)
 }
 
-// ─── Immediate Memory Sync Helper ──────────────────────────────────
-// After any ingestion that produces a high-importance node, sync it
-// to the organism immediately rather than waiting for the 30-min sweep.
-// Fire-and-forget, non-blocking.
-
-async function trySyncImportant(nodeName, labels, properties) {
-  try {
-    const memBridge = require('./memoryBridgeService')
-    const rawImportance = properties?.importance || 0
-    const importance = Number.isFinite(rawImportance) ? rawImportance : 0
-    if (importance >= 0.9) {
-      await memBridge.syncImmediateIfUrgent({ name: nodeName, labels, importance, properties })
-    } else if (importance >= 0.7) {
-      await memBridge.syncImmediateIfImportant({ name: nodeName, labels, importance, properties })
-    }
-  } catch (err) {
-    logger.debug('trySyncImportant failed (non-blocking)', { error: err.message, nodeName })
-  }
-}
 
 // ─── Gmail ───────────────────────────────────────────────────────────
 
@@ -350,12 +331,6 @@ async function onCCSessionCompleted({ session, projectName }) {
       })
     }
 
-    // Immediate sync: CC session outcomes are high-value for organism's Evo
-    trySyncImportant(
-      sessionName,
-      ['CCSession'],
-      { importance: session.status === 'error' ? 0.8 : 0.7, status: session.status, project: projectName },
-    )
   } catch (err) {
     logger.debug('KG CC session ingestion failed (non-blocking)', { error: err.message })
   }
@@ -414,12 +389,6 @@ async function onDeploymentCompleted({ deployment, codebaseName, sessionId }) {
       })
     }
 
-    // Deploy failures are urgent — organism's Thymos needs to know immediately
-    trySyncImportant(
-      deployName,
-      ['Deployment'],
-      { importance: isFailure ? 0.9 : 0.7, status: deployment.deploy_status, codebase: codebaseName },
-    )
   } catch (err) {
     logger.debug('KG deployment ingestion failed (non-blocking)', { error: err.message })
   }
@@ -567,55 +536,6 @@ async function onMetaConversationUpdated({ conversation, participantName, platfo
   }
 }
 
-// ─── Symbridge Messages ─────────────────────────────────────────────
-
-async function onSymbridgeMessage({ direction, messageType, payload, sourceSystem, correlationId }) {
-  if (!isEnabled()) return
-
-  // Skip high-frequency low-value message types — heartbeats, acks, and routine
-  // health signals would flood the graph with noise nodes.
-  const skipTypes = new Set(['heartbeat', 'ack', 'pong', 'health_check', 'keepalive'])
-  if (skipTypes.has(messageType)) return
-
-  try {
-    // Direct structured ingestion — symbridge payloads are machine-structured JSON,
-    // not natural language. Parse directly into nodes/rels instead of LLM extraction.
-    const eventName = `Symbridge: ${messageType} (${direction})`
-
-    await kg.ensureNode({
-      label: 'SymbridgeEvent',
-      name: eventName,
-      properties: {
-        direction,
-        message_type: messageType,
-        source_system: sourceSystem,
-        correlation_id: correlationId || null,
-        // Capture meaningful payload fields without dumping raw JSON
-        description: payload?.description || payload?.message || payload?.type || messageType,
-        outcome: payload?.outcome || payload?.status || null,
-        confidence: payload?.confidence || null,
-      },
-      sourceModule: 'symbridge',
-      sourceId: correlationId || null,
-    })
-
-    // Only create cross-body relationship for substantive message types
-    const substantive = new Set(['proposal', 'result', 'factory_result', 'hypothesis', 'discovery', 'directive'])
-    if (substantive.has(messageType) && payload?.codebase) {
-      await kg.ensureRelationship({
-        fromLabel: 'SymbridgeEvent',
-        fromName: eventName,
-        toLabel: 'Codebase',
-        toName: payload.codebase,
-        relType: direction === 'outbound' ? 'PROPOSED_FOR' : 'RESULTED_IN',
-        sourceModule: 'symbridge',
-      })
-    }
-  } catch (err) {
-    logger.debug('KG symbridge ingestion failed (non-blocking)', { error: err.message })
-  }
-}
-
 // ─── Action Queue — Decision Intelligence ────────────────────────────
 // Rich structured signals that feed back into suppression + priority learning.
 
@@ -696,13 +616,6 @@ Resource key: ${action.resource_key || 'none'}`
 4. Track the result quality to inform future draft generation.`,
     })
 
-    // Cognitive broadcast: tell the organism an action was executed
-    sendCognitiveBroadcast('action_outcome', 0.4, {
-      source: action.source,
-      action_type: action.action_type,
-      title: action.title,
-      result: result?.message,
-    })
   } catch (err) {
     logger.debug('KG action queue ingestion failed (non-blocking)', { error: err.message })
   }
@@ -768,39 +681,12 @@ async function onDirectAction({ actionType, params, result, status, durationMs }
   }
 }
 
-// ─── Factory Outcome with Immediate Sync ────────────────────────────
+// ─── Factory Outcome ─────────────────────────────────────────────────
 
 async function onFactoryOutcome({ session, outcome, confidence, filesChanged, commitSha, error }) {
   if (!isEnabled()) return
-
-  // Sync Factory outcomes to organism immediately — Evo needs this for hypothesis formation
-  try {
-    const memBridge = require('./memoryBridgeService')
-    await memBridge.syncImmediateIfImportant({
-      name: `Factory: ${outcome} — ${(session.initial_prompt || '').slice(0, 60)}`,
-      labels: ['FactoryOutcome'],
-      importance: outcome === 'success' ? 0.7 : outcome === 'deploy_failed' ? 0.9 : 0.6,
-      properties: {
-        outcome,
-        confidence,
-        codebase: session.codebase_name,
-        trigger: session.trigger_source,
-        files_changed: (filesChanged || []).slice(0, 10).join(', '),
-      },
-    })
-  } catch (err) {
-    logger.debug('Factory outcome memory sync failed', { error: err.message })
-  }
-
-  // Cognitive broadcast to organism's Atune
-  sendCognitiveBroadcast('factory_outcome', confidence || 0.5, {
-    session_id: session.id,
-    outcome,
-    codebase: session.codebase_name,
-    files_changed: filesChanged,
-    commit_sha: commitSha,
-    error,
-  })
+  // KG ingestion is handled by onCCSessionCompleted — this is a no-op hook
+  // kept for interface compatibility with factoryOversightService
 }
 
 // ─── System Events (maintenance cycles, worker signals) ─────────────
@@ -828,26 +714,6 @@ async function onSystemEvent({ type, decisions, actioned, pressure }) {
     })
   } catch (err) {
     logger.debug('KG system event ingestion failed (non-blocking)', { error: err.message })
-  }
-}
-
-// ─── Cognitive Broadcast Helper ─────────────────────────────────────
-// Sends structured percepts to the organism's cognitive cycle (Atune)
-
-function sendCognitiveBroadcast(perceptType, salience, content) {
-  if (env.COGNITIVE_BROADCAST_ENABLED === 'false') return
-
-  try {
-    const symbridge = require('./symbridgeService')
-    symbridge.send('cognitive_broadcast', {
-      percept_type: perceptType,
-      salience: Math.max(0, Math.min(1, salience)),
-      content,
-      source: 'ecodiaos',
-      timestamp: new Date().toISOString(),
-    }).catch(err => logger.debug('Cognitive broadcast send failed', { error: err.message }))
-  } catch (err) {
-    logger.debug('Cognitive broadcast failed', { error: err.message })
   }
 }
 
@@ -911,7 +777,6 @@ module.exports = {
   onVercelDeployment,
   onMetaPostCreated,
   onMetaConversationUpdated,
-  onSymbridgeMessage,
   onActionDismissed,
   onActionExecuted,
   onActionFeedback,
@@ -920,5 +785,4 @@ module.exports = {
   onSystemEvent,
   onCodeRequestCreated,
   onCodeRequestCompleted,
-  sendCognitiveBroadcast,
 }

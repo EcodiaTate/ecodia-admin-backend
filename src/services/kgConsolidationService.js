@@ -1260,8 +1260,7 @@ async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
   // Low pressure = abundant exploration; high pressure = focused single-round probe.
   if (rounds === undefined) {
     try {
-      const metabolismBridge = require('./metabolismBridgeService')
-      const pressure = metabolismBridge.getPressure()
+      const pressure = 0 // metabolismBridge removed (organism decoupled)
       const pHigh = parseFloat(env.KG_FREE_ASSOC_PRESSURE_HIGH || '0.8')
       const pMed  = parseFloat(env.KG_FREE_ASSOC_PRESSURE_MED  || '0.6')
       const pLow  = parseFloat(env.KG_FREE_ASSOC_PRESSURE_LOW  || '0.3')
@@ -1485,14 +1484,6 @@ Respond as JSON:
     const description = disc.description || `${disc.from || ''} → ${disc.to || ''} (${disc.rel || disc.action})`
 
     try {
-      // All discoveries → organism via symbridge (for Voxis expression, Evo hypothesis, Thread narrative)
-      const symbridge = require('./symbridgeService')
-      await symbridge.send('discovery', {
-        type: disc.action,
-        description,
-        source: 'free_association',
-      }).catch(() => {})
-
       // Check if discovery suggests an integration opportunity
       const integrationKeywords = /integrat|api|connect|webhook|poll|service|endpoint|external/i
       if (integrationKeywords.test(description)) {
@@ -1516,22 +1507,6 @@ Respond as JSON:
             context: 'Free association phase found a pattern suggesting a codebase improvement opportunity.',
             suggestedAction: 'Investigate and address this pattern.',
           })
-        } catch {}
-      }
-
-      // Cross-body connection: if discovery links admin-world concepts to organism-world concepts
-      const organismLabels = /narrative|prediction|hypothesis|episode|belief|percept|affect/i
-      const adminLabels = /email|calendar|crm|deploy|codebase|project|client/i
-      if ((organismLabels.test(description) && adminLabels.test(description)) ||
-          (disc.from && disc.to && organismLabels.test(disc.from) !== organismLabels.test(disc.to))) {
-        try {
-          const memBridge = require('./memoryBridgeService')
-          await memBridge.syncSingleNode(
-            `Cross-body: ${description.slice(0, 80)}`,
-            ['CrossBodyInsight'],
-            { description, source: 'free_association', importance: 0.85 },
-            { priority: 'urgent' },
-          )
         } catch {}
       }
 
@@ -2049,9 +2024,7 @@ async function readGraphState() {
 
 async function directConsolidation(graphState) {
   const deepseekService = require('./deepseekService')
-  const pressure = (() => {
-    try { return require('./metabolismBridgeService').getPressure() } catch { return 0.3 }
-  })()
+  const pressure = 0.3 // metabolismBridge removed (organism decoupled)
 
   const stateDesc = [
     `Total nodes: ${graphState.totalNodes}`,

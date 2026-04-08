@@ -128,12 +128,7 @@ try {
     _scaffoldListenerAttached = true
     eventBus.on('kg:integration_opportunity', async (payload) => {
       try {
-        const metabolismBridge = require('./metabolismBridgeService')
-        // Only scaffold new integrations when resources are abundant
-        if (metabolismBridge.getPressure() > 0.4) {
-          logger.debug('Integration scaffold: skipping opportunity (metabolic pressure too high)')
-          return
-        }
+        // metabolismBridge removed — always proceed (pressure = 0)
 
         const description = payload.description || ''
         const nodes = payload.nodes || []

@@ -176,13 +176,11 @@ server.listen(env.PORT, async () => {
   //   kgEmbeddingWorker, kgConsolidationWorker
   //
   // Inline (started here, restart with this process):
-  //   calendarPoller, codebaseIndexWorker, symbridgeWorker,
-  //   workspacePoller, autonomousMaintenanceWorker
+  //   calendarPoller, codebaseIndexWorker, workspacePoller
 
   const inlineWorkers = [
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
-    { name: 'symbridgeWorker',             path: './workers/symbridgeWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
     // Disabled: was running DeepSeek triage every 2min, burning credits.
     // CEO OS handles all maintenance via scheduler crons now.

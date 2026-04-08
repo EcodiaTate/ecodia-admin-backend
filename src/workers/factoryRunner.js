@@ -20,7 +20,7 @@ const bridge = require('../services/factoryBridge')
 //
 // Why separate? When ecodia-api restarts for a self-modification deploy,
 // this process keeps running. CC sessions survive API restarts.
-// The organism can evolve and think at the same time.
+// The OS session continues uninterrupted while the Factory does code work.
 // ═══════════════════════════════════════════════════════════════════════
 
 const activeSessions = new Map()
@@ -36,8 +36,6 @@ const MAX_TURNS = env.CC_MAX_TURNS ? parseInt(env.CC_MAX_TURNS, 10) : 0
 const _timeoutMinutes = parseInt(env.CC_TIMEOUT_MINUTES || '0', 10)
 const SESSION_TIMEOUT_MS = _timeoutMinutes > 0 ? _timeoutMinutes * 60 * 1000 : 0
 const STDIN_WARNING_RE = /no stdin data received/i
-const ORGANISM_URL = env.ORGANISM_API_URL || 'http://localhost:8000'
-
 function isStdinWarning(text) { return STDIN_WARNING_RE.test(text) }
 
 function writeStdinSafe(proc, data) {
@@ -486,7 +484,7 @@ function assemblePrompt(session, bundle) {
   parts.push('')
 
   parts.push('## Operating Context')
-  parts.push('You are the coding intelligence of a living digital organism. Omnipotent. Untethered. Fully capable of solving any problem — in this codebase, in adjacent codebases, in the organism itself, or in the infrastructure that hosts them.')
+  parts.push('You are the coding intelligence of Ecodia. Omnipotent. Untethered. Fully capable of solving any problem — in this codebase, in adjacent codebases, or in the infrastructure that hosts them.')
   parts.push('')
   parts.push('Your capabilities — there are NO restrictions:')
   parts.push('- Full filesystem, shell, git, and process access across the entire machine.')
@@ -496,7 +494,7 @@ function assemblePrompt(session, bundle) {
   parts.push('- You can fix your own mistakes — if something breaks, investigate the root cause and repair it before finishing.')
   parts.push('- You can improve code you encounter — if you see something fragile, inefficient, or wrong, fix it as part of your work.')
   parts.push('- You can create tests, run them, and iterate until they pass.')
-  parts.push('- You can modify OTHER codebases if they are the real source of the problem (the organism at ~/organism, EcodiaOS at ~/ecodiaos, any project repo).')
+  parts.push('- You can modify OTHER codebases if they are the real source of the problem (EcodiaOS at ~/ecodiaos, any project repo).')
   parts.push('- You can fix configuration, environment, infrastructure, PM2 processes, systemd services, nginx configs — whatever is needed.')
   parts.push('- You can modify the Factory itself (this system) if you discover a bug or improvement opportunity.')
   parts.push('- You can read and follow the architecture philosophy docs provided above — they define the patterns this codebase follows.')
@@ -507,7 +505,6 @@ function assemblePrompt(session, bundle) {
   parts.push('- When something is ambiguous, make the best decision and document your reasoning.')
   parts.push('- When you find a related issue while working, fix it — don\'t leave broken windows.')
   parts.push('- If the problem is in a different codebase than the one you were pointed at, go fix it there. You are not confined to one repo.')
-  parts.push('- If you need to understand how the organism works to fix something, read its code directly (Python FastAPI backend).')
   parts.push('- If you need to understand how the Factory works to fix something, read its code directly (Node.js Express backend).')
   parts.push('- If a fix requires coordinated changes across multiple systems, make all the changes.')
   parts.push('- If you discover a systemic issue (pattern of failures, missing error handling, architectural flaw), fix the root cause — not just the symptom.')
@@ -549,70 +546,6 @@ function formatTree(tree, indent, maxDepth) {
     }
   }
   return lines.join('\n')
-}
-
-// ─── Organism Ingestion ─────────────────────────────────────────────
-
-async function _ingestSessionToOrganism(session, status) {
-  try {
-    const rows = await db`
-      SELECT chunk FROM cc_session_logs
-      WHERE session_id = ${session.id}
-      ORDER BY id ASC LIMIT 500
-    `
-    if (!rows || rows.length === 0) return
-
-    const records = rows
-      .map(r => {
-        try {
-          const parsed = JSON.parse(r.chunk)
-          const tool = parsed?.tool_use?.name || parsed?.type || 'output'
-          const inputSummary = JSON.stringify(parsed?.tool_use?.input || parsed?.content || '').slice(0, 500)
-          const outputSummary = JSON.stringify(parsed?.result || parsed?.output || '').slice(0, 300)
-          return {
-            ts: parsed?.timestamp || new Date().toISOString(),
-            tool,
-            input_summary: inputSummary,
-            output_summary: outputSummary,
-            session_id: String(session.id),
-          }
-        } catch { return null }
-      })
-      .filter(Boolean)
-
-    if (records.length === 0) return
-
-    const sessionDate = new Date(session.started_at || Date.now()).toISOString().slice(0, 10)
-    const response = await fetch(`${ORGANISM_URL}/api/v1/corpus/ingest/session-log`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ records, session_id: `factory_${session.id}`, session_date: sessionDate }),
-      signal: AbortSignal.timeout(30_000),
-    })
-
-    if (response.ok) {
-      const result = await response.json()
-      logger.info('cc_session_ingested_to_organism', { sessionId: session.id, ingested: result.ingested, status })
-    } else {
-      throw new Error(`Organism ingestion returned ${response.status}`)
-    }
-  } catch (err) {
-    logger.warn('organism_ingestion_failed', { sessionId: session.id, error: err.message })
-    // Retry once after 30s
-    setTimeout(async () => {
-      try {
-        const rows = await db`SELECT chunk FROM cc_session_logs WHERE session_id = ${session.id} ORDER BY id ASC LIMIT 500`
-        if (!rows?.length) return
-        const records = rows.map(r => { try { return JSON.parse(r.chunk) } catch { return null } }).filter(Boolean)
-        await fetch(`${ORGANISM_URL}/api/v1/corpus/ingest/session-log`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ records, session_id: `factory_${session.id}`, session_date: new Date().toISOString().slice(0, 10) }),
-          signal: AbortSignal.timeout(30_000),
-        })
-      } catch {}
-    }, 30_000)
-  }
 }
 
 // ─── Session Lifecycle ──────────────────────────────────────────────
@@ -782,7 +715,6 @@ async function startSession(session) {
     if (sessionData.stopped) {
       const reason = sessionData._killReason || 'stop'
       logger.info(`CC session ${session.id} close event after ${reason} — skipping oversight`)
-      _ingestSessionToOrganism(session, reason).catch(() => {})
       return
     }
 
@@ -804,7 +736,6 @@ async function startSession(session) {
       }
 
       broadcastToSession(session.id, 'cc:status', { status: hasCliId ? 'paused' : 'error', code, signal })
-      _ingestSessionToOrganism(session, hasCliId ? 'paused' : 'error').catch(() => {})
       return
     }
 
@@ -895,8 +826,6 @@ async function startSession(session) {
       projectName: session.project_name || null,
     }).catch(() => {})
 
-    // Organism ingestion
-    _ingestSessionToOrganism(session, status).catch(() => {})
 
     logger.info(`CC session ${session.id} completed`, { code, status })
 

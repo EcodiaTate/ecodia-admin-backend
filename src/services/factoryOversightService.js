@@ -185,8 +185,7 @@ async function runPostSessionPipeline(sessionId) {
   // Review ALWAYS runs. Under high metabolic pressure, non-self-mod reviews run
   // async (fire-and-forget to KG for learning) and we proceed on validation alone.
   // Self-modifications always block on review — the oversight pipeline is the safety net.
-  const metabolismBridge = require('./metabolismBridgeService')
-  const pressure = metabolismBridge.getPressure()
+  const pressure = 0 // metabolismBridge removed (organism decoupled)
   let review = null
 
   const reviewPressureGate = parseFloat(env.FACTORY_REVIEW_PRESSURE_GATE || '0')
@@ -596,50 +595,12 @@ async function checkVercelDeployment(session, deployResult) {
               ${JSON.stringify({ sessionId: session.id, commitSha: deployResult.commitSha })})
     `
 
-    // Always notify organism about deploy health failures — not just organism-triggered sessions
-    try {
-      const symbridge = require('./symbridgeService')
-      await symbridge.send('factory_result', {
-        session_id: session.id,
-        status: 'deploy_health_failed',
-        codebase_name: session.codebase_name,
-        commit_sha: deployResult.commitSha,
-        trigger_source: session.trigger_source,
-      }, session.id)
-    } catch {}
-
-    // Cognitive broadcast: health failure is high-salience
-    kgHooks.sendCognitiveBroadcast('health_anomaly', 0.9, {
-      type: 'deploy_health_failed',
-      codebase: session.codebase_name,
-      commit_sha: deployResult.commitSha,
-    })
   }
 }
 
 // ─── Report to Trigger Source ───────────────────────────────────────
 
 async function reportToTriggerSource(session, result) {
-  // Report back to organism for any trigger source that came from the organism
-  const organismTriggers = ['simula_proposal', 'thymos_incident', 'kg_insight', 'self_modification']
-  if (organismTriggers.includes(session.trigger_source)) {
-    try {
-      const symbridge = require('./symbridgeService')
-      await symbridge.send('factory_result', {
-        session_id: session.id,
-        status: result.success ? 'completed' : 'failed',
-        stage: result.stage,
-        error_message: result.error || null,
-        files_changed: result.filesChanged || session.files_changed || [],
-        commit_sha: result.commitSha || null,
-        confidence_score: result.confidence || null,
-        codebase_name: session.codebase_name,
-        deploy_status: result.stage === 'deployed' ? 'deployed' : null,
-      }, session.trigger_ref_id || session.id)
-    } catch (err) {
-      logger.debug('Failed to report to organism via symbridge', { error: err.message })
-    }
-  }
 
   // Close the loop for social-originated code requests
   const socialSources = ['gmail', 'linkedin', 'meta', 'twitter']

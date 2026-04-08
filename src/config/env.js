@@ -28,8 +28,6 @@ const envSchema = z.object({
   RCLONE_BACKUP_REMOTE: z.string().optional(),
   CLAUDE_CLI_PATH: z.string().default('claude'),
   REDIS_URL: z.string().default(''),
-  SYMBRIDGE_SECRET: z.string().default(''),
-  ORGANISM_API_URL: z.string().default(''),
   FACTORY_AUTO_DEPLOY_THRESHOLD: z.string().default('0.0'),        // 0 = AI decides, no confidence floor for auto-deploy
   FACTORY_ESCALATE_THRESHOLD: z.string().default('0.0'),           // 0 = LLM decides, no escalation floor
   FACTORY_REVIEW_PRESSURE_GATE: z.string().default('0.0'),         // 0 = review always blocks; >0 = async at this pressure
@@ -65,10 +63,9 @@ const envSchema = z.object({
   OWNER_NAME: z.string().default('Tate'),
   USD_TO_AUD: z.string().default('1.55'),
   DIRECT_ACTION_READ_ENABLED: z.string().default('true'),
-  DIRECT_ACTION_WRITE_ENABLED: z.string().default('true'),  // organism writes enabled
+  DIRECT_ACTION_WRITE_ENABLED: z.string().default('true'),
   SELF_MOD_DAILY_CAP: z.string().default('0'),              // 0 = unlimited self-modifications per 24h
   EVENT_BUS_PERSIST_DEFAULT: z.string().default('false'),
-  COGNITIVE_BROADCAST_ENABLED: z.string().default('true'),
   // Direct action rate limits (per hour, 0 = unlimited per type)
   DA_RATE_SEND_EMAIL: z.string().default('0'),
   DA_RATE_CALENDAR_EVENT: z.string().default('0'),
@@ -85,8 +82,7 @@ const envSchema = z.object({
   CLAUDE_WEEKLY_OUTPUT_CAP: z.string().default('200000'),   // output token cap per week (weighted ×10)
   CLAUDE_OUTPUT_WEIGHT:     z.string().default('10'),        // output tokens cost this many × input tokens
   // Vital signs tuning
-  ORGANISM_HEALTH_CHECK_INTERVAL_MS: z.string().default('0'),   // 0 = 15000ms
-  ORGANISM_MAX_CONSECUTIVE_FAILURES: z.string().default('0'),   // 0 = 3
+  ORGANISM_HEALTH_CHECK_INTERVAL_MS: z.string().default('0'),   // 0 = 15000ms (self-health check interval)
   // Pressure gates (0 = never block) — metabolic pressure modulates behaviour, not gates it
   SURVIVAL_PRESSURE_GATE: z.string().default('0'),              // 0 = never block capability writes (metabolism decides, not binary gates)
   METABOLIC_PRESSURE_GATE: z.string().default('0'),             // 0 = never block direct actions (metabolism decides, not binary gates)
@@ -132,14 +128,6 @@ const envSchema = z.object({
   KG_DECAY_PRUNE_AFTER_DAYS: z.string().default('30'),       // days stale before node is pruned
   KG_DECAY_MAX_RELATIONSHIPS: z.string().default('2'),       // nodes with <= this many rels are decay candidates
   KG_DECAY_BATCH_SIZE: z.string().default('500'),             // max nodes to prune per batch (avoids Neo4j timeouts)
-  // Memory bridge query thresholds
-  MEMORY_BRIDGE_BULK_IMPORTANCE_MIN: z.string().default('0.5'),
-  MEMORY_BRIDGE_PULL_IMPORTANCE_MIN: z.string().default('0.7'),
-  MEMORY_BRIDGE_CONFIDENCE_MIN: z.string().default('0.4'),
-  // Symbridge learnings filters
-  SYMBRIDGE_LEARNINGS_HIGH_CONFIDENCE: z.string().default('0.5'),
-  SYMBRIDGE_LEARNINGS_CODEBASE_MIN: z.string().default('0.35'),
-  SYMBRIDGE_LEARNINGS_GLOBAL_MIN: z.string().default('0.4'),
   // Service confidence thresholds
   CORTEX_URGENCY_THRESHOLD: z.string().default('0.0'),   // 0 = no urgency floor; AI decides action relevance
   XERO_CATEGORIZATION_CONFIDENCE_MIN: z.string().default('0.7'),
