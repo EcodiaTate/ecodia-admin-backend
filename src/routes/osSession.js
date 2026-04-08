@@ -81,7 +81,7 @@ router.post('/compact', async (req, res, next) => {
   }
 })
 
-// Get weekly energy snapshot (usage %, burn rate, model recommendation)
+// Get weekly energy snapshot — real % from Anthropic response headers
 router.get('/energy', async (_req, res, next) => {
   try {
     const energy = await usageEnergy.getEnergy()
@@ -89,7 +89,16 @@ router.get('/energy', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// Get historical weekly usage
+// Force a live quota-check (fires a 1-token API call to read real headers)
+router.post('/energy/refresh', async (_req, res, next) => {
+  try {
+    await usageEnergy.refreshQuotaCheck()
+    const energy = await usageEnergy.getEnergy()
+    res.json(energy)
+  } catch (err) { next(err) }
+})
+
+// Get historical weekly usage (self-tracked turns for activity log)
 router.get('/energy/history', async (req, res, next) => {
   try {
     const weeks = parseInt(req.query.weeks || '4', 10)

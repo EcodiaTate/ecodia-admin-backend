@@ -1,222 +1,289 @@
 /**
  * Usage Energy Service
  *
- * Tracks Claude Max weekly token usage and computes an "energy level" (0–100%)
- * the OS can use to self-govern model selection and scheduling frequency.
+ * Gets REAL weekly Claude Max usage % from Anthropic's response headers.
  *
- * Claude Max plan:  20× usage = ~2,000,000 input + 200,000 output tokens/week
- * (Anthropic internal unit: 1 "usage" ≈ 100K input tokens or 10K output tokens)
- * We track real token counts and translate to a % of the weekly cap.
+ * How it works:
+ *   Every /v1/messages response from Anthropic includes:
+ *     anthropic-ratelimit-unified-7d-utilization  — float 0–1 (real weekly % used)
+ *     anthropic-ratelimit-unified-7d-reset        — Unix timestamp of next reset
+ *     anthropic-ratelimit-unified-5h-utilization  — 5-hour session utilization
+ *     anthropic-ratelimit-unified-status          — allowed | allowed_warning | rejected
  *
- * Energy states:
- *   full      90–100%  remaining — use Opus freely, run all schedules
- *   healthy   60–90%   remaining — normal operation
- *   conserve  30–60%   remaining — prefer Sonnet for routine tasks, keep Opus for important
- *   low       10–30%   remaining — Sonnet only, reduce scheduled frequency
- *   critical  0–10%    remaining — minimal ops, Bedrock fallback, defer non-urgent tasks
+ *   We capture these headers in two ways:
+ *   1. Passively: from every OS session turn (osSessionService calls updateFromHeaders())
+ *   2. Actively: a lightweight quota-check call (1-token message) when headers go stale
+ *
+ *   This is exactly what `claude /usage` does — same headers, same data source.
+ *
+ * Energy states (derived from real utilization):
+ *   full      0–10%  used  — opus freely, all schedules
+ *   healthy  10–40%  used  — normal
+ *   conserve 40–70%  used  — prefer sonnet for routine, opus for important
+ *   low      70–90%  used  — sonnet only, reduce schedule frequency
+ *   critical 90–100% used  — minimal ops, bedrock fallback, defer non-urgent
  */
 
-const db = require('../config/db')
+const fs = require('fs')
+const path = require('path')
 const logger = require('../config/logger')
+const db = require('../config/db')
 
-// ─── Weekly Claude Max capacity ───────────────────────────────────────────────
-// Claude Max 20× plan — empirically: ~2M input + ~200K output tokens/week
-// Override via env for different plan tiers
-const WEEKLY_INPUT_CAP = parseInt(process.env.CLAUDE_WEEKLY_INPUT_CAP || '2000000', 10)
-const WEEKLY_OUTPUT_CAP = parseInt(process.env.CLAUDE_WEEKLY_OUTPUT_CAP || '200000', 10)
+// ─── In-memory state — updated from headers on every API call ─────────────────
+let _state = {
+  // From Anthropic headers (real data)
+  weeklyUtilization: null,    // 0–1 float from anthropic-ratelimit-unified-7d-utilization
+  weeklyResetsAt: null,       // Unix seconds from anthropic-ratelimit-unified-7d-reset
+  sessionUtilization: null,   // 0–1 float from anthropic-ratelimit-unified-5h-utilization
+  sessionResetsAt: null,      // Unix seconds
+  rateLimitStatus: 'allowed', // allowed | allowed_warning | rejected
+  rateLimitType: null,        // seven_day | five_hour | overage | etc.
+  isUsingOverage: false,
+  headersUpdatedAt: null,     // Date.now() when headers were last captured
+}
 
-// Weight output tokens more heavily (they consume more usage units)
-// Output ≈ 10× the usage cost of input tokens
-const OUTPUT_WEIGHT = parseFloat(process.env.CLAUDE_OUTPUT_WEIGHT || '10')
-
-// Weighted cap: total weighted-token budget per week
-const WEIGHTED_CAP = WEEKLY_INPUT_CAP + (WEEKLY_OUTPUT_CAP * OUTPUT_WEIGHT)
-
-// ─── In-memory cache (refresh max every 60s) ──────────────────────────────────
+// Cache the full energy snapshot (60s TTL)
 let _cache = null
 let _cacheAt = 0
 const CACHE_TTL_MS = 60_000
 
-// ─── Get the ISO Monday for a given date ──────────────────────────────────────
-function getWeekStart(date = new Date()) {
-  const d = new Date(date)
-  const day = d.getUTCDay() // 0=Sun, 1=Mon…
-  const diff = (day === 0 ? -6 : 1 - day)
-  d.setUTCDate(d.getUTCDate() + diff)
-  d.setUTCHours(0, 0, 0, 0)
-  return d.toISOString().slice(0, 10) // 'YYYY-MM-DD'
-}
+// How long before we proactively refresh via quota-check (15 min)
+const HEADER_STALE_MS = 15 * 60 * 1000
 
-// ─── Log a single turn's token usage ──────────────────────────────────────────
-async function logUsage({ sessionId = null, source = 'os_session', provider = 'claude_max', model = null, inputTokens = 0, outputTokens = 0 }) {
+// ─── Update state from real Anthropic response headers ────────────────────────
+// Call this from osSessionService whenever we get a response.
+// headers can be a Headers object, a plain object, or a Map — we normalise via .get()
+function updateFromHeaders(headers) {
   try {
-    const weekStart = getWeekStart()
-    await db`
-      INSERT INTO claude_usage (session_id, source, provider, model, input_tokens, output_tokens, week_start)
-      VALUES (${sessionId}, ${source}, ${provider}, ${model}, ${inputTokens}, ${outputTokens}, ${weekStart})
-    `
-    // Invalidate cache so next read gets fresh numbers
-    _cache = null
-    _cacheAt = 0
+    const get = (k) => {
+      if (typeof headers.get === 'function') return headers.get(k)
+      if (typeof headers === 'object') return headers[k] ?? headers[k.toLowerCase()] ?? null
+      return null
+    }
+
+    const weeklyUtil  = get('anthropic-ratelimit-unified-7d-utilization')
+    const weeklyReset = get('anthropic-ratelimit-unified-7d-reset')
+    const sessionUtil  = get('anthropic-ratelimit-unified-5h-utilization')
+    const sessionReset = get('anthropic-ratelimit-unified-5h-reset')
+    const status       = get('anthropic-ratelimit-unified-status')
+    const claim        = get('anthropic-ratelimit-unified-representative-claim')
+    const overageStatus = get('anthropic-ratelimit-unified-overage-status')
+
+    if (weeklyUtil !== null && weeklyUtil !== undefined) {
+      _state.weeklyUtilization = Number(weeklyUtil)
+      _state.headersUpdatedAt  = Date.now()
+      // Invalidate snapshot cache so next read gets fresh energy
+      _cache = null
+      _cacheAt = 0
+    }
+    if (weeklyReset !== null && weeklyReset !== undefined) {
+      _state.weeklyResetsAt = Number(weeklyReset)
+    }
+    if (sessionUtil !== null && sessionUtil !== undefined) {
+      _state.sessionUtilization = Number(sessionUtil)
+    }
+    if (sessionReset !== null && sessionReset !== undefined) {
+      _state.sessionResetsAt = Number(sessionReset)
+    }
+    if (status) _state.rateLimitStatus = status
+    if (claim)  _state.rateLimitType   = claim
+    _state.isUsingOverage = overageStatus === 'allowed' || overageStatus === 'allowed_warning'
+
+    logger.debug('Claude usage headers captured', {
+      weeklyUtil: _state.weeklyUtilization,
+      status: _state.rateLimitStatus,
+    })
   } catch (err) {
-    // Non-fatal — usage logging must never crash the main flow
-    logger.warn('claude_usage log failed', { error: err.message })
+    logger.debug('updateFromHeaders failed', { error: err.message })
   }
 }
 
-// ─── Fetch weekly aggregated usage from DB ────────────────────────────────────
-async function _fetchWeeklyUsage(weekStart) {
-  const rows = await db`
-    SELECT
-      provider,
-      SUM(input_tokens)::bigint  AS input_tokens,
-      SUM(output_tokens)::bigint AS output_tokens,
-      COUNT(*)::int              AS turns
-    FROM claude_usage
-    WHERE week_start = ${weekStart}
-    GROUP BY provider
-  `
-  return rows
+// ─── Quota-check: fire a minimal 1-token API call just to read headers ────────
+// Mimics what `claude /usage` does internally.
+// Uses ~/.claude.json OAuth credentials (same as the OS session).
+let _quotaCheckInFlight = null
+
+async function _doQuotaCheck() {
+  try {
+    // Load OAuth token from ~/.claude.json
+    const claudeConfigPath = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude.json')
+    if (!fs.existsSync(claudeConfigPath)) {
+      logger.debug('quota-check: ~/.claude.json not found, skipping')
+      return
+    }
+    const claudeConfig = JSON.parse(fs.readFileSync(claudeConfigPath, 'utf8'))
+    const oauthToken = claudeConfig?.oauthAccount?.accessToken
+
+    if (!oauthToken) {
+      logger.debug('quota-check: no OAuth token in ~/.claude.json, skipping')
+      return
+    }
+
+    const model = process.env.OS_SESSION_MODEL || 'claude-opus-4-5-20250514'
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${oauthToken}`,
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'interleaved-thinking-2025-05-14',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'quota' }],
+      }),
+    })
+
+    // Extract headers regardless of status code
+    updateFromHeaders(resp.headers)
+
+    logger.info('Claude quota-check complete', {
+      status: resp.status,
+      weeklyUtil: _state.weeklyUtilization,
+    })
+  } catch (err) {
+    logger.debug('quota-check failed', { error: err.message })
+  } finally {
+    _quotaCheckInFlight = null
+  }
 }
 
-// ─── Get daily usage for burn-rate calculation ────────────────────────────────
-async function _fetchDailyUsage(weekStart) {
-  const rows = await db`
-    SELECT
-      DATE(created_at AT TIME ZONE 'Australia/Brisbane') AS day,
-      SUM(input_tokens)::bigint  AS input_tokens,
-      SUM(output_tokens)::bigint AS output_tokens
-    FROM claude_usage
-    WHERE week_start = ${weekStart}
-      AND provider = 'claude_max'
-    GROUP BY day
-    ORDER BY day ASC
-  `
-  return rows
+async function refreshQuotaCheck() {
+  if (_quotaCheckInFlight) return _quotaCheckInFlight
+  _quotaCheckInFlight = _doQuotaCheck()
+  return _quotaCheckInFlight
 }
 
-// ─── Translate usage rows to weighted token totals ────────────────────────────
-function _weightedTokens(inputTokens, outputTokens) {
-  return inputTokens + outputTokens * OUTPUT_WEIGHT
+// ─── Energy state from real utilization ───────────────────────────────────────
+function _energyState(pctUsed) {
+  if (pctUsed <= 0.10) return { level: 'full',     label: 'Full energy',        modelRec: 'opus',           scheduleMultiplier: 1.0 }
+  if (pctUsed <= 0.40) return { level: 'healthy',  label: 'Healthy',            modelRec: 'opus',           scheduleMultiplier: 1.0 }
+  if (pctUsed <= 0.70) return { level: 'conserve', label: 'Conserving',         modelRec: 'sonnet',         scheduleMultiplier: 0.75 }
+  if (pctUsed <= 0.90) return { level: 'low',      label: 'Low energy',         modelRec: 'sonnet',         scheduleMultiplier: 0.5 }
+  return                      { level: 'critical',  label: 'Critical — minimal', modelRec: 'bedrock-sonnet', scheduleMultiplier: 0.25 }
 }
 
-// ─── Energy level (% remaining) and model recommendation ─────────────────────
-function _energyState(pctRemaining) {
-  if (pctRemaining >= 0.9)  return { level: 'full',     label: 'Full energy',        modelRec: 'opus',   scheduleMultiplier: 1.0 }
-  if (pctRemaining >= 0.6)  return { level: 'healthy',  label: 'Healthy',            modelRec: 'opus',   scheduleMultiplier: 1.0 }
-  if (pctRemaining >= 0.3)  return { level: 'conserve', label: 'Conserving',         modelRec: 'sonnet', scheduleMultiplier: 0.75 }
-  if (pctRemaining >= 0.1)  return { level: 'low',      label: 'Low energy',         modelRec: 'sonnet', scheduleMultiplier: 0.5 }
-  return                           { level: 'critical',  label: 'Critical — minimal', modelRec: 'bedrock-sonnet', scheduleMultiplier: 0.25 }
-}
-
-// ─── Main: get current energy snapshot ───────────────────────────────────────
+// ─── Get current energy snapshot ──────────────────────────────────────────────
 async function getEnergy() {
   const now = Date.now()
+
+  // Return cached snapshot if fresh
   if (_cache && (now - _cacheAt) < CACHE_TTL_MS) return _cache
 
-  const weekStart = getWeekStart()
-  const [usageRows, dailyRows] = await Promise.all([
-    _fetchWeeklyUsage(weekStart).catch(() => []),
-    _fetchDailyUsage(weekStart).catch(() => []),
-  ])
-
-  // ─── Aggregate by provider
-  let claudeMaxInput = 0, claudeMaxOutput = 0, claudeMaxTurns = 0
-  let bedrockInput = 0, bedrockOutput = 0
-
-  for (const row of usageRows) {
-    const inp = parseInt(row.input_tokens || 0, 10)
-    const out = parseInt(row.output_tokens || 0, 10)
-    if (row.provider === 'claude_max') {
-      claudeMaxInput  += inp
-      claudeMaxOutput += out
-      claudeMaxTurns  += row.turns || 0
-    } else {
-      bedrockInput  += inp
-      bedrockOutput += out
-    }
+  // Trigger a background quota-check if headers are stale or missing
+  const headerAge = _state.headersUpdatedAt ? (now - _state.headersUpdatedAt) : Infinity
+  if (headerAge > HEADER_STALE_MS) {
+    // Fire in background — don't await, current call uses whatever we have
+    refreshQuotaCheck().catch(() => {})
   }
 
-  const usedWeighted  = _weightedTokens(claudeMaxInput, claudeMaxOutput)
-  const pctUsed       = WEIGHTED_CAP > 0 ? Math.min(usedWeighted / WEIGHTED_CAP, 1) : 0
-  const pctRemaining  = 1 - pctUsed
+  const pctUsed      = _state.weeklyUtilization ?? 0
+  const pctRemaining = Math.max(0, 1 - pctUsed)
+  const energy       = _energyState(pctUsed)
 
-  // ─── Burn rate: weighted tokens per day, based on days with data
-  const daysWithData = dailyRows.length || 1
-  const dailyBurnTotal = dailyRows.reduce((sum, r) => sum + _weightedTokens(parseInt(r.input_tokens || 0), parseInt(r.output_tokens || 0)), 0)
-  const avgDailyBurn  = dailyBurnTotal / daysWithData
+  // Time until reset
+  let hoursUntilReset = null
+  if (_state.weeklyResetsAt) {
+    hoursUntilReset = Math.max(0, (_state.weeklyResetsAt * 1000 - now) / 3_600_000)
+  }
 
-  // Day of week (Mon=0, Sun=6)
-  const today = new Date()
-  const dowMonday = ((today.getUTCDay() + 6) % 7) // Mon=0..Sun=6
-  const daysLeft  = 7 - dowMonday
+  // Session utilization
+  const sessionPctUsed = _state.sessionUtilization ?? null
 
-  // Predicted total if current rate continues
-  const projectedWeeklyUsed = usedWeighted + avgDailyBurn * daysLeft
-  const projectedPctUsed    = WEIGHTED_CAP > 0 ? Math.min(projectedWeeklyUsed / WEIGHTED_CAP, 1) : 0
+  // Self-tracked turn count (from our own DB log — useful for activity, not for % calc)
+  const selfTracked = await _getSelfTrackedTurns().catch(() => ({ turns: 0 }))
 
-  // Days until exhaustion at current burn rate
-  const remainingWeighted = Math.max(0, WEIGHTED_CAP - usedWeighted)
-  const daysUntilExhaustion = avgDailyBurn > 0 ? remainingWeighted / avgDailyBurn : null
-
-  // Week reset: next Monday UTC
-  const nextMonday = new Date(weekStart)
-  nextMonday.setUTCDate(nextMonday.getUTCDate() + 7)
-  const msUntilReset = nextMonday.getTime() - Date.now()
-  const hoursUntilReset = msUntilReset / 3_600_000
-
-  const energy = _energyState(pctRemaining)
+  const hasRealData = _state.weeklyUtilization !== null
 
   _cache = {
-    weekStart,
-    // Raw token counts
-    inputTokens:  claudeMaxInput,
-    outputTokens: claudeMaxOutput,
-    turns:        claudeMaxTurns,
-    bedrockInputTokens:  bedrockInput,
-    bedrockOutputTokens: bedrockOutput,
-    // Weighted usage
-    usedWeighted,
-    cap: WEIGHTED_CAP,
-    // Percentages
+    // ─── Real data from Anthropic headers
+    source: hasRealData ? 'anthropic_headers' : 'no_data',
+    headersAge: _state.headersUpdatedAt ? Math.round((now - _state.headersUpdatedAt) / 1000) : null,
     pctUsed:       Math.round(pctUsed * 1000) / 10,       // e.g. 42.3
     pctRemaining:  Math.round(pctRemaining * 1000) / 10,  // e.g. 57.7
-    // Burn rate & projection
-    avgDailyBurn,
-    projectedPctUsed: Math.round(projectedPctUsed * 1000) / 10,
-    daysUntilExhaustion,
-    hoursUntilReset: Math.round(hoursUntilReset * 10) / 10,
-    // Energy state
+    rateLimitStatus: _state.rateLimitStatus,
+    rateLimitType:   _state.rateLimitType,
+    isUsingOverage:  _state.isUsingOverage,
+    hoursUntilReset: hoursUntilReset != null ? Math.round(hoursUntilReset * 10) / 10 : null,
+    sessionPctUsed: sessionPctUsed != null ? Math.round(sessionPctUsed * 1000) / 10 : null,
+    // ─── Energy decision layer
     ...energy,
-    // Human-readable summary for AI context
-    summary: _buildSummary({ pctUsed, pctRemaining, energy, avgDailyBurn, daysUntilExhaustion, hoursUntilReset, projectedPctUsed, claudeMaxTurns }),
+    // ─── Self-tracked activity (supplementary)
+    turnsThisWeek: selfTracked.turns,
+    // ─── Human-readable summary for AI context
+    summary: _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns: selfTracked.turns }),
   }
 
   _cacheAt = now
   return _cache
 }
 
-function _buildSummary({ pctUsed, pctRemaining, energy, avgDailyBurn, daysUntilExhaustion, hoursUntilReset, projectedPctUsed, claudeMaxTurns }) {
-  const usedPct  = Math.round(pctUsed * 100)
-  const remPct   = Math.round(pctRemaining * 100)
-  const projPct  = Math.round(projectedPctUsed * 100)
+async function _getSelfTrackedTurns() {
+  try {
+    const weekStart = _getWeekStart()
+    const [row] = await db`
+      SELECT COUNT(*)::int AS turns
+      FROM claude_usage
+      WHERE week_start = ${weekStart} AND provider = 'claude_max'
+    `
+    return { turns: row?.turns || 0 }
+  } catch {
+    return { turns: 0 }
+  }
+}
+
+function _getWeekStart(date = new Date()) {
+  const d = new Date(date)
+  const day = d.getUTCDay()
+  const diff = (day === 0 ? -6 : 1 - day)
+  d.setUTCDate(d.getUTCDate() + diff)
+  d.setUTCHours(0, 0, 0, 0)
+  return d.toISOString().slice(0, 10)
+}
+
+function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns }) {
+  const usedPct = Math.round(pctUsed * 100)
+  const remPct  = Math.round(pctRemaining * 100)
+
+  if (!hasRealData) {
+    return `Claude Max weekly energy: unknown (no API response headers captured yet). Energy level: ${energy.label}. Recommended model: ${energy.modelRec}.`
+  }
+
   const lines = [
-    `Claude Max weekly energy: ${remPct}% remaining (${usedPct}% used, ${claudeMaxTurns} turns this week).`,
+    `Claude Max weekly energy: ${remPct}% remaining (${usedPct}% used${turns > 0 ? `, ${turns} turns tracked` : ''}).`,
     `Energy level: ${energy.label}. Recommended model: ${energy.modelRec}.`,
   ]
-  if (avgDailyBurn > 0) {
-    lines.push(`Burn rate: ~${Math.round(avgDailyBurn / 1000)}K weighted tokens/day. Projected week-end usage: ${projPct}%.`)
+  if (sessionPctUsed != null) {
+    lines.push(`5-hour session: ${Math.round(sessionPctUsed)}% used.`)
   }
-  if (daysUntilExhaustion != null && daysUntilExhaustion < 4) {
-    lines.push(`⚠ At current rate, exhaustion in ~${daysUntilExhaustion.toFixed(1)} days (resets in ${Math.round(hoursUntilReset)}h).`)
-  } else {
+  if (hoursUntilReset != null) {
     lines.push(`Week resets in ${Math.round(hoursUntilReset)}h.`)
+  }
+  if (_state.isUsingOverage) {
+    lines.push('Currently using extra usage (overage).')
   }
   lines.push(`Scheduling multiplier: ${energy.scheduleMultiplier}× (1.0 = normal frequency).`)
   return lines.join(' ')
 }
 
-// ─── Get historical weekly summaries (last N weeks) ──────────────────────────
+// ─── Log a turn to our DB (for activity tracking / history) ──────────────────
+async function logUsage({ sessionId = null, source = 'os_session', provider = 'claude_max', model = null, inputTokens = 0, outputTokens = 0 }) {
+  try {
+    const weekStart = _getWeekStart()
+    await db`
+      INSERT INTO claude_usage (session_id, source, provider, model, input_tokens, output_tokens, week_start)
+      VALUES (${sessionId}, ${source}, ${provider}, ${model}, ${inputTokens}, ${outputTokens}, ${weekStart})
+    `
+    _cache = null
+    _cacheAt = 0
+  } catch (err) {
+    logger.warn('claude_usage log failed', { error: err.message })
+  }
+}
+
+// ─── Get historical weekly summaries ─────────────────────────────────────────
 async function getWeeklyHistory(weeks = 4) {
   try {
     const rows = await db`
@@ -238,10 +305,17 @@ async function getWeeklyHistory(weeks = 4) {
   }
 }
 
-// ─── Invalidate cache (call after bulk imports or resets) ─────────────────────
 function invalidateCache() {
   _cache = null
   _cacheAt = 0
 }
 
-module.exports = { logUsage, getEnergy, getWeeklyHistory, invalidateCache, getWeekStart }
+module.exports = {
+  updateFromHeaders,
+  refreshQuotaCheck,
+  logUsage,
+  getEnergy,
+  getWeeklyHistory,
+  invalidateCache,
+  getWeekStart: _getWeekStart,
+}
