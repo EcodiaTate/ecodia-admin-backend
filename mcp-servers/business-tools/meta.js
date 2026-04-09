@@ -37,12 +37,12 @@ export function registerMetaTools(server) {
 
   server.tool('meta_get_conversations',
     'List recent Messenger/Instagram conversations for a page.',
-    {
+    z.object({
       pageId: z.string().optional().describe('Facebook Page ID (defaults to env)'),
       pageToken: z.string().optional().describe('Page access token (defaults to env)'),
       platform: z.string().optional().describe('"messenger" or "instagram" (default: messenger)'),
       limit: z.number().optional().describe('Max conversations (default 20)'),
-    },
+    }),
     async ({ pageId, pageToken, platform, limit } = {}) => {
       pageId = pageId || META_PAGE_ID
       pageToken = pageToken || META_PAGE_TOKEN
@@ -56,12 +56,12 @@ export function registerMetaTools(server) {
 
   server.tool('meta_send_message',
     'Send a message in a Messenger/Instagram conversation.',
-    {
+    z.object({
       pageId: z.string().optional().describe('Facebook Page ID (defaults to env)'),
       pageToken: z.string().optional().describe('Page access token (defaults to env)'),
       recipientId: z.string().describe('Recipient user ID (from conversation participants)'),
       message: z.string().describe('Message text to send'),
-    },
+    }),
     async ({ pageId, pageToken, recipientId, message }) => {
       pageId = pageId || META_PAGE_ID
       pageToken = pageToken || META_PAGE_TOKEN
@@ -79,12 +79,12 @@ export function registerMetaTools(server) {
 
   server.tool('meta_create_post',
     'Create a post on a Facebook page.',
-    {
+    z.object({
       pageId: z.string().optional().describe('Facebook Page ID (defaults to env)'),
       pageToken: z.string().optional().describe('Page access token (defaults to env)'),
       message: z.string().describe('Post text'),
       link: z.string().optional().describe('URL to share (optional)'),
-    },
+    }),
     async ({ pageId, pageToken, message, link }) => {
       pageId = pageId || META_PAGE_ID
       pageToken = pageToken || META_PAGE_TOKEN

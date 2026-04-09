@@ -25,10 +25,10 @@ export function registerLinkedInTools(server) {
 
   server.tool('linkedin_check_dms',
     'Check recent LinkedIn DMs. Returns conversations with messages, categories, and lead scores.',
-    {
+    z.object({
       limit: z.number().optional().describe('Max conversations (default 20)'),
       unreadOnly: z.boolean().optional().describe('Only unread (default false)'),
-    },
+    }),
     async ({ limit = 20, unreadOnly = false } = {}) => {
       const params = new URLSearchParams({ limit: String(limit) })
       if (unreadOnly) params.set('status', 'unread')
@@ -38,10 +38,10 @@ export function registerLinkedInTools(server) {
 
   server.tool('linkedin_send_dm',
     'Send a LinkedIn DM reply (via backend browser automation).',
-    {
+    z.object({
       conversationId: z.string().describe('LinkedIn conversation ID'),
       message: z.string().describe('Message text to send'),
-    },
+    }),
     async ({ conversationId, message }) => {
       const data = await backendFetch('/api/linkedin/dms/reply', {
         method: 'POST',
@@ -52,9 +52,9 @@ export function registerLinkedInTools(server) {
 
   server.tool('linkedin_get_posts',
     'Get recent LinkedIn posts (published and scheduled).',
-    {
+    z.object({
       limit: z.number().optional().describe('Max posts (default 20)'),
-    },
+    }),
     async ({ limit = 20 } = {}) => {
       const data = await backendFetch(`/api/linkedin/posts?limit=${limit}`)
       return { content: [{ type: 'text', text: JSON.stringify(data.posts || data, null, 2) }] }
@@ -62,10 +62,10 @@ export function registerLinkedInTools(server) {
 
   server.tool('linkedin_create_post',
     'Create and publish a LinkedIn post (via backend).',
-    {
+    z.object({
       content: z.string().describe('Post text content'),
       scheduleAt: z.string().optional().describe('ISO datetime to schedule (optional, publishes immediately if omitted)'),
-    },
+    }),
     async ({ content, scheduleAt }) => {
       const data = await backendFetch('/api/linkedin/posts', {
         method: 'POST',
