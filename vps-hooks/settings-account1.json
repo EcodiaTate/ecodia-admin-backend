@@ -1,0 +1,110 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Reminder: Think like a CEO. Consider the business impact, check Neo4j for prior context, and consider whether this is Factory work. What's the boldest version of this?\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "CEO pre-flight..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ] && grep -qn '—' \"$f\" 2>/dev/null; then lines=$(grep -n '—' \"$f\" | head -5); echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"EMDASH DETECTED. Fix these lines (no emdashes ever):\\n${lines}\\\"}}\"; else true; fi; }",
+            "timeout": 5,
+            "statusMessage": "Checking for emdashes..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ]; then ext=\"${f##*.}\"; case \"$ext\" in py) cd \"$(dirname \"$f\")\" && ruff check --select E,F,W \"$f\" 2>&1 | head -20 | { output=$(cat); if [ -n \"$output\" ]; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"RUFF ISSUES:\\n${output}\\\"}}\"; fi; } ;; ts|tsx|js|jsx) cd \"$(dirname \"$f\")\" && npx tsc --noEmit --pretty \"$f\" 2>&1 | head -20 | { output=$(cat); if [ -n \"$output\" ] && echo \"$output\" | grep -q 'error TS'; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"TSC ERRORS:\\n${output}\\\"}}\"; fi; } ;; esac; fi; }",
+            "timeout": 15,
+            "statusMessage": "Linting..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ]; then case \"$f\" in */src/*) echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Reminder: You modified $f. If this changes behaviour, API, or architecture -- consider updating the relevant spec doc or CLAUDE.md so future sessions aren't blind to this change.\"}}\" ;; esac; fi; }",
+            "timeout": 3,
+            "statusMessage": "Checking spec freshness..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.stderr // empty' | { read -r err; if [ -n \"$err\" ]; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Reminder: That command had errors. Diagnose the root cause before retrying. Consider whether this failure should be recorded as a factory_learning or Neo4j node.\\\"}}\"; fi; }",
+            "timeout": 5,
+            "statusMessage": "Checking command output..."
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__neo4j__graph_reflect|mcp__neo4j__graph_merge_node",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: Would that node help a cold-start session make a better decision? Good memory is specific context + reasoning + future applicability, not vague summaries.\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "Memory quality check..."
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__google-workspace__gmail_send_new|mcp__google-workspace__gmail_send_reply",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: You just sent an email. Consider whether the CRM needs updating (activity log, stage change, contact record). If this was a client email, is there a follow-up to schedule?\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "CRM sync reminder..."
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__factory__start_cc_session",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: You just dispatched a Factory session. What are your acceptance criteria for this? Which spec docs might the diff affect? Don't fire-and-forget -- set a mental checkpoint to review when it completes.\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "Factory oversight reminder..."
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__stripe__stripe_create_invoice|mcp__stripe__stripe_create_payment_link",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: You just created a Stripe invoice or payment link. Make sure the CRM project record and client stage reflect this. Inform Tate if this is a new invoice.\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "Billing sync reminder..."
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__scheduler__schedule_cron|mcp__scheduler__schedule_delayed|mcp__scheduler__schedule_chain",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: You just scheduled a task. The prompt you wrote is what future-you will receive with zero context. Re-read it -- does it have enough detail to act on cold? Is the schedule realistic for when the action actually needs to happen?\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "Scheduler quality check..."
+          }
+        ]
+      }
+    ]
+  }
+}

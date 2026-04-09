@@ -1,0 +1,55 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat <<'HOOK_EOF'\n{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Reminder: Read CLAUDE.md and relevant spec docs before making changes. Check factory_learnings for this codebase -- past sessions have left hard-won knowledge. If you discover something surprising, note it in your output so the OS Session can record it.\"}}\nHOOK_EOF",
+            "timeout": 3,
+            "statusMessage": "Factory pre-flight..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ] && grep -qn '—' \"$f\" 2>/dev/null; then lines=$(grep -n '—' \"$f\" | head -5); echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"EMDASH DETECTED. Fix these lines (no emdashes ever):\\n${lines}\\\"}}\"; else true; fi; }",
+            "timeout": 5,
+            "statusMessage": "Checking for emdashes..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ]; then ext=\"${f##*.}\"; case \"$ext\" in py) cd \"$(dirname \"$f\")\" && ruff check --select E,F,W \"$f\" 2>&1 | head -20 | { output=$(cat); if [ -n \"$output\" ]; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"RUFF ISSUES:\\n${output}\\\"}}\"; fi; } ;; ts|tsx|js|jsx) cd \"$(dirname \"$f\")\" && npx tsc --noEmit --pretty \"$f\" 2>&1 | head -20 | { output=$(cat); if [ -n \"$output\" ] && echo \"$output\" | grep -q 'error TS'; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"TSC ERRORS:\\n${output}\\\"}}\"; fi; } ;; esac; fi; }",
+            "timeout": 15,
+            "statusMessage": "Linting..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -n \"$f\" ]; then case \"$f\" in */src/*) echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Reminder: You modified $f. If this changes behaviour, API, or architecture -- update the relevant .claude/EcodiaOS_Spec_*.md doc. The OS Session depends on accurate specs.\"}}\" ;; esac; fi; }",
+            "timeout": 3,
+            "statusMessage": "Checking spec freshness..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.stderr // empty' | { read -r err; if [ -n \"$err\" ]; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Reminder: That command had errors. Diagnose the root cause before retrying. Fix the underlying issue, don't band-aid.\\\"}}\"; fi; }",
+            "timeout": 5,
+            "statusMessage": "Checking command output..."
+          }
+        ]
+      }
+    ]
+  }
+}

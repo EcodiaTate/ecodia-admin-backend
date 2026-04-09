@@ -343,15 +343,47 @@ async function _sendMessageImpl(content, opts = {}) {
     options.env = sessionEnv
   }
 
+  // Log full provider decision for debugging hangs
+  logger.info('OS Session provider decision', {
+    hasAccount2,
+    shouldUseAccount2,
+    usingAccount2,
+    configDir1: env.CLAUDE_CONFIG_DIR_1 || '(default)',
+    configDir2: env.CLAUDE_CONFIG_DIR_2 || '(not set)',
+    resume: options.resume || null,
+    model: options.model || '(default)',
+    energyLevel,
+    energyPctUsed: energy?.pctUsed,
+    energyRateLimitStatus: energy?.rateLimitStatus,
+  })
+
   const collectedText = []
   let newCcSessionId = ccSessionId
 
+  // Inactivity timeout: if the SDK produces no messages for 5 minutes, abort.
+  // This catches hangs from 429s, network issues, or stuck SDK state.
+  const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000
+  let _inactivityTimer = null
+  const _resetInactivityTimer = () => {
+    if (_inactivityTimer) clearTimeout(_inactivityTimer)
+    _inactivityTimer = setTimeout(() => {
+      logger.error('OS Session: inactivity timeout (5 min no messages) — aborting query')
+      if (activeQuery) {
+        try { activeQuery.close() } catch {}
+        activeQuery = null
+      }
+    }, INACTIVITY_TIMEOUT_MS)
+  }
+
   try {
+    logger.info('OS Session: calling queryFn...', { promptLength: promptWithMemory.length })
     const q = queryFn({ prompt: promptWithMemory, options })
     activeQuery = q
+    _resetInactivityTimer()
 
     // Stream all messages from the SDK
     for await (const msg of q) {
+      _resetInactivityTimer()  // got a message, reset timeout
       try {
         // Log raw message type for debugging
         logger.debug('OS Session SDK message', { type: msg.type, subtype: msg.subtype })
@@ -534,7 +566,8 @@ async function _sendMessageImpl(content, opts = {}) {
       }
     }
 
-    // Session complete — refresh real usage % from Anthropic headers
+    // Session complete — clear inactivity timer and refresh real usage %
+    if (_inactivityTimer) clearTimeout(_inactivityTimer)
     activeQuery = null
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
     if (!suppressOutput) {
@@ -569,6 +602,7 @@ async function _sendMessageImpl(content, opts = {}) {
     }
 
   } catch (err) {
+    if (_inactivityTimer) clearTimeout(_inactivityTimer)
     activeQuery = null
 
     // Sentinel from the result handler — flags already set, just retry
