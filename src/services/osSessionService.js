@@ -246,17 +246,12 @@ async function sendMessage(content, opts = {}) {
   await appendLog(dbSessionId, `[USER] ${content}`)
   if (!suppressOutput) emitOutput({ type: 'user', content })
 
-  // Inject relevant past conversation memory (non-blocking — skip on error)
-  let promptWithMemory = content
-  try {
-    const memoryContext = await sessionMemory.searchMemory(content)
-    if (memoryContext) {
-      promptWithMemory = `${memoryContext}\n\n---\n\n${content}`
-      logger.debug('OS Session: injected session memory context', { chars: memoryContext.length })
-    }
-  } catch (memErr) {
-    logger.debug('OS Session: memory search skipped', { error: memErr.message })
-  }
+  // Session memory auto-injection DISABLED 2026-04-09
+  // Reason: When context window fills and SDK compresses, stale memory chunks
+  // became the only "context" left — causing the model to hallucinate tasks from
+  // previous sessions. Neo4j MCP tool is available for on-demand memory recall
+  // instead of blind pre-injection.
+  const promptWithMemory = content
 
   // Build SDK options
   const mcpServers = loadMcpServersFromCwd(cwd)
