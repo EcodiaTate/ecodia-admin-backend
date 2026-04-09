@@ -204,13 +204,21 @@ async function sendMessage(content, opts = {}) {
   }
 
   // Find or create the OS session (DB record)
+  // IMPORTANT: Reuse existing rows even when cc_cli_session_id is missing.
+  // Previously this created a new row when session ID was cleared (by stale retry,
+  // provider switch, etc.), orphaning the old row and losing all context.
   let session = await getOSSession()
   let isResume = false
 
   if (session?.cc_cli_session_id) {
     isResume = true
     ccSessionId = session.cc_cli_session_id
+  } else if (session) {
+    // Row exists but no CC session ID — reuse it, start fresh CC session on same DB record
+    ccSessionId = null
+    await updateOSSession(session.id, { status: 'running' })
   } else {
+    // No OS session row at all — create one
     session = await createOSSession()
   }
 
