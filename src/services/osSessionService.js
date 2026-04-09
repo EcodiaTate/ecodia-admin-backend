@@ -302,6 +302,25 @@ async function _sendMessageImpl(content, opts = {}) {
   if (_shouldRetryPrimary()) _resetToAccount1()
 
   const hasAccount2 = !!(env.CLAUDE_CONFIG_DIR_2)
+
+  // Pre-flight: if we haven't already switched but account 1 is known-exhausted
+  // from the quota check, preemptively switch to account 2 instead of letting
+  // the SDK hang on a 429 that may never surface as an error.
+  if (!usingAccount2 && hasAccount2 && energy) {
+    const isExhausted = energy.rateLimitStatus === 'rejected' ||
+      energy.pctUsed >= 99 ||
+      energy.level === 'critical'
+    if (isExhausted) {
+      usingAccount2 = true
+      _exhaustedAt = _exhaustedAt || Date.now()
+      ccSessionId = null  // can't resume across config dirs
+      logger.warn('OS Session: account 1 pre-flight exhausted — preemptively switching to account 2', {
+        rateLimitStatus: energy.rateLimitStatus, pctUsed: energy.pctUsed,
+      })
+      emitOutput({ type: 'system', content: '⚡ Account 1 exhausted (detected pre-flight) — switching to account 2.' })
+    }
+  }
+
   const shouldUseAccount2 = usingAccount2 && hasAccount2
 
   // Keep energy service in sync
