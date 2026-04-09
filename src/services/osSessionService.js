@@ -66,7 +66,12 @@ function loadMcpServersFromCwd(cwd) {
 }
 
 // Token tracking
-const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '150000', 10)
+// Default: 700k tokens — uses most of 1M context window but leaves room for handover brief generation.
+// Override with OS_SESSION_COMPACT_THRESHOLD env var if needed.
+const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '700000', 10)
+
+// Whether a handover is already in progress (prevents double-trigger)
+let handoverInProgress = false
 
 // In-memory state
 let activeQuery = null          // the running Query object from the SDK
@@ -185,8 +190,11 @@ function extractTextFromContent(content) {
 }
 
 // ── Main: send a message to the OS session ──
+//
+// opts.suppressOutput = true: suppress WebSocket broadcast (used for internal handover brief generation)
 
-async function sendMessage(content) {
+async function sendMessage(content, opts = {}) {
+  const { suppressOutput = false } = opts
   const queryFn = await getQuery()
 
   // Kill any active query
@@ -207,13 +215,15 @@ async function sendMessage(content) {
   }
 
   const dbSessionId = session.id
-  emitStatus('streaming', { sessionId: dbSessionId })
+  if (!suppressOutput) {
+    emitStatus('streaming', { sessionId: dbSessionId })
 
-  // Emit current energy level so frontend knows if thinking mode is active
-  try {
-    const energyNow = await usageEnergy.getEnergy()
-    broadcast('os-session:energy', energyNow)
-  } catch {}
+    // Emit current energy level so frontend knows if thinking mode is active
+    try {
+      const energyNow = await usageEnergy.getEnergy()
+      broadcast('os-session:energy', energyNow)
+    } catch {}
+  }
 
   // cwd must contain .mcp.json and CLAUDE.md
   const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
@@ -221,11 +231,12 @@ async function sendMessage(content) {
   logger.info(`OS Session ${isResume ? 'resuming' : 'starting'}`, {
     sessionId: dbSessionId,
     ccSessionId,
+    suppressOutput,
   })
 
   // Log user message
   await appendLog(dbSessionId, `[USER] ${content}`)
-  emitOutput({ type: 'user', content })
+  if (!suppressOutput) emitOutput({ type: 'user', content })
 
   // Inject relevant past conversation memory (non-blocking — skip on error)
   let promptWithMemory = content
@@ -387,11 +398,13 @@ async function sendMessage(content) {
                     .join('\n')
                 }
                 if (resultText.length > 2000) resultText = resultText.slice(0, 2000) + '\n… (truncated)'
-                emitOutput({
-                  type: 'tool_result',
-                  tool_use_id: block.tool_use_id,
-                  content: resultText || '(no output)',
-                })
+                if (!suppressOutput) {
+                  emitOutput({
+                    type: 'tool_result',
+                    tool_use_id: block.tool_use_id,
+                    content: resultText || '(no output)',
+                  })
+                }
               }
             }
             break
@@ -401,10 +414,12 @@ async function sendMessage(content) {
           case 'assistant': {
             const blocks = msg.message?.content || []
 
-            // Broadcast thinking blocks for the frontend reasoning display
-            const thinkingBlocks = blocks.filter(b => b.type === 'thinking' && b.thinking)
-            for (const tb of thinkingBlocks) {
-              emitOutput({ type: 'thinking', content: tb.thinking })
+            if (!suppressOutput) {
+              // Broadcast thinking blocks for the frontend reasoning display
+              const thinkingBlocks = blocks.filter(b => b.type === 'thinking' && b.thinking)
+              for (const tb of thinkingBlocks) {
+                emitOutput({ type: 'thinking', content: tb.thinking })
+              }
             }
 
             const text = extractTextFromContent(blocks)
@@ -413,16 +428,18 @@ async function sendMessage(content) {
               collectedText.push(safeText)
               await appendLog(dbSessionId, safeText)
               // Broadcast the full assistant text for the frontend
-              emitOutput({ type: 'assistant_text', content: safeText })
+              if (!suppressOutput) emitOutput({ type: 'assistant_text', content: safeText })
             }
 
-            // Also broadcast tool_use blocks so frontend knows about tool calls
-            const toolUses = blocks.filter(b => b.type === 'tool_use')
-            if (toolUses.length > 0) {
-              emitOutput({
-                type: 'tool_use',
-                tools: toolUses.map(t => ({ name: t.name, id: t.id })),
-              })
+            if (!suppressOutput) {
+              // Also broadcast tool_use blocks so frontend knows about tool calls
+              const toolUses = blocks.filter(b => b.type === 'tool_use')
+              if (toolUses.length > 0) {
+                emitOutput({
+                  type: 'tool_use',
+                  tools: toolUses.map(t => ({ name: t.name, id: t.id })),
+                })
+              }
             }
 
             // Track usage from per-turn data (for activity history only, not for % calculation)
@@ -446,7 +463,7 @@ async function sendMessage(content) {
             const event = msg.event
             if (!event) break
 
-            if (event.type === 'content_block_delta' && event.delta) {
+            if (!suppressOutput && event.type === 'content_block_delta' && event.delta) {
               if (event.delta.type === 'text_delta' && event.delta.text) {
                 const safeText = secretSafety.scrubSecrets(event.delta.text)
                 emitOutput({ type: 'text_delta', content: safeText })
@@ -510,15 +527,17 @@ async function sendMessage(content) {
                 collectedText.push(safeResult)
               }
             }
-            // Broadcast token usage
-            const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
-            broadcast('os-session:tokens', {
-              input: sessionTokenUsage.input,
-              output: sessionTokenUsage.output,
-              total: totalTokens,
-              threshold: COMPACT_THRESHOLD,
-              needsCompaction: totalTokens > COMPACT_THRESHOLD,
-            })
+            // Broadcast token usage (skip for internal handover messages)
+            if (!suppressOutput) {
+              const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
+              broadcast('os-session:tokens', {
+                input: sessionTokenUsage.input,
+                output: sessionTokenUsage.output,
+                total: totalTokens,
+                threshold: COMPACT_THRESHOLD,
+                needsCompaction: totalTokens > COMPACT_THRESHOLD,
+              })
+            }
             break
           }
 
@@ -535,13 +554,15 @@ async function sendMessage(content) {
     // Session complete — refresh real usage % from Anthropic headers
     activeQuery = null
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
-    emitStatus('complete', { sessionId: dbSessionId, code: 0 })
-    broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
+    if (!suppressOutput) {
+      emitStatus('complete', { sessionId: dbSessionId, code: 0 })
+      broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
+    }
 
     // Quota check fires in background — updates energy state from real headers
     usageEnergy.refreshQuotaCheck()
       .then(() => usageEnergy.getEnergy())
-      .then(energy => broadcast('os-session:energy', energy))
+      .then(energy => { if (!suppressOutput) broadcast('os-session:energy', energy) })
       .catch(() => {})
 
     // Ingest current session transcript into persistent memory (fire-and-forget, recent files only)
@@ -549,7 +570,22 @@ async function sendMessage(content) {
     sessionMemory.ingestProjectDir(undefined, { recentHours: 2 })
       .catch(err => logger.debug('Session memory ingest skipped', { error: err.message }))
 
-    logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId })
+    const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
+    logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId, totalTokens })
+
+    // Auto-handover check: if we've used enough of the context window, seamlessly
+    // transition to a fresh session at the next natural pause (end of this turn).
+    // We pass the current conversation messages for frontend continuity display.
+    // Handover runs fire-and-forget — the current turn result is returned first,
+    // then the handover brief generation happens as the next exchange.
+    if (!handoverInProgress && totalTokens > COMPACT_THRESHOLD) {
+      // Delay slightly so the frontend gets this turn's response first
+      setImmediate(() => {
+        autoHandover(null).catch(err =>
+          logger.error('OS Session: auto-handover fire-and-forget failed', { error: err.message })
+        )
+      })
+    }
 
     return {
       sessionId: dbSessionId,
@@ -690,6 +726,136 @@ async function compact(summary) {
   return { sessionId: newSession.id, ...result }
 }
 
+// ── Auto-handover — self-initiated seamless session transition ──
+//
+// Design goals:
+//  1. Only fires at end of a complete turn (natural pause in conversation)
+//  2. Asks the current session to write its own detailed handover brief
+//  3. Warms the new session with that brief + instructs it to read CLAUDE.md/docs
+//  4. Signals frontend with last-N messages so UI can do a seamless dissolve
+//  5. Never interrupts an active stream — deferred until turn completes
+
+async function autoHandover(recentMessages) {
+  if (handoverInProgress) return
+  handoverInProgress = true
+
+  try {
+    logger.info('OS Session: auto-handover triggered', {
+      tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+      threshold: COMPACT_THRESHOLD,
+    })
+
+    // Signal frontend: handover is starting. Pass last 6 messages for continuity display.
+    broadcast('os-session:handover', {
+      phase: 'preparing',
+      recentMessages: (recentMessages || []).slice(-6),
+      tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+    })
+
+    // Ask current session to write its own handover brief.
+    // This runs in the CURRENT session context so it has full conversation history.
+    const briefRequest = `[SYSTEM: Context refresh needed — session approaching token limit]
+
+Please write a comprehensive handover brief for a fresh session that will continue this conversation. The brief must be detailed enough that the new session can continue seamlessly without the user noticing any gap.
+
+Format the brief exactly as follows:
+
+## HANDOVER BRIEF
+
+### Active conversation context
+[What we are currently discussing, what the user is trying to accomplish, current state of any in-progress work]
+
+### Key decisions made
+[Any decisions, plans, or conclusions reached in this session]
+
+### Current task state
+[If any code/system work is in progress: what's done, what's next, what files were changed]
+
+### Personality & tone notes
+[How this conversation has been going — user's communication style, any preferences expressed]
+
+### Critical context
+[Anything else the new session MUST know to continue without confusion]
+
+### Last few exchanges (verbatim if important)
+[The most recent 2-3 turns summarised precisely]
+
+Write this now. Be thorough — this brief is the only continuity between sessions.`
+
+    emitStatus('handover_preparing', { phase: 'generating_brief' })
+    // Suppress output during brief generation — this is an internal turn, not a user-visible response
+    const briefResult = await sendMessage(briefRequest, { suppressOutput: true })
+    const brief = briefResult.text || ''
+
+    if (!brief || brief.length < 100) {
+      logger.warn('OS Session: handover brief too short, aborting handover')
+      handoverInProgress = false
+      broadcast('os-session:handover', { phase: 'cancelled', reason: 'brief_too_short' })
+      return
+    }
+
+    // Signal frontend: brief ready, warming new session
+    broadcast('os-session:handover', { phase: 'warming', briefLength: brief.length })
+    emitStatus('handover_warming', { phase: 'warming_new_session' })
+
+    // Kill current session state and create new session
+    if (activeQuery) {
+      try { activeQuery.close() } catch {}
+      activeQuery = null
+    }
+    const newSession = await createOSSession()
+    sessionTokenUsage = { input: 0, output: 0 }
+    ccSessionId = null
+
+    const cwd = env.OS_SESSION_CWD || '/home/tate/ecodiaos'
+
+    // Warm message: brief + instruction to read CLAUDE.md and relevant docs
+    const warmMessage = `[NEW SESSION — HANDOVER BRIEF FROM PREVIOUS SESSION]
+
+${brief}
+
+[END HANDOVER BRIEF]
+
+You are a fresh session continuing the above conversation. Before responding to the user:
+
+1. Read CLAUDE.md in the current working directory (${cwd}) for your identity, capabilities, and OS context
+2. Quickly scan the relevant spec files in .claude/ for any system context that applies to the current work
+3. Then continue the conversation as if there was no interruption — the user should not notice the session transition at all
+
+The handover is complete when you've read the docs and are ready to continue. Do NOT mention the session transition unless directly asked.`
+
+    logger.info('OS Session: warming new session with handover brief', {
+      newSessionId: newSession.id,
+      briefLength: brief.length,
+    })
+
+    // Run the warm message — starts the new session, loads CLAUDE.md/docs.
+    // Suppressed from frontend: this is an internal context-loading turn, not a chat response.
+    const warmResult = await sendMessage(warmMessage, { suppressOutput: true })
+
+    // Signal frontend: handover complete, new session ready to receive user messages.
+    // Also send a final 'complete' so the frontend status resets to idle.
+    emitStatus('complete', { sessionId: newSession.id, code: 0 })
+    broadcast('os-session:complete', { sessionId: newSession.id, code: 0 })
+    broadcast('os-session:handover', {
+      phase: 'complete',
+      newSessionId: newSession.id,
+      briefPreview: brief.slice(0, 500),
+    })
+    emitStatus('handover_complete', { sessionId: newSession.id })
+
+    logger.info('OS Session: handover complete', { newSessionId: newSession.id })
+    return warmResult
+
+  } catch (err) {
+    logger.error('OS Session: auto-handover failed', { error: err.message })
+    broadcast('os-session:handover', { phase: 'failed', error: err.message })
+    handoverInProgress = false
+  } finally {
+    handoverInProgress = false
+  }
+}
+
 // ── Get token usage ──
 
 function getTokenUsage() {
@@ -736,4 +902,4 @@ async function recoverResponse(sinceTs) {
   }
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse }
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover }

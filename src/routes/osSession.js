@@ -81,6 +81,18 @@ router.post('/compact', async (req, res, next) => {
   }
 })
 
+// Manual handover trigger — generate brief + warm new session now
+router.post('/handover', async (_req, res, next) => {
+  res.setTimeout(1_800_000) // 30 min
+  try {
+    const result = await osSession.autoHandover(null)
+    res.json(result || { ok: true })
+  } catch (err) {
+    console.error('[OS Session /handover] Error:', err.message)
+    next(err)
+  }
+})
+
 // Get weekly energy snapshot — real % from Anthropic response headers
 router.get('/energy', async (_req, res, next) => {
   try {
