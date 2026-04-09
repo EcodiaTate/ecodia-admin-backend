@@ -488,6 +488,21 @@ async function sendMessage(content, opts = {}) {
             // Fallback chain: account1 → account2 → Bedrock Opus → Bedrock Sonnet
             if (msg.is_error) {
               const errTexts = (msg.errors || []).join(' ') + ' ' + (msg.result || '') + ' ' + (msg.stop_reason || '')
+
+              // Stale resume ID — CC CLI no longer has this session (e.g. after PM2 restart).
+              // Clear it and retry fresh, once.
+              if (!opts._staleCleaned && (
+                errTexts.includes('No conversation found') ||
+                errTexts.includes('session') && errTexts.includes('not found') ||
+                errTexts.includes('Invalid session')
+              )) {
+                logger.warn('OS Session: stale resume ID in result, starting fresh', { staleCcSessionId: ccSessionId })
+                ccSessionId = null
+                activeQuery = null
+                await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${dbSessionId}`.catch(() => {})
+                throw { _staleRetry: true, message: content }
+              }
+
               if (_isUsageExhausted(errTexts)) {
                 if (!usingAccount2 && !usingBedrock && hasAccount2) {
                   // Account 1 exhausted → switch to account 2
@@ -599,10 +614,32 @@ async function sendMessage(content, opts = {}) {
 
     // Sentinel from the result handler — flags already set, just retry
     if (err._bedrockRetry) {
-      return sendMessage(err.message)
+      return sendMessage(err.message, opts)
+    }
+
+    // Stale session ID sentinel — cc_cli_session_id cleared, retry fresh
+    if (err._staleRetry) {
+      return sendMessage(err.message, { ...opts, _staleCleaned: true })
     }
 
     const errMsg = err.message || ''
+
+    // Stale resume ID (e.g. after PM2 restart — CC CLI no longer has the session).
+    // Clear the stored session ID and retry as a fresh session, once.
+    if (!opts._staleCleaned && (
+      errMsg.includes('No conversation found') ||
+      errMsg.includes('session') && errMsg.includes('not found') ||
+      errMsg.includes('Invalid session')
+    )) {
+      logger.warn('OS Session: stale resume ID detected, starting fresh', { staleCcSessionId: ccSessionId })
+      ccSessionId = null
+      // Clear the stale cc_cli_session_id in DB so next lookup doesn't try to resume it
+      if (session?.id) {
+        await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
+      }
+      return sendMessage(content, { ...opts, _staleCleaned: true })
+    }
+
     const exhausted = _isUsageExhausted(errMsg)
     const hasAccount2Catch = !!(env.CLAUDE_CONFIG_DIR_2)
     logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, hasAccount2: hasAccount2Catch, canBedrock: !!canBedrock, usingAccount2, usingBedrock, usingBedrockSonnet })
