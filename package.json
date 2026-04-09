@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.92",
+    "@anthropic-ai/sdk": "^0.80.0",
     "axios": "^1.7.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.4",
