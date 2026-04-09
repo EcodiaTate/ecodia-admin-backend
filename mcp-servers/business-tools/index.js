@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 /**
- * Business Tools MCP Server — LinkedIn, Meta, Vercel, Xero.
+ * Business Tools MCP Server — Zernio (social media), Vercel, Xero.
  *
  * Required env vars:
  *   VERCEL_API_TOKEN, VERCEL_TEAM_ID — Vercel access
- *   META_USER_ACCESS_TOKEN — Meta Graph API
- *   ECODIA_BACKEND_URL — Backend API for LinkedIn/Xero (which handle their own auth)
+ *   ZERNIO_API_KEY — Zernio unified social media API
+ *   ECODIA_BACKEND_URL — Backend API for Xero (which handles its own auth)
  *   ECODIA_INTERNAL_TOKEN — Backend auth token
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerVercelTools } from './vercel.js'
-import { registerMetaTools } from './meta.js'
-import { registerLinkedInTools } from './linkedin.js'
+import { registerZernioTools } from './zernio.js'
 import { registerXeroTools } from './xero.js'
 
 const server = new McpServer({
@@ -21,8 +20,7 @@ const server = new McpServer({
 })
 
 registerVercelTools(server)
-registerMetaTools(server)
-registerLinkedInTools(server)
+registerZernioTools(server)
 registerXeroTools(server)
 
 const transport = new StdioServerTransport()
