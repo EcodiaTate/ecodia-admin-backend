@@ -61,8 +61,8 @@ server.tool(
       initialPrompt: prompt,
       codebaseName: codebaseName || null,
       workingDir: workingDir || null,
-      triggeredBy: 'os-session',
-      triggerSource: 'os-session',
+      triggeredBy: 'proactive',
+      triggerSource: 'cortex',
     })
     if (!success) return err(typeof data === 'string' ? data : data?.message || 'Failed to start session')
     return ok({
