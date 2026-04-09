@@ -26,7 +26,7 @@ let _emptyCycles = 0
 let _cycleCount = 0  // total cycles since start — for periodic introspection
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
-// Model for cognitive streams — default to Sonnet 4.6 via Bedrock if AWS creds set, else Claude
+// Model for cognitive streams
 const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || 'claude-haiku-4-5-20251001'
 
 // ─── Restart Resilience ──────────────────────────────────────────────

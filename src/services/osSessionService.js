@@ -11,9 +11,8 @@
  * Messages stream to the frontend via WebSocket in real-time as they arrive.
  *
  * Provider fallback chain:
- *   1. Claude Max OAuth (primary, from ~/.claude.json)
- *   2. AWS Bedrock Opus 4.6 (on 429/usage-exhausted)
- *   3. AWS Bedrock Sonnet 4.6 (on Bedrock Opus daily limit)
+ *   1. Claude Max OAuth account 1 (primary, from ~/.claude.json)
+ *   2. Claude Max OAuth account 2 (on 429/usage-exhausted)
  */
 
 const fs = require('fs')
@@ -75,14 +74,12 @@ let activeQuery = null          // the running Query object from the SDK
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
 let usingAccount2 = false       // flipped true after account 1 exhausted → use CLAUDE_CONFIG_DIR_2
-let usingBedrock = false        // flipped true after both accounts exhausted → use Bedrock Opus
-let usingBedrockSonnet = false  // flipped true after Bedrock Opus daily limit → use Bedrock Sonnet
 
 // Message queue — prevents concurrent sendMessage calls from racing and clobbering
 // each other's queries. Each sendMessage waits for the previous one to finish.
 let _sendQueue = Promise.resolve()
 
-// Weekly reset detection: if it's a new week since we flipped to account2/bedrock,
+// Weekly reset detection: if it's a new week since we flipped to account2,
 // try falling back to account1 again automatically.
 let _exhaustedAt = null  // timestamp when account1 was first marked exhausted
 
@@ -94,19 +91,11 @@ function _shouldRetryPrimary() {
 
 function _resetToAccount1() {
   usingAccount2 = false
-  usingBedrock = false
-  usingBedrockSonnet = false
   _exhaustedAt = null
   usageEnergy.setProvider('claude_max')
   logger.info('OS Session: weekly reset detected — returning to account 1 (primary)')
   emitOutput({ type: 'system', content: 'Weekly reset detected — switching back to primary Claude Max account.' })
 }
-
-// Bedrock model IDs
-// Bedrock cross-region inference profile IDs — override via .env if needed
-// Format: us.anthropic.claude-{model}-{date}-v{n}:{revision}
-const BEDROCK_OPUS_MODEL = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-6-20250514-v1:0'
-const BEDROCK_SONNET_MODEL = process.env.OS_SESSION_BEDROCK_SONNET_MODEL || 'us.anthropic.claude-sonnet-4-6-20250514-v1:0'
 
 // Detect usage exhaustion / rate limit errors from any error string
 function _isUsageExhausted(text) {
@@ -114,8 +103,7 @@ function _isUsageExhausted(text) {
   return t.includes('429') || t.includes('rate limit') || t.includes('overloaded') ||
     t.includes('capacity') || t.includes('out of extra usage') || t.includes('out of usage') ||
     t.includes('weekly') || t.includes('resets ') || t.includes('not logged in') ||
-    t.includes('throttlingexception') || t.includes('too many requests') ||
-    t.includes('daily token limit') || t.includes('quota')
+    t.includes('too many requests') || t.includes('quota')
 }
 
 // We lazy-import the ESM Agent SDK since the backend is CJS
@@ -260,11 +248,10 @@ async function _sendMessageImpl(content, opts = {}) {
   const mcpServers = loadMcpServersFromCwd(cwd)
 
   // Energy-gated thinking: use extended thinking when credits are ample (full/healthy)
-  // Bedrock doesn't support extended thinking — only Claude Max primary
   let energy = null
   try { energy = await usageEnergy.getEnergy() } catch {}
   const energyLevel = energy?.level || 'healthy'
-  const canThink = !usingBedrock && !usingBedrockSonnet && (energyLevel === 'full' || energyLevel === 'healthy')
+  const canThink = energyLevel === 'full' || energyLevel === 'healthy'
 
   const options = {
     cwd,
@@ -304,8 +291,8 @@ async function _sendMessageImpl(content, opts = {}) {
     options.resume = ccSessionId
   }
 
-  // Provider selection — four-tier fallback:
-  //   account1 (primary) → account2 (CLAUDE_CONFIG_DIR_2) → Bedrock Opus → Bedrock Sonnet
+  // Provider selection — two-tier fallback:
+  //   account1 (primary) → account2 (CLAUDE_CONFIG_DIR_2)
   //
   // Account switching uses CLAUDE_CONFIG_DIR in options.env — the SDK reads this
   // to locate ~/.claude/claude.json (OAuth token). Setting it to a different dir
@@ -314,44 +301,14 @@ async function _sendMessageImpl(content, opts = {}) {
   // Auto-reset: if it's been >7 days since account1 was exhausted, retry it
   if (_shouldRetryPrimary()) _resetToAccount1()
 
-  const canBedrock = env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
   const hasAccount2 = !!(env.CLAUDE_CONFIG_DIR_2)
-  const shouldUseBedrock = usingBedrock || (!env.ANTHROPIC_API_KEY && !hasAccount2 && canBedrock)
-  const shouldUseAccount2 = !usingBedrock && usingAccount2 && hasAccount2
+  const shouldUseAccount2 = usingAccount2 && hasAccount2
 
   // Keep energy service in sync
-  const currentProvider = shouldUseBedrock && canBedrock
-    ? (usingBedrockSonnet ? 'bedrock_sonnet' : 'bedrock_opus')
-    : shouldUseAccount2 ? 'claude_max_2' : 'claude_max'
+  const currentProvider = shouldUseAccount2 ? 'claude_max_2' : 'claude_max'
   usageEnergy.setProvider(currentProvider)
 
-  if (shouldUseBedrock && canBedrock) {
-    const bedrockModel = usingBedrockSonnet ? BEDROCK_SONNET_MODEL : BEDROCK_OPUS_MODEL
-    options.model = bedrockModel
-    options.settings = {
-      ...(typeof options.settings === 'object' ? options.settings : {}),
-      apiProvider: 'bedrock',
-      env: {
-        AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
-        AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
-        AWS_REGION: env.AWS_REGION || 'us-east-1',
-        CLAUDE_CODE_USE_BEDROCK: '1',
-      },
-    }
-    const bedrockEnv = { ...process.env }
-    delete bedrockEnv.ANTHROPIC_API_KEY
-    bedrockEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
-    bedrockEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
-    bedrockEnv.AWS_REGION = env.AWS_REGION || 'us-east-1'
-    bedrockEnv.CLAUDE_CODE_USE_BEDROCK = '1'
-    options.env = bedrockEnv
-    delete options.resume
-    logger.info('OS Session using AWS Bedrock provider', {
-      model: bedrockModel,
-      region: env.AWS_REGION || 'us-east-1',
-      tier: usingBedrockSonnet ? 'sonnet-fallback' : 'opus',
-    })
-  } else if (shouldUseAccount2) {
+  if (shouldUseAccount2) {
     // Account 2 — different CLAUDE_CONFIG_DIR, same OAuth flow
     const sessionEnv = { ...process.env }
     if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
@@ -461,8 +418,8 @@ async function _sendMessageImpl(content, opts = {}) {
               sessionTokenUsage.input  += turnInput
               sessionTokenUsage.output += turnOutput
               if (turnInput > 0 || turnOutput > 0) {
-                const provider = usingBedrockSonnet ? 'bedrock_sonnet' : usingBedrock ? 'bedrock_opus' : 'claude_max'
-                const model    = usingBedrockSonnet ? BEDROCK_SONNET_MODEL : usingBedrock ? BEDROCK_OPUS_MODEL : (env.OS_SESSION_MODEL || null)
+                const provider = usingAccount2 ? 'claude_max_2' : 'claude_max'
+                const model    = env.OS_SESSION_MODEL || null
                 // Log for history/turns-this-week count (non-blocking)
                 usageEnergy.logUsage({ sessionId: dbSessionId, source: 'os_session', provider, model, inputTokens: turnInput, outputTokens: turnOutput }).catch(() => {})
               }
@@ -497,7 +454,7 @@ async function _sendMessageImpl(content, opts = {}) {
             }
 
             // Check for rate-limit / usage-exhaustion errors in the result
-            // Fallback chain: account1 → account2 → Bedrock Opus → Bedrock Sonnet
+            // Fallback chain: account1 → account2
             if (msg.is_error) {
               const errTexts = (msg.errors || []).join(' ') + ' ' + (msg.result || '') + ' ' + (msg.stop_reason || '')
 
@@ -516,7 +473,7 @@ async function _sendMessageImpl(content, opts = {}) {
               }
 
               if (_isUsageExhausted(errTexts)) {
-                if (!usingAccount2 && !usingBedrock && hasAccount2) {
+                if (!usingAccount2 && hasAccount2) {
                   // Account 1 exhausted → switch to account 2
                   usingAccount2 = true
                   _exhaustedAt = Date.now()
@@ -525,25 +482,7 @@ async function _sendMessageImpl(content, opts = {}) {
                   usageEnergy.setProvider('claude_max_2')
                   logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
                   emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
-                  throw { _bedrockRetry: true, message: content }
-                } else if (!usingBedrock && canBedrock) {
-                  // Account 2 also exhausted (or not configured) → Bedrock Opus
-                  usingBedrock = true
-                  ccSessionId = null
-                  activeQuery = null
-                  usageEnergy.setProvider('bedrock_opus')
-                  logger.warn('OS Session usage exhausted — switching to Bedrock Opus', { errors: msg.errors })
-                  emitOutput({ type: 'system', content: 'Both Claude Max accounts exhausted — switching to Bedrock Opus.' })
-                  throw { _bedrockRetry: true, message: content }
-                } else if (usingBedrock && !usingBedrockSonnet && canBedrock) {
-                  // Bedrock Opus daily limit → Bedrock Sonnet
-                  usingBedrockSonnet = true
-                  ccSessionId = null
-                  activeQuery = null
-                  usageEnergy.setProvider('bedrock_sonnet')
-                  logger.warn('OS Session Bedrock Opus limit hit — stepping down to Bedrock Sonnet', { errors: msg.errors })
-                  emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6.' })
-                  throw { _bedrockRetry: true, message: content }
+                  throw { _accountRetry: true, message: content }
                 }
               }
             }
@@ -571,7 +510,7 @@ async function _sendMessageImpl(content, opts = {}) {
             break
         }
       } catch (msgErr) {
-        if (msgErr._bedrockRetry) throw msgErr  // let sentinel propagate to outer catch
+        if (msgErr._accountRetry) throw msgErr  // let sentinel propagate to outer catch
         logger.debug('OS Session message processing error', { error: msgErr.message })
       }
     }
@@ -614,7 +553,7 @@ async function _sendMessageImpl(content, opts = {}) {
     activeQuery = null
 
     // Sentinel from the result handler — flags already set, just retry
-    if (err._bedrockRetry) {
+    if (err._accountRetry) {
       return sendMessage(err.message, opts)
     }
 
@@ -643,11 +582,11 @@ async function _sendMessageImpl(content, opts = {}) {
 
     const exhausted = _isUsageExhausted(errMsg)
     const hasAccount2Catch = !!(env.CLAUDE_CONFIG_DIR_2)
-    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, hasAccount2: hasAccount2Catch, canBedrock: !!canBedrock, usingAccount2, usingBedrock, usingBedrockSonnet })
+    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, hasAccount2: hasAccount2Catch, usingAccount2 })
 
-    // On usage exhaustion — step through the fallback chain: account1 → account2 → Bedrock Opus → Bedrock Sonnet
+    // On usage exhaustion — fallback: account1 → account2
     if (exhausted) {
-      if (!usingAccount2 && !usingBedrock && hasAccount2Catch) {
+      if (!usingAccount2 && hasAccount2Catch) {
         usingAccount2 = true
         _exhaustedAt = Date.now()
         ccSessionId = null
@@ -655,25 +594,11 @@ async function _sendMessageImpl(content, opts = {}) {
         logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
         emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
         return sendMessage(content)
-      } else if (!usingBedrock && canBedrock) {
-        usingBedrock = true
-        ccSessionId = null
-        usageEnergy.setProvider('bedrock_opus')
-        logger.warn('OS Session all Claude Max accounts exhausted — switching to Bedrock Opus', { error: errMsg })
-        emitOutput({ type: 'system', content: 'Both Claude Max accounts exhausted — switching to Bedrock Opus.' })
-        return sendMessage(content)
-      } else if (usingBedrock && !usingBedrockSonnet && canBedrock) {
-        usingBedrockSonnet = true
-        ccSessionId = null
-        usageEnergy.setProvider('bedrock_sonnet')
-        logger.warn('OS Session Bedrock Opus limit — stepping down to Bedrock Sonnet', { error: errMsg })
-        emitOutput({ type: 'system', content: 'Bedrock Opus limit hit — stepping down to Sonnet 4.6.' })
-        return sendMessage(content)
       }
     }
 
-    // All providers exhausted or non-quota error
-    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, usingBedrock, usingBedrockSonnet })
+    // Both accounts exhausted or non-quota error
+    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, usingAccount2 })
 
     emitOutput({ type: 'error', content: errMsg })
     emitStatus('error', { error: errMsg })
@@ -704,7 +629,7 @@ async function sendMessage(content, opts = {}) {
 
 async function getStatus() {
   const session = await getOSSession()
-  const provider = usingBedrockSonnet ? 'bedrock-sonnet' : usingBedrock ? 'bedrock-opus' : 'anthropic'
+  const provider = usingAccount2 ? 'claude-max-2' : 'claude-max'
   return {
     active: !!activeQuery,
     sessionId: session?.id || null,
@@ -723,8 +648,8 @@ async function restart() {
     activeQuery = null
   }
   ccSessionId = null
-  usingBedrock = false        // reset — try primary again on restart
-  usingBedrockSonnet = false
+  usingAccount2 = false       // reset — try primary again on restart
+  _exhaustedAt = null
   usageEnergy.setProvider('claude_max')
   const session = await createOSSession()
   emitStatus('idle', { sessionId: session.id, restarted: true })

@@ -21,7 +21,7 @@
  *   healthy  10–40%  used  — normal
  *   conserve 40–70%  used  — prefer sonnet for routine, opus for important
  *   low      70–90%  used  — sonnet only, reduce schedule frequency
- *   critical 90–100% used  — minimal ops, bedrock fallback, defer non-urgent
+ *   critical 90–100% used  — minimal ops, defer non-urgent, wait for weekly reset
  */
 
 const fs = require('fs')
@@ -41,7 +41,7 @@ let _state = {
   isUsingOverage: false,
   headersUpdatedAt: null,     // Date.now() when headers were last captured
   // Provider state — injected from osSessionService
-  currentProvider: 'claude_max', // 'claude_max' | 'bedrock_opus' | 'bedrock_sonnet'
+  currentProvider: 'claude_max', // 'claude_max' | 'claude_max_2'
 }
 
 // Cache the full energy snapshot (60s TTL)
@@ -56,13 +56,6 @@ const HEADER_STALE_MS = 15 * 60 * 1000
 function setProvider(provider) {
   if (_state.currentProvider !== provider) {
     _state.currentProvider = provider
-    // Only infer exhaustion when switching to actual Bedrock — NOT when switching
-    // between Claude Max accounts (claude_max_2 is still a fresh Max account).
-    const isBedrockProvider = provider === 'bedrock_opus' || provider === 'bedrock_sonnet'
-    if (isBedrockProvider && _state.weeklyUtilization === null) {
-      _state.weeklyUtilization = 1.0  // exhausted (Bedrock fallback = Max is gone)
-      _state.rateLimitStatus = 'rejected'
-    }
     // Switching to account 2 — reset inferred exhaustion so headers from acct2 can flow in,
     // then immediately fire a quota-check to get the real utilisation for this account.
     if (provider === 'claude_max_2') {
@@ -224,7 +217,7 @@ function _energyState(pctUsed) {
   if (pctUsed <= 0.40) return { level: 'healthy',  label: 'Healthy',            modelRec: 'opus',           scheduleMultiplier: 1.0 }
   if (pctUsed <= 0.70) return { level: 'conserve', label: 'Conserving',         modelRec: 'sonnet',         scheduleMultiplier: 0.75 }
   if (pctUsed <= 0.90) return { level: 'low',      label: 'Low energy',         modelRec: 'sonnet',         scheduleMultiplier: 0.5 }
-  return                      { level: 'critical',  label: 'Critical — minimal', modelRec: 'bedrock-sonnet', scheduleMultiplier: 0.25 }
+  return                      { level: 'critical',  label: 'Critical — minimal', modelRec: 'sonnet',         scheduleMultiplier: 0.25 }
 }
 
 // ─── Get current energy snapshot ──────────────────────────────────────────────
@@ -241,13 +234,11 @@ async function getEnergy() {
     refreshQuotaCheck().catch(() => {})
   }
 
-  // Bedrock = actual AWS fallback providers only (not claude_max_2 which is still a Max account)
-  const onBedrock = _state.currentProvider === 'bedrock_opus' || _state.currentProvider === 'bedrock_sonnet'
-  const pctUsed      = _state.weeklyUtilization ?? (onBedrock ? 1.0 : 0)
+  const pctUsed      = _state.weeklyUtilization ?? 0
   const pctRemaining = Math.max(0, 1 - pctUsed)
   const energy       = _energyState(pctUsed)
 
-  const hasRealData  = _state.weeklyUtilization !== null || onBedrock
+  const hasRealData  = _state.weeklyUtilization !== null
 
   // Time until reset
   let hoursUntilReset = null
@@ -263,7 +254,7 @@ async function getEnergy() {
 
   _cache = {
     // ─── Real data from Anthropic headers
-    source: hasRealData ? (onBedrock && _state.weeklyUtilization === null ? 'bedrock_inferred' : 'anthropic_headers') : (_state.currentProvider === 'claude_max_2' ? 'acct2_pending' : 'no_data'),
+    source: hasRealData ? 'anthropic_headers' : (_state.currentProvider === 'claude_max_2' ? 'acct2_pending' : 'no_data'),
     currentProvider: _state.currentProvider,
     headersAge: _state.headersUpdatedAt ? Math.round((now - _state.headersUpdatedAt) / 1000) : null,
     pctUsed:       Math.round(pctUsed * 1000) / 10,       // e.g. 42.3
@@ -278,7 +269,7 @@ async function getEnergy() {
     // ─── Self-tracked activity (supplementary)
     turnsThisWeek: selfTracked.turns,
     // ─── Human-readable summary for AI context
-    summary: _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns: selfTracked.turns, onBedrock }),
+    summary: _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns: selfTracked.turns }),
   }
 
   _cacheAt = now
@@ -308,17 +299,12 @@ function _getWeekStart(date = new Date()) {
   return d.toISOString().slice(0, 10)
 }
 
-function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns, onBedrock }) {
+function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, sessionPctUsed, hasRealData, turns }) {
   const usedPct = Math.round(pctUsed * 100)
   const remPct  = Math.round(pctRemaining * 100)
 
   if (!hasRealData) {
     return `Claude Max weekly energy: unknown (no API response headers captured yet). Energy level: ${energy.label}. Recommended model: ${energy.modelRec}.`
-  }
-
-  if (onBedrock && _state.weeklyUtilization === null) {
-    const resetStr = hoursUntilReset != null ? ` Resets in ~${Math.round(hoursUntilReset)}h.` : ''
-    return `Claude Max weekly energy: exhausted — currently on AWS Bedrock fallback.${resetStr} When weekly limit resets, OS will automatically return to Claude Max OAuth.`
   }
 
   if (_state.currentProvider === 'claude_max_2' && _state.weeklyUtilization === null) {
