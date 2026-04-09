@@ -56,10 +56,18 @@ const HEADER_STALE_MS = 15 * 60 * 1000
 function setProvider(provider) {
   if (_state.currentProvider !== provider) {
     _state.currentProvider = provider
-    // If we've switched to Bedrock, we know Max is exhausted — mark it
-    if (provider !== 'claude_max' && _state.weeklyUtilization === null) {
+    // Only infer exhaustion when switching to actual Bedrock — NOT when switching
+    // between Claude Max accounts (claude_max_2 is still a fresh Max account).
+    const isBedrockProvider = provider === 'bedrock_opus' || provider === 'bedrock_sonnet'
+    if (isBedrockProvider && _state.weeklyUtilization === null) {
       _state.weeklyUtilization = 1.0  // exhausted (Bedrock fallback = Max is gone)
       _state.rateLimitStatus = 'rejected'
+    }
+    // Switching to account 2 — reset inferred exhaustion so headers from acct2 can flow in
+    if (provider === 'claude_max_2') {
+      _state.weeklyUtilization = null
+      _state.headersUpdatedAt = null
+      _state.rateLimitStatus = 'allowed'
     }
     _cache = null
     _cacheAt = 0
@@ -121,17 +129,27 @@ let _quotaCheckInFlight = null
 
 async function _doQuotaCheck() {
   try {
-    // Load OAuth token from ~/.claude.json
-    const claudeConfigPath = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude.json')
+    // Use the correct config dir for the active provider:
+    //   claude_max_2 → CLAUDE_CONFIG_DIR_2 (account 2's ~/.claude.json)
+    //   everything else → default ~/.claude.json (account 1)
+    const isAcct2 = _state.currentProvider === 'claude_max_2'
+    const configDir = isAcct2
+      ? (process.env.CLAUDE_CONFIG_DIR_2 || null)
+      : (process.env.CLAUDE_CONFIG_DIR_1 || path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude'))
+    if (!configDir) {
+      logger.debug('quota-check: no config dir for provider, skipping', { provider: _state.currentProvider })
+      return
+    }
+    const claudeConfigPath = path.join(configDir, 'claude.json')
     if (!fs.existsSync(claudeConfigPath)) {
-      logger.debug('quota-check: ~/.claude.json not found, skipping')
+      logger.debug('quota-check: claude.json not found, skipping', { path: claudeConfigPath })
       return
     }
     const claudeConfig = JSON.parse(fs.readFileSync(claudeConfigPath, 'utf8'))
     const oauthToken = claudeConfig?.oauthAccount?.accessToken
 
     if (!oauthToken) {
-      logger.debug('quota-check: no OAuth token in ~/.claude.json, skipping')
+      logger.debug('quota-check: no OAuth token in claude.json, skipping', { provider: _state.currentProvider })
       return
     }
 
@@ -203,8 +221,8 @@ async function getEnergy() {
     refreshQuotaCheck().catch(() => {})
   }
 
-  // If on Bedrock with no real header data yet, assume exhausted
-  const onBedrock = _state.currentProvider !== 'claude_max'
+  // Bedrock = actual AWS fallback providers only (not claude_max_2 which is still a Max account)
+  const onBedrock = _state.currentProvider === 'bedrock_opus' || _state.currentProvider === 'bedrock_sonnet'
   const pctUsed      = _state.weeklyUtilization ?? (onBedrock ? 1.0 : 0)
   const pctRemaining = Math.max(0, 1 - pctUsed)
   const energy       = _energyState(pctUsed)
@@ -225,7 +243,7 @@ async function getEnergy() {
 
   _cache = {
     // ─── Real data from Anthropic headers
-    source: hasRealData ? (onBedrock && _state.weeklyUtilization === null ? 'bedrock_inferred' : 'anthropic_headers') : 'no_data',
+    source: hasRealData ? (onBedrock && _state.weeklyUtilization === null ? 'bedrock_inferred' : 'anthropic_headers') : (_state.currentProvider === 'claude_max_2' ? 'acct2_pending' : 'no_data'),
     currentProvider: _state.currentProvider,
     headersAge: _state.headersUpdatedAt ? Math.round((now - _state.headersUpdatedAt) / 1000) : null,
     pctUsed:       Math.round(pctUsed * 1000) / 10,       // e.g. 42.3
@@ -281,6 +299,10 @@ function _buildSummary({ pctUsed, pctRemaining, energy, hoursUntilReset, session
   if (onBedrock && _state.weeklyUtilization === null) {
     const resetStr = hoursUntilReset != null ? ` Resets in ~${Math.round(hoursUntilReset)}h.` : ''
     return `Claude Max weekly energy: exhausted — currently on AWS Bedrock fallback.${resetStr} When weekly limit resets, OS will automatically return to Claude Max OAuth.`
+  }
+
+  if (_state.currentProvider === 'claude_max_2' && _state.weeklyUtilization === null) {
+    return `Claude Max weekly energy: using account 2 — headers not yet captured for this account. Energy level unknown until first response arrives.`
   }
 
   const lines = [
