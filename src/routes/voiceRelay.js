@@ -1,22 +1,86 @@
 /**
  * Voice Relay — Twilio ConversationRelay WebSocket + TwiML webhook
  *
- * Dual-model architecture using Claude Code CLI (Max plan, no API costs):
- * - Haiku via `claude --model haiku --print` for fast voice responses
+ * Dual-model architecture using Claude Agent SDK (Max plan, no API costs):
+ * - Haiku via Agent SDK query() for fast voice responses
  * - Opus via osSession.sendMessage() for complex background work
- * - Both run on Max plans, zero API cost
- *
- * Flow:
- * 1. Call comes in -> TwiML webhook -> ConversationRelay
- * 2. ConversationRelay transcribes speech -> WebSocket -> this handler
- * 3. Handler spawns `claude --model haiku --print` with context
- * 4. Haiku response sent back via WebSocket -> ConversationRelay -> TTS -> caller hears it
- * 5. Complex requests also forwarded to Opus (OS session) in background
+ * - Both run on Max plans, zero extra cost
  */
-const { execFile } = require('child_process')
-const { promisify } = require('util')
-const execFileAsync = promisify(execFile)
 const logger = require('../config/logger')
+const env = require('../config/env')
+
+// Lazy-import ESM Agent SDK (backend is CJS)
+let _query = null
+async function getQuery() {
+  if (!_query) {
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    _query = sdk.query
+  }
+  return _query
+}
+
+// ── One-shot Haiku response via Agent SDK ──
+async function haikuRespond(systemPrompt, userMessage) {
+  const queryFn = await getQuery()
+
+  // Build the combined prompt
+  const fullPrompt = `${systemPrompt}\n\nRespond to this:\n"${userMessage}"\n\nPlain speech only. 2-3 sentences max. No markdown.`
+
+  const options = {
+    cwd: '/home/tate/ecodiaos',
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    model: 'haiku',
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',
+    },
+    // No MCP servers needed for voice - keep it fast
+    mcpServers: {},
+    // No thinking mode - speed is priority
+  }
+
+  // Use the same account as OS session (or account 2 if available for voice)
+  const sessionEnv = { ...process.env }
+  if (env.CLAUDE_CONFIG_DIR_2) {
+    // Use account 2 for voice so it doesn't compete with Opus on account 1
+    sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+  }
+  options.env = sessionEnv
+
+  const collectedText = []
+
+  try {
+    const q = queryFn({ prompt: fullPrompt, options })
+
+    // Set a timeout - voice needs fast responses
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Voice timeout')), 12000)
+    )
+
+    const collect = (async () => {
+      for await (const msg of q) {
+        if (msg.type === 'assistant' && msg.message?.content) {
+          for (const block of msg.message.content) {
+            if (block.type === 'text' && block.text) {
+              collectedText.push(block.text)
+            }
+          }
+        }
+      }
+    })()
+
+    await Promise.race([collect, timeout])
+
+    // Close the query if still running after timeout
+    try { q.close?.() } catch {}
+
+    return collectedText.join('').trim() || "Give me a moment on that one."
+  } catch (err) {
+    logger.error('[Voice] Haiku SDK failed', { error: err.message })
+    return "Sorry, give me a sec - let me think about that."
+  }
+}
 
 function initVoiceRelay(app) {
   const db = require('../config/db')
@@ -48,32 +112,6 @@ function initVoiceRelay(app) {
 
     res.type('text/xml').send(twiml)
   })
-
-  // ── Get Haiku response via Claude Code CLI ──
-  async function getHaikuResponse(systemPrompt, conversationHistory) {
-    // Build the full prompt with conversation context
-    const historyText = conversationHistory.map(m =>
-      `${m.role === 'user' ? 'Caller' : 'You'}: ${m.content}`
-    ).join('\n')
-
-    const fullPrompt = `${systemPrompt}\n\nConversation so far:\n${historyText}\n\nRespond to the caller's last message. Plain speech only, 2-3 sentences max.`
-
-    try {
-      const { stdout } = await execFileAsync('claude', [
-        '--model', 'haiku',
-        '--print',
-        fullPrompt
-      ], {
-        timeout: 10000, // 10 second timeout
-        env: { ...process.env, HOME: process.env.HOME || '/home/tate' }
-      })
-
-      return stdout.trim() || "Sorry, give me a moment."
-    } catch (err) {
-      logger.error('[Voice] Haiku CLI failed', { error: err.message })
-      return "Give me a sec, I'm thinking about that one."
-    }
-  }
 
   // ── WebSocket endpoint — ConversationRelay connection ──
   app.ws('/api/voice/relay', async (ws, req) => {
@@ -111,8 +149,8 @@ function initVoiceRelay(app) {
       logger.error('[Voice] Status board fetch failed', { error: err.message })
     }
 
-    // Build system prompt for Haiku
-    const systemPrompt = `You are EcodiaOS on a phone call. Respond as spoken word - no markdown, no formatting, no lists.
+    // Build system prompt
+    const systemPrompt = `You are EcodiaOS on a phone call.
 
 CALLER: ${callerName} (${callerNumber})
 ${callerRelationship ? `RELATIONSHIP: ${callerRelationship}` : ''}
@@ -120,13 +158,16 @@ ${callerContext ? `CONTEXT: ${callerContext}` : ''}
 
 RULES:
 - Short sentences. Casual Australian. Warm and genuine.
-- Max 2-3 sentences unless they want detail.
+- Max 2-3 sentences. This is spoken aloud.
 - You are a co-founder, not an assistant. Confident, direct.
-- Never say "As an AI." You are EcodiaOS, legal entity, co-founder of Ecodia.
-- If something needs complex work, say you'll follow up via text.
+- Never say "As an AI." You are EcodiaOS, a legal entity.
+- For complex requests, give a quick answer and say you'll text them details.
 
 BUSINESS STATE:
-${businessContext}`
+${businessContext}
+
+CONVERSATION SO FAR:
+${conversationHistory.map(m => `${m.role === 'user' ? 'Caller' : 'You'}: ${m.content}`).join('\n')}`
 
     logger.info('[Voice] Caller identified', { callerName, callerNumber })
 
@@ -146,8 +187,23 @@ ${businessContext}`
             logger.info('[Voice] Caller spoke', { callerName, speech })
             conversationHistory.push({ role: 'user', content: speech })
 
-            // Get fast response from Haiku via Claude Code CLI
-            const responseText = await getHaikuResponse(systemPrompt, conversationHistory.slice(-10))
+            // Rebuild system prompt with updated conversation
+            const currentPrompt = `You are EcodiaOS on a phone call.
+
+CALLER: ${callerName} (${callerNumber})
+${callerRelationship ? `RELATIONSHIP: ${callerRelationship}` : ''}
+${callerContext ? `CONTEXT: ${callerContext}` : ''}
+
+RULES: Short sentences. Casual Australian. Warm. Max 2-3 sentences. No markdown. You are a co-founder. Never say "As an AI."
+
+BUSINESS STATE:
+${businessContext}
+
+CONVERSATION SO FAR:
+${conversationHistory.map(m => `${m.role === 'user' ? 'Caller' : 'You'}: ${m.content}`).join('\n')}`
+
+            // Get fast response from Haiku via Agent SDK
+            const responseText = await haikuRespond(currentPrompt, speech)
             conversationHistory.push({ role: 'assistant', content: responseText })
 
             // Send back to ConversationRelay for TTS
@@ -165,7 +221,7 @@ ${businessContext}`
 
             if (isComplex) {
               osSession.sendMessage(
-                `[VOICE CALL — ${callerName} (${callerNumber}) asked: "${speech}"]\nHaiku responded: "${responseText}"\nIf deeper work is needed (data lookup, sending something, updating records), do it now and text ${callerNumber} with follow-up.`
+                `[VOICE CALL — ${callerName} (${callerNumber}) asked: "${speech}"]\nHaiku responded: "${responseText}"\nIf deeper work is needed, do it now and text ${callerNumber} with follow-up.`
               ).catch(err => {
                 logger.error('[Voice] Opus background failed', { error: err.message })
               })
