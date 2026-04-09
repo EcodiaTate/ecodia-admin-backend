@@ -138,33 +138,69 @@ async function _doQuotaCheck() {
       return
     }
 
-    // CC stores config as either:
-    //   <configDir>/claude.json  (when CLAUDE_CONFIG_DIR points to the dir itself)
-    //   <configDir>.json         (when configDir IS the ~/.claude path — file is ~/.claude.json)
-    // Try both.
-    const candidates = [
-      path.join(configDir, 'claude.json'),   // e.g. /home/tate/.claude2/claude.json
-      configDir + '.json',                   // e.g. /home/tate/.claude.json (acct1 legacy)
-      path.join(configDir, '.claude.json'),  // less common fallback
+    // CC stores credentials separately from config:
+    //   <configDir>/.credentials.json  — OAuth token (CC 1.x+, dot-prefixed)
+    //   <configDir>/credentials.json   — OAuth token (alternative)
+    //   <configDir>/.claude.json       — may contain oauthAccount with token (older CC)
+    //   <configDir>.json               — legacy ~/.claude.json
+    // We try credential files first (they have the token), then config files.
+    const credCandidates = [
+      path.join(configDir, '.credentials.json'),  // CC 1.x+ (dot-prefixed)
+      path.join(configDir, 'credentials.json'),   // alternative
     ]
-    let claudeConfigPath = null
-    for (const p of candidates) {
-      if (fs.existsSync(p)) { claudeConfigPath = p; break }
-    }
-    if (!claudeConfigPath) {
-      logger.warn('quota-check: no claude.json found', { tried: candidates, provider: _state.currentProvider })
-      return
+    const configCandidates = [
+      path.join(configDir, '.claude.json'),       // ~/.claude/.claude.json
+      path.join(configDir, 'claude.json'),        // ~/.claude/claude.json
+      configDir + '.json',                        // ~/.claude.json (legacy)
+    ]
+
+    // Try credential files first — they directly contain the OAuth token
+    let oauthToken = null
+    for (const p of credCandidates) {
+      if (fs.existsSync(p)) {
+        try {
+          const cred = JSON.parse(fs.readFileSync(p, 'utf8'))
+          // Credentials file may have: { claudeAiOauth: { accessToken } } or { accessToken } directly
+          const token = cred?.claudeAiOauth?.accessToken
+            || cred?.oauthAccount?.accessToken
+            || cred?.accessToken
+            || null
+          if (token) {
+            oauthToken = token
+            logger.info('quota-check: found token in credentials', { path: p, provider: _state.currentProvider })
+            break
+          }
+        } catch {}
+      }
     }
 
-    const claudeConfig = JSON.parse(fs.readFileSync(claudeConfigPath, 'utf8'))
-    const oauthToken = claudeConfig?.oauthAccount?.accessToken
+    // Fall back to config files if no credential file had a token
+    if (!oauthToken) {
+      for (const p of configCandidates) {
+        if (fs.existsSync(p)) {
+          try {
+            const cfg = JSON.parse(fs.readFileSync(p, 'utf8'))
+            const token = cfg?.oauthAccount?.accessToken
+              || cfg?.claudeAiOauth?.accessToken
+              || null
+            if (token) {
+              oauthToken = token
+              logger.info('quota-check: found token in config', { path: p, provider: _state.currentProvider })
+              break
+            }
+          } catch {}
+        }
+      }
+    }
 
     if (!oauthToken) {
-      logger.warn('quota-check: no OAuth token found', { path: claudeConfigPath, provider: _state.currentProvider })
+      logger.warn('quota-check: no OAuth token found in any location', {
+        credCandidates,
+        configCandidates,
+        provider: _state.currentProvider,
+      })
       return
     }
-
-    logger.info('quota-check: using config', { path: claudeConfigPath, provider: _state.currentProvider })
 
     const model = process.env.OS_SESSION_MODEL || 'claude-opus-4-5-20250514'
 
