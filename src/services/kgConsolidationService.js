@@ -533,12 +533,12 @@ Respond as JSON:
 // of both endpoints. The inference phases guess with minimal context — this
 // phase has the full picture and kills edges that don't hold up.
 //
-// Also runs on the initial ingestion output — DeepSeek sometimes hallucinates
+// Also runs on the initial ingestion output — Claude sometimes hallucinates
 // relationships from email/calendar content that are factually wrong.
 // ────────────────────────────────────────────────────────────────────────
 
 async function validateInferredEdges({ dryRun = false, batchSize = 15 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return { audited: 0, killed: 0, kept: 0 }
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return { audited: 0, killed: 0, kept: 0 }
 
   const results = { audited: 0, killed: 0, kept: 0 }
 
@@ -1872,7 +1872,7 @@ function parseJSON(content) {
 // graph actually need right now? It selects and orders phases based on
 // what it observes — not based on what number comes next in a list.
 //
-// It uses DeepSeek to interpret the graph state signal and decide.
+// It uses Claude to interpret the graph state signal and decide.
 // The phases themselves are unchanged — they're good. What changes is
 // who decides when to run them.
 //
@@ -1886,7 +1886,7 @@ async function runConsolidationDirector({ dryRun = false } = {}) {
   // 1. Read the graph state — what's there and what hasn't been processed
   const graphState = await readGraphState()
 
-  // 2. Ask DeepSeek: given this state, what synthesis work is most needed?
+  // 2. Ask Claude: given this state, what synthesis work is most needed?
   const workPlan = await directConsolidation(graphState)
 
   logger.info(`KG ConsolidationDirector: plan — ${workPlan.map(p => p.phase).join(', ')}`)
@@ -2069,7 +2069,7 @@ Given the graph state and metabolic pressure, decide which phases to run, in wha
       return parsed.filter(p => p.phase && typeof p.phase === 'string')
     }
   } catch (err) {
-    logger.warn('KG Director: DeepSeek call failed — using heuristic plan', { error: err.message })
+    logger.warn('KG Director: Claude call failed — using heuristic plan', { error: err.message })
   }
 
   // Heuristic fallback — if the mind is unreachable

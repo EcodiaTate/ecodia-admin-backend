@@ -1,92 +1,20 @@
-const axios = require('axios')
 const env = require('../config/env')
 const logger = require('../config/logger')
-const db = require('../config/db')
-
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
-const DEEPSEEK_TIMEOUT_MS = parseInt(env.DEEPSEEK_TIMEOUT_MS || '120000') || 120000
-const DEEPSEEK_MAX_RETRIES = parseInt(env.DEEPSEEK_MAX_RETRIES || '3') || 3
-const DEEPSEEK_RETRY_BASE_MS = parseInt(env.DEEPSEEK_RETRY_BASE_MS || '1000') || 1000
-
-// Provider routing: claude models go to Anthropic Bedrock, else DeepSeek
-function _isAnthropicModel(model) { return model.startsWith('claude-') || model.includes('anthropic.claude') }
-
-// Lazy-init Bedrock client — only created when first needed
-let _bedrockClient = null
-function _getBedrockClient() {
-  if (!_bedrockClient) {
-    const { AnthropicBedrock } = require('@anthropic-ai/bedrock-sdk')
-    _bedrockClient = new AnthropicBedrock({
-      awsAccessKey: env.AWS_ACCESS_KEY_ID,
-      awsSecretKey: env.AWS_SECRET_ACCESS_KEY,
-      awsRegion: env.AWS_REGION || 'us-east-1',
-    })
-  }
-  return _bedrockClient
-}
-
-// ─── Budget circuit breaker ───────────────────────────────────────────
-// DEEPSEEK_MONTHLY_BUDGET_AUD in env (0 = unlimited, which is the default).
-// Tracks spend in-memory + DB. Rejects calls once the monthly ceiling is hit.
-// Cost formula: deepseek-chat prompt=$0.14/1M tokens, completion=$0.28/1M tokens.
-// AUD conversion: ~1.55× USD at time of writing — hardcoded conservatively.
-
-const MONTHLY_BUDGET_AUD = parseFloat(env.DEEPSEEK_MONTHLY_BUDGET_AUD || '0') || 0
-const USD_TO_AUD = parseFloat(env.USD_TO_AUD || '1.55') || 1.55
-
-let _budgetCache = null  // { month: 'YYYY-MM', spentUSD: number, checkedAt: number }
-let _budgetCheckInFlight = null  // dedup concurrent budget checks
-
-async function checkBudget() {
-  if (MONTHLY_BUDGET_AUD <= 0) return  // unlimited
-
-  const now = new Date()
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-
-  // Re-query at most once per minute — dedup concurrent checks
-  if (!_budgetCache || _budgetCache.month !== month || Date.now() - _budgetCache.checkedAt > 60_000) {
-    if (!_budgetCheckInFlight) {
-      _budgetCheckInFlight = db`
-        SELECT COALESCE(SUM(cost_usd), 0)::float AS spent
-        FROM claude_usage
-        WHERE date_trunc('month', created_at) = date_trunc('month', now())
-      `.then(([row]) => {
-        _budgetCache = { month, spentUSD: row?.spent ?? 0, checkedAt: Date.now() }
-      }).catch(err => {
-        logger.debug('Budget check DB query failed', { error: err.message })
-      }).finally(() => {
-        _budgetCheckInFlight = null
-      })
-    }
-    await _budgetCheckInFlight
-    if (!_budgetCache) return  // DB failed, don't block
-  }
-
-  if (!_budgetCache) return  // DB check failed, don't block
-
-  const spentAUD = _budgetCache.spentUSD * USD_TO_AUD
-  if (spentAUD >= MONTHLY_BUDGET_AUD) {
-    logger.warn(`DeepSeek budget exhausted — ${spentAUD.toFixed(2)} AUD spent of ${MONTHLY_BUDGET_AUD} AUD monthly limit`)
-    throw new Error(`DeepSeek monthly budget exhausted (${spentAUD.toFixed(2)} / ${MONTHLY_BUDGET_AUD} AUD). Set DEEPSEEK_MONTHLY_BUDGET_AUD=0 to disable or increase the limit.`)
-  }
-
-  const warningFraction = parseFloat(env.DEEPSEEK_BUDGET_WARNING_FRACTION || '0.8') || 0.8
-  if (warningFraction > 0 && spentAUD >= MONTHLY_BUDGET_AUD * warningFraction) {
-    logger.warn(`DeepSeek budget warning — ${spentAUD.toFixed(2)} AUD of ${MONTHLY_BUDGET_AUD} AUD used (${Math.round(spentAUD / MONTHLY_BUDGET_AUD * 100)}%)`)
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════════
-// UNIVERSAL KG-AWARE LLM LAYER
+// KG-AWARE LLM LAYER  (formerly "deepseekService" — name kept for import compat)
 //
-// Every LLM call goes through this function. It automatically:
+// Every LLM call goes through callDeepSeek(). It automatically:
 //   1. RETRIEVES — pulls relevant KG context via semantic search + trace
-//   2. INJECTS — adds context as a system message
-//   3. EXECUTES — calls DeepSeek
-//   4. LOGS — ingests the input + output back into the KG
+//   2. INJECTS   — adds context as a system message prefix
+//   3. EXECUTES  — calls claudeService (Anthropic API, sonnet-4-6 default)
+//   4. LOGS      — ingests the exchange back into the KG
 //
-// Callers just pass contextQuery (what to search the graph for) and
-// the system handles the rest. The graph grows with every call.
+// Callers pass `contextQuery` (what to search the graph for) and the
+// graph enriches every call. The graph grows with every call.
+//
+// Provider: Claude via ANTHROPIC_API_KEY (claudeService handles retries + tracking).
+// DeepSeek is fully decommissioned — this file is the KG wrapper only.
 // ═══════════════════════════════════════════════════════════════════════
 
 let _kgService = null
@@ -105,46 +33,39 @@ function getKG() {
   return { kg: _kgService, hooks: _kgHooks }
 }
 
+// ─── Core: KG-aware LLM call ─────────────────────────────────────────
+
 async function callDeepSeek(messages, {
   module = 'general',
-  model = 'claude-haiku-4-5-20251001',
-  contextQuery = null,       // what to search the KG for (string)
-  skipRetrieval = false,     // skip KG retrieval (for KG ingestion calls to avoid loops)
-  skipLogging = false,       // skip KG logging (for KG ingestion calls)
-  sourceId = null,           // source entity ID for KG logging
-  temperature = null,        // null = provider default (no override)
+  model = 'claude-sonnet-4-6',
+  contextQuery = null,      // what to search the KG for (string)
+  skipRetrieval = false,    // skip KG retrieval (for KG ingestion calls — avoids loops)
+  skipLogging = false,      // skip KG logging
+  sourceId = null,          // source entity ID for KG logging
+  temperature = null,       // null = provider default
+  maxTokens = null,         // null = claudeService default (4096)
 } = {}) {
-  // ─── 0. BUDGET: Reject if monthly ceiling hit ─────────────────────
-  await checkBudget()
-
-  const start = Date.now()
   const { kg } = getKG()
 
-  // ─── 1. RETRIEVE: Pull KG context ──────────────────────────────────
+  // ─── 1. RETRIEVE: Pull KG context ────────────────────────────────
   let kgContext = null
-  if (!skipRetrieval && contextQuery && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {
+  if (!skipRetrieval && contextQuery && kg && env.NEO4J_URI) {
     try {
       const ctx = await kg.getContext(contextQuery, {
-        maxSeeds: parseInt(env.DEEPSEEK_KG_MAX_SEEDS || '15'),
-        maxDepth: parseInt(env.DEEPSEEK_KG_MAX_DEPTH || '5'),
-        minSimilarity: parseFloat(env.DEEPSEEK_KG_MIN_SIMILARITY || '0.4'),
+        maxSeeds:     parseInt(env.DEEPSEEK_KG_MAX_SEEDS   || env.KG_CONTEXT_MAX_SEEDS    || '15'),
+        maxDepth:     parseInt(env.DEEPSEEK_KG_MAX_DEPTH   || env.KG_CONTEXT_MAX_DEPTH    || '5'),
+        minSimilarity: parseFloat(env.DEEPSEEK_KG_MIN_SIMILARITY || env.KG_CONTEXT_MIN_SIMILARITY || '0.4'),
       })
-      if (ctx.summary) {
-        kgContext = ctx.summary
-      }
+      if (ctx.summary) kgContext = ctx.summary
     } catch (err) {
       logger.debug('KG retrieval failed (non-blocking)', { error: err.message })
     }
   }
 
-  // ─── 2. INJECT: Add context as system message ──────────────────────
+  // ─── 2. INJECT: Prepend KG context as system message ─────────────
   let enrichedMessages = [...messages]
   if (kgContext) {
-    const systemContext = `--- KNOWLEDGE GRAPH ---
-${kgContext}
---- END KNOWLEDGE GRAPH ---`
-
-    // Prepend as system message, or append to existing system message
+    const systemContext = `--- KNOWLEDGE GRAPH CONTEXT ---\n${kgContext}\n--- END KNOWLEDGE GRAPH ---`
     const existingSystem = enrichedMessages.findIndex(m => m.role === 'system')
     if (existingSystem >= 0) {
       enrichedMessages[existingSystem] = {
@@ -154,45 +75,49 @@ ${kgContext}
     } else {
       enrichedMessages = [{ role: 'system', content: systemContext }, ...enrichedMessages]
     }
-
     logger.debug(`KG context injected for ${module} (${kgContext.length} chars)`)
   }
 
-  // ─── 3. EXECUTE: Delegate to claudeService (Anthropic API) ─────────
+  // ─── 3. EXECUTE: Call Claude ──────────────────────────────────────
   const { callClaude } = require('./claudeService')
-  const content = await callClaude(enrichedMessages, { module, model, temperature })
+  const opts = { module, model, temperature }
+  if (maxTokens) opts.maxTokens = maxTokens
+  const content = await callClaude(enrichedMessages, opts)
 
-  // ─── 4. LOG: Ingest the exchange back into the KG ──────────────────
-  if (!skipLogging && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {
+  // ─── 4. LOG: Ingest exchange back into KG ─────────────────────────
+  if (!skipLogging && kg && env.NEO4J_URI) {
     const userMessage = messages.filter(m => m.role === 'user').pop()?.content || ''
-    const logContent = `LLM interaction (${module}):
-Input: ${userMessage.slice(0, 500)}
-Output: ${content.slice(0, 1000)}`
-
-    kg.ingestFromLLM(logContent, {
-      sourceModule: `llm_${module}`,
-      sourceId,
-      context: `This is the result of an AI ${module} operation. Extract any new entities, facts, decisions, or relationships mentioned.`,
-    }).catch(err => logger.debug('KG logging failed (non-blocking)', { error: err.message }))
+    kg.ingestFromLLM(
+      `LLM interaction (${module}):\nInput: ${userMessage.slice(0, 500)}\nOutput: ${content.slice(0, 1000)}`,
+      {
+        sourceModule: `llm_${module}`,
+        sourceId,
+        context: `AI ${module} operation result. Extract entities, facts, decisions, relationships.`,
+      }
+    ).catch(err => logger.debug('KG logging failed (non-blocking)', { error: err.message }))
   }
 
   return content
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Module-Specific Functions
-// (now all automatically KG-aware via callDeepSeek)
-// ═══════════════════════════════════════════════════════════════════════
+// ─── JSON parse helper ────────────────────────────────────────────────
 
 function parseJSON(content) {
+  const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
   try {
-    return JSON.parse(content)
+    return JSON.parse(cleaned)
   } catch {
-    const match = content.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (match) return JSON.parse(match[1].trim())
-    throw new Error(`Failed to parse DeepSeek response as JSON: ${content.slice(0, 200)}`)
+    const match = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
+    if (match) {
+      try { return JSON.parse(match[0]) } catch {}
+    }
+    throw new Error(`Failed to parse LLM response as JSON: ${content.slice(0, 200)}`)
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Domain-specific helpers — all KG-aware via callDeepSeek
+// ═══════════════════════════════════════════════════════════════════════
 
 async function categorize({ description, amount, type, date }) {
   const prompt = `Categorize this transaction for ${env.OWNER_CONTEXT}.
@@ -216,7 +141,6 @@ Respond as JSON:
 }
 
 async function triageEmail({ subject, from, body, snippet, inbox, clientContext, kgContext, pendingActionsContext, activeChannelsContext, projectCodebaseContext, decisionContext, receivedAt }) {
-  // kgContext may already be provided by gmailService — if so, skip retrieval
   const hasExternalContext = !!kgContext
 
   const contextBlock = kgContext
@@ -225,21 +149,10 @@ async function triageEmail({ subject, from, body, snippet, inbox, clientContext,
       ? `Known client: ${clientContext.name} (Status: ${clientContext.status})`
       : 'Unknown sender'
 
-  const pendingBlock = pendingActionsContext
-    ? `\n--- ALREADY PENDING ---\n${pendingActionsContext}\n--- END ---\n`
-    : ''
-
-  const channelsBlock = activeChannelsContext
-    ? `\n--- OTHER CHANNELS ---\n${activeChannelsContext}\n--- END ---\n`
-    : ''
-
-  const codebaseBlock = projectCodebaseContext
-    ? `\n--- CLIENT PROJECTS & CODEBASES ---\n${projectCodebaseContext}\n--- END ---\n`
-    : ''
-
-  const decisionBlock = decisionContext
-    ? `\n--- DECISION HISTORY (this sender) ---\n${decisionContext}\n--- END ---\n`
-    : ''
+  const pendingBlock    = pendingActionsContext    ? `\n--- ALREADY PENDING ---\n${pendingActionsContext}\n--- END ---\n`               : ''
+  const channelsBlock   = activeChannelsContext    ? `\n--- OTHER CHANNELS ---\n${activeChannelsContext}\n--- END ---\n`               : ''
+  const codebaseBlock   = projectCodebaseContext   ? `\n--- CLIENT PROJECTS & CODEBASES ---\n${projectCodebaseContext}\n--- END ---\n` : ''
+  const decisionBlock   = decisionContext          ? `\n--- DECISION HISTORY (this sender) ---\n${decisionContext}\n--- END ---\n`     : ''
 
   const now = new Date()
   const emailAge = receivedAt
@@ -291,15 +204,13 @@ Respond as JSON:
   const raw = await callDeepSeek([{ role: 'user', content: prompt }], {
     module: 'gmail',
     contextQuery: hasExternalContext ? null : `${from} ${subject}`,
-    skipRetrieval: hasExternalContext, // already have context, don't double-fetch
+    skipRetrieval: hasExternalContext, // already have context — don't double-fetch
   })
 
   let parsed
   try {
     parsed = parseJSON(raw)
   } catch (parseErr) {
-    // Parse failure must not kill the triage pipeline — return safe defaults
-    // so the email at least gets archived/surfaced rather than stuck in 'pending' forever
     logger.warn('triageEmail: JSON parse failed, using safe defaults', {
       error: parseErr.message, rawSlice: (raw || '').slice(0, 200),
     })
@@ -323,13 +234,13 @@ Respond as JSON:
     }
   }
 
-  // Validate critical fields — fill in safe defaults for anything missing
+  // Validate critical fields — fill safe defaults for anything missing
   if (!parsed.priority || typeof parsed.priority !== 'string') parsed.priority = 'medium'
-  if (!parsed.summary || typeof parsed.summary !== 'string') parsed.summary = subject || 'No summary'
-  if (typeof parsed.confidence !== 'number' || isNaN(parsed.confidence)) parsed.confidence = 0.5
-  if (typeof parsed.surfaceToHuman !== 'boolean') parsed.surfaceToHuman = false
-  if (typeof parsed.isCodeWorkRequest !== 'boolean') parsed.isCodeWorkRequest = false
-  if (typeof parsed.shouldCreateTask !== 'boolean') parsed.shouldCreateTask = false
+  if (!parsed.summary  || typeof parsed.summary  !== 'string') parsed.summary  = subject || 'No summary'
+  if (typeof parsed.confidence      !== 'number'  || isNaN(parsed.confidence))      parsed.confidence      = 0.5
+  if (typeof parsed.surfaceToHuman  !== 'boolean')                                   parsed.surfaceToHuman  = false
+  if (typeof parsed.isCodeWorkRequest !== 'boolean')                                 parsed.isCodeWorkRequest = false
+  if (typeof parsed.shouldCreateTask  !== 'boolean')                                 parsed.shouldCreateTask  = false
 
   return parsed
 }
@@ -348,20 +259,4 @@ Body: ${(thread.full_body || thread.snippet || '').slice(0, 3000)}`
   })
 }
 
-async function draftLinkedInReply(dm) {
-  const messages = dm.messages || []
-  const lastMessages = messages.slice(-5)
-
-  const prompt = `LinkedIn DM reply for ${env.OWNER_CONTEXT}.
-
-Conversation with ${dm.participant_name}:
-${lastMessages.map(m => `${m.sender}: ${m.text}`).join('\n')}`
-
-  return callDeepSeek([{ role: 'user', content: prompt }], {
-    module: 'linkedin',
-    contextQuery: `${dm.participant_name} LinkedIn conversation`,
-    sourceId: dm.id,
-  })
-}
-
-module.exports = { callDeepSeek, parseJSON, categorize, triageEmail, draftEmailReply, draftLinkedInReply }
+module.exports = { callDeepSeek, categorize, triageEmail, draftEmailReply }

@@ -13,7 +13,7 @@ const deepseek = require('./deepseekService')
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
- * AI-parse any bank CSV. Sends the first ~15 rows to DeepSeek to figure out
+ * AI-parse any bank CSV. Sends the first ~15 rows to Claude to figure out
  * which columns map to date, description, and amount, then applies that
  * mapping to every row. No hardcoded column names.
  */
@@ -299,7 +299,7 @@ async function deleteRule(id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// CATEGORIZATION (rule match first, then DeepSeek)
+// CATEGORIZATION (rule match first, then Claude)
 // ═══════════════════════════════════════════════════════════════════════
 
 const CATEGORIZE_PROMPT = `You are a bookkeeper for Ecodia Pty Ltd, an Australian GST-registered software company run by Tate.
@@ -448,7 +448,7 @@ async function _callDeepSeekCategorize(transactions, rules) {
 
 async function autoCategorize(maxBatch = 60) {
   // Process in capped batches to avoid HTTP timeouts
-  // Each batch of 30 = 1 DeepSeek call. Max 2 calls per invocation = ~20-30s
+  // Each batch of 30 = 1 Claude call. Max 2 calls per invocation = ~20-30s
   const pending = await listStaged('pending', maxBatch)
   if (!pending.length) return { categorized: 0, remaining: 0 }
 

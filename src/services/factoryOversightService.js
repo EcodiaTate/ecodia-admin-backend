@@ -9,7 +9,7 @@ const kgHooks = require('./kgIngestionHooks')
 // FACTORY OVERSIGHT SERVICE — Freedom Edition
 //
 // Context-aware intelligence layer that supervises the entire
-// CC → validate → deploy → monitor pipeline. Uses DeepSeek with full
+// CC → validate → deploy → monitor pipeline. Uses Claude with full
 // KG + codebase context.
 //
 // FREEDOM UPGRADES:
@@ -146,7 +146,7 @@ async function runPostSessionPipeline(sessionId) {
       const taskSnippet = (session.initial_prompt || '').slice(0, 200)
       const keywords = _extractKeywords(session.initial_prompt)
 
-      // Insert directly — bypass DeepSeek since we KNOW this is a pattern
+      // Insert directly — bypass Claude since we KNOW this is a pattern
       await db`
         INSERT INTO factory_learnings (
           id, codebase_id, pattern_type, pattern_description, confidence,
@@ -182,7 +182,7 @@ async function runPostSessionPipeline(sessionId) {
   await db`UPDATE cc_sessions SET pipeline_stage = 'testing' WHERE id = ${sessionId}`
   broadcastToSession(sessionId, 'cc:stage', { stage: 'reviewing', progress: 0.4 })
 
-  // Step 1: DeepSeek review of changes
+  // Step 1: Claude review of changes
   // Review ALWAYS runs. Under high metabolic pressure, non-self-mod reviews run
   // async (fire-and-forget to KG for learning) and we proceed on validation alone.
   // Self-modifications always block on review — the oversight pipeline is the safety net.
@@ -240,7 +240,7 @@ async function runPostSessionPipeline(sessionId) {
     await reportToTriggerSource(session, {
       success: false,
       stage: 'review',
-      error: 'Self-modification rejected by DeepSeek review',
+      error: 'Self-modification rejected by Claude review',
       reviewNotes: review?.notes,
     })
     await recordOutcome(session, 'rejected', { confidence, reason: 'self_mod_review_rejected' })
@@ -414,7 +414,7 @@ async function escalateToHuman(session, confidence, review, filesChanged) {
   })
 }
 
-// ─── DeepSeek Change Review ─────────────────────────────────────────
+// ─── Claude Change Review ──────────────────────────────────────────
 
 async function reviewChanges(session, filesChanged) {
   try {
@@ -801,7 +801,7 @@ ${details.reason ? `Reason: ${details.reason}` : ''}`
       error: details.error,
     }).catch(() => {})
 
-    // Extract cross-session learning patterns via DeepSeek
+    // Extract cross-session learning patterns via Claude
     await extractLearningPattern(session, outcome, details)
 
     // Learning decay: evidence-based, once per day at most.
@@ -945,7 +945,7 @@ If nothing specific is worth remembering, respond: {"pattern_type": "none", "pat
       return
     }
 
-    // Validate required fields — DeepSeek may return nulls or wrong types
+    // Validate required fields — Claude may return nulls or wrong types
     if (!parsed || typeof parsed.pattern_description !== 'string') {
       logger.debug('Learning extraction: missing or invalid pattern_description', { parsed: JSON.stringify(parsed).slice(0, 200) })
       return
@@ -1540,9 +1540,6 @@ module.exports = {
   prepareReviewContext,
   runDeployFromOSApproval,
   runRejectFromOS,
-  reviewChanges,
-  monitorPostDeploy,
-  reportToTriggerSource,
   generateFollowUp,
   recordOutcome,
   consolidateLearnings,

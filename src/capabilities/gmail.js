@@ -443,4 +443,53 @@ registry.registerMany([
       return await gmail.unsubscribe(threadId)
     },
   },
+
+  // ── Inbox management ─────────────────────────────────────────────────
+
+  {
+    name: 'gmail_list_inboxes',
+    description: 'List all configured Gmail inboxes — email, enabled status, label, notes.',
+    tier: 'read',
+    domain: 'gmail',
+    params: {},
+    handler: async () => {
+      const db = require('../config/db')
+      const rows = await db`SELECT email, enabled, label, notes, added_at FROM gmail_inboxes ORDER BY added_at`
+      return { inboxes: rows }
+    },
+  },
+  {
+    name: 'gmail_add_inbox',
+    description: 'Add a new Gmail inbox to poll. Requires DWD (domain-wide delegation) to be configured for this email address.',
+    tier: 'write',
+    domain: 'gmail',
+    params: {
+      email:  { type: 'string', required: true,  description: 'Email address to add' },
+      label:  { type: 'string', required: false, description: 'Short label e.g. "support"' },
+      notes:  { type: 'string', required: false, description: 'Why this inbox was added' },
+    },
+    handler: async ({ email, label, notes }) => {
+      const db = require('../config/db')
+      await db`
+        INSERT INTO gmail_inboxes (email, label, notes)
+        VALUES (${email}, ${label || null}, ${notes || null})
+        ON CONFLICT (email) DO UPDATE SET enabled = true, label = EXCLUDED.label, notes = EXCLUDED.notes
+      `
+      return { added: email }
+    },
+  },
+  {
+    name: 'gmail_remove_inbox',
+    description: 'Disable a Gmail inbox (stops polling it). Does not delete the record.',
+    tier: 'write',
+    domain: 'gmail',
+    params: {
+      email: { type: 'string', required: true, description: 'Email address to disable' },
+    },
+    handler: async ({ email }) => {
+      const db = require('../config/db')
+      await db`UPDATE gmail_inboxes SET enabled = false WHERE email = ${email}`
+      return { disabled: email }
+    },
+  },
 ])

@@ -12,7 +12,9 @@ const db = require('../config/db')
 // Pass model: 'claude-sonnet-4-6' for anything needing more reasoning.
 // ═══════════════════════════════════════════════════════════════════════
 
-const DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
+// Sonnet is the default: strong enough for reasoning, triage, code review.
+// Pass model: 'claude-haiku-4-5-20251001' explicitly for mechanical/high-volume tasks.
+const DEFAULT_MODEL = 'claude-sonnet-4-6'
 const MAX_RETRIES = 3
 const RETRY_BASE_MS = 1000
 

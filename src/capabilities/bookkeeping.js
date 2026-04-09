@@ -49,7 +49,7 @@ registry.registerMany([
   // ═══════════════════════════════════════════════════════════════════════
   {
     name: 'bookkeeping_categorize_pending',
-    description: 'Run AI categorization on all pending staged transactions. Uses supplier rules first, then DeepSeek for unknowns. High-confidence items auto-post to the ledger.',
+    description: 'Run AI categorization on all pending staged transactions. Uses supplier rules first, then Claude for unknowns. High-confidence items auto-post to the ledger.',
     tier: 'write',
     domain: 'bookkeeping',
     params: {},

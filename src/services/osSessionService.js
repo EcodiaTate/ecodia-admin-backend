@@ -104,8 +104,8 @@ function _resetToAccount1() {
 // Bedrock model IDs
 // Bedrock cross-region inference profile IDs — override via .env if needed
 // Format: us.anthropic.claude-{model}-{date}-v{n}:{revision}
-const BEDROCK_OPUS_MODEL = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-5-20250514-v1:0'
-const BEDROCK_SONNET_MODEL = process.env.OS_SESSION_BEDROCK_SONNET_MODEL || 'us.anthropic.claude-sonnet-4-5-20250514-v1:0'
+const BEDROCK_OPUS_MODEL = process.env.OS_SESSION_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-6-20250514-v1:0'
+const BEDROCK_SONNET_MODEL = process.env.OS_SESSION_BEDROCK_SONNET_MODEL || 'us.anthropic.claude-sonnet-4-6-20250514-v1:0'
 
 // Detect usage exhaustion / rate limit errors from any error string
 function _isUsageExhausted(text) {

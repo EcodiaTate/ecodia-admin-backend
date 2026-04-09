@@ -692,7 +692,7 @@ async function dispatchFromPrediction(prediction) {
     return null
   }
 
-  // AI triage: let DeepSeek decide whether this prediction is actionable code work
+  // AI triage: let Claude decide whether this prediction is actionable code work
   // before burning a CC session on it. Behavioral/psychological predictions about
   // humans are valid KG output but not Factory work.
   try {

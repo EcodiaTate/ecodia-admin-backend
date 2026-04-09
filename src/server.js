@@ -230,7 +230,7 @@ server.listen(env.PORT, async () => {
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
-    // Disabled: was running DeepSeek triage every 2min, burning credits.
+    // Disabled: was running autonomous triage every 2min, burning credits.
     // CEO OS handles all maintenance via scheduler crons now.
     // { name: 'autonomousMaintenanceWorker', path: './workers/autonomousMaintenanceWorker', start: true },
   ]

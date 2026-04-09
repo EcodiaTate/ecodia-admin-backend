@@ -110,8 +110,8 @@ async function ensureRelationship({ fromLabel, fromName, toLabel, toName, relTyp
 // ─── LLM-Driven Ingestion ────────────────────────────────────────────
 
 async function ingestFromLLM(content, { sourceModule, sourceId, context = '' }) {
-  if (!env.DEEPSEEK_API_KEY) {
-    logger.warn('KG ingestion skipped — no DeepSeek API key')
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) {
+    logger.warn('KG ingestion skipped — no LLM API key (set ANTHROPIC_API_KEY)')
     return
   }
 

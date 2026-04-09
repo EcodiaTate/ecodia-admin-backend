@@ -242,7 +242,7 @@ async function getGoal(goalId) {
  *
  * Uses the session outcome and the goal's existing state to determine
  * how much progress to attribute. Successful sessions with file changes
- * advance more than failed ones. The AI (via DeepSeek) assesses whether
+ * advance more than failed ones. The AI (via Claude) assesses whether
  * success criteria are met when progress is high enough.
  */
 async function advanceFromSession({ goalId, sessionId, outcome, confidence, filesChanged, prompt }) {
@@ -293,7 +293,7 @@ async function advanceFromSession({ goalId, sessionId, outcome, confidence, file
 /**
  * AI-driven goal completion assessment.
  * Called when progress is high enough to warrant checking success criteria.
- * Uses DeepSeek to evaluate whether the goal's success criteria are met
+ * Uses Claude to evaluate whether the goal's success criteria are met
  * based on the accumulated attempts and outcomes.
  */
 async function assessCompletion(goalId) {
@@ -342,7 +342,7 @@ Respond as JSON:
 // AUTONOMOUS GOAL GENERATION — The organism proposes its own goals
 //
 // Gathers system signals (errors, learnings, capability gaps, recent
-// achievements, introspection findings) and asks DeepSeek to propose
+// achievements, introspection findings) and asks Claude to propose
 // goals that would make the organism more capable, resilient, or intelligent.
 //
 // Runs alongside introspection in the maintenance worker cycle.
@@ -351,7 +351,7 @@ Respond as JSON:
 
 /**
  * Propose new goals autonomously based on system state.
- * Gathers signals, asks DeepSeek, deduplicates, and creates.
+ * Gathers signals, asks Claude, deduplicates, and creates.
  * Returns { proposed, created, skipped } counts.
  */
 async function proposeGoals() {
@@ -570,7 +570,7 @@ async function actOnGoalRecommendations(recommendations) {
 
 /**
  * Generate follow-up goals when a goal is achieved.
- * Asks DeepSeek what naturally comes next.
+ * Asks Claude what naturally comes next.
  */
 async function generateFollowUpGoals(achievedGoal) {
   if (!achievedGoal?.title) return

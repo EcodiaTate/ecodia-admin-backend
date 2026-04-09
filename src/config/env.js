@@ -132,11 +132,6 @@ const envSchema = z.object({
   CORTEX_URGENCY_THRESHOLD: z.string().default('0.0'),   // 0 = no urgency floor; AI decides action relevance
   XERO_CATEGORIZATION_CONFIDENCE_MIN: z.string().default('0.7'),
   GMAIL_TRIAGE_DEFAULT_CONFIDENCE: z.string().default('0.0'),   // 0 = no confidence floor; AI decides triage quality
-  // DeepSeek budget warning threshold (fraction of budget, 0 = no warning)
-  DEEPSEEK_BUDGET_WARNING_FRACTION: z.string().default('0.8'),
-  // DeepSeek API cost rates (USD per 1M tokens)
-  DEEPSEEK_COST_PROMPT_PER_1M: z.string().default('0.14'),
-  DEEPSEEK_COST_COMPLETION_PER_1M: z.string().default('0.28'),
   // Autonomous maintenance worker fallback thresholds
   MAINTENANCE_FALLBACK_PRESSURE_THRESHOLD: z.string().default('0.7'),
   MAINTENANCE_FALLBACK_MIN_OCCURRENCES: z.string().default('3'),
@@ -153,7 +148,7 @@ const envSchema = z.object({
   INTEGRATION_STALE_THRESHOLD_MS: z.string().default('900000'),            // 15 min — integrations older than this get mandatory poll injection
   MAINTENANCE_ESCALATION_SLA_MS: z.string().default('7200000'),           // 2 hour stale threshold
   MAINTENANCE_ESCALATION_REMINDER_MS: z.string().default('14400000'),     // 4 hour re-remind
-  // Cortex LLM temperature (optional, for DeepSeek — empty = provider default)
+  // Cortex LLM temperature (optional — empty = provider default)
   CORTEX_TEMPERATURE: z.string().default(''),
   // Cortex context tuning (0 = unlimited where applicable)
   CORTEX_KG_MAX_SEEDS: z.string().default('50'),
@@ -181,7 +176,7 @@ const envSchema = z.object({
   // KG ingestion tuning
   KG_INGESTION_DEDUP_WINDOW_MS: z.string().default('600000'),    // 10 min
   KG_INGESTION_DEDUP_MAP_SIZE: z.string().default('500'),
-  // DeepSeek KG retrieval defaults
+  // KG retrieval defaults (legacy DEEPSEEK_KG_* names kept for .env backwards-compat)
   DEEPSEEK_KG_MAX_SEEDS: z.string().default('15'),
   DEEPSEEK_KG_MAX_DEPTH: z.string().default('5'),
   DEEPSEEK_KG_MIN_SIMILARITY: z.string().default('0.4'),

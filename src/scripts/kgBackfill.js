@@ -49,7 +49,7 @@ async function backfill() {
       logger.warn(`Failed to backfill email ${thread.subject}`, { error: err.message })
     )
 
-    // Small delay to avoid hammering DeepSeek
+    // Small delay to avoid hammering the LLM
     await new Promise(r => setTimeout(r, 1000))
   }
 

@@ -385,12 +385,9 @@ function invalidateCache() {
 }
 
 module.exports = {
-  updateFromHeaders,
   setProvider,
   refreshQuotaCheck,
   logUsage,
   getEnergy,
   getWeeklyHistory,
-  invalidateCache,
-  getWeekStart: _getWeekStart,
 }

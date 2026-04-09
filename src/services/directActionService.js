@@ -27,6 +27,16 @@ const WRITE_ENABLED = (env.DIRECT_ACTION_WRITE_ENABLED || 'true') === 'true'
 const rateLimitWindows = new Map()
 const RATE_WINDOW_MS = 60 * 60 * 1000
 
+// Periodically evict empty/expired entries to prevent unbounded Map growth
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, timestamps] of rateLimitWindows) {
+    const active = timestamps.filter(t => now - t < RATE_WINDOW_MS)
+    if (active.length === 0) rateLimitWindows.delete(key)
+    else rateLimitWindows.set(key, active)
+  }
+}, RATE_WINDOW_MS).unref()
+
 function getRateLimit(capabilityName) {
   const envKey = `DA_RATE_${capabilityName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`
   const val = parseInt(env[envKey] || '0', 10)

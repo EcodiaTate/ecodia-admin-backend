@@ -26,7 +26,7 @@ let _emptyCycles = 0
 let _cycleCount = 0  // total cycles since start — for periodic introspection
 const env = require('../config/env')
 const MAX_DECISIONS_PER_CYCLE = parseInt(env.MAINTENANCE_MAX_DECISIONS || '0')  // 0 = unlimited
-// Model for cognitive streams — default to Sonnet 4.6 via Bedrock if AWS creds set, else DeepSeek
+// Model for cognitive streams — default to Sonnet 4.6 via Bedrock if AWS creds set, else Claude
 const STREAM_MODEL = env.MAINTENANCE_STREAM_MODEL || 'claude-haiku-4-5-20251001'
 
 // ─── Restart Resilience ──────────────────────────────────────────────
@@ -83,7 +83,7 @@ async function _restoreCycleState() {
 // and decides what maintenance work is needed right now — not what we
 // programmed it to do at a particular time.
 //
-// The mind is DeepSeek. The system state is everything we know.
+// The mind is Claude. The system state is everything we know.
 // The actions are Factory sessions, dispatched by intent, not by type.
 //
 // This is the difference between a system that follows instructions
@@ -173,7 +173,7 @@ function scheduleCycle() {
   const pressure = Number.isFinite(rawPressure) ? rawPressure : 0
 
   // Pressure-adaptive intervals — fast when alert, slower when calm — but never artificially slow.
-  // The only real constraint is DeepSeek API cost per call.
+  // The only real constraint is Claude API cost per call.
   const highMs = parseInt(env.MAINTENANCE_INTERVAL_HIGH_PRESSURE_MS || '30000') || 30000      // 30s when urgent
   const medMs = parseInt(env.MAINTENANCE_INTERVAL_MED_PRESSURE_MS || '60000') || 60000        // 1min when active
   const restMs = parseInt(env.MAINTENANCE_INTERVAL_REST_MS || '120000') || 120000              // 2min when calm
@@ -218,7 +218,7 @@ async function runCycle() {
   inCycle = true
   const cycleStart = Date.now()
 
-  // Hard timeout — if the cycle hangs (DeepSeek unresponsive, DB query stuck),
+  // Hard timeout — if the cycle hangs (Claude unresponsive, DB query stuck),
   // kill it after 3 minutes so the worker doesn't go silent forever.
   const CYCLE_TIMEOUT_MS = parseInt(env.MAINTENANCE_CYCLE_TIMEOUT_MS || '60000')
   let timedOut = false
@@ -243,7 +243,7 @@ async function runCycle() {
       timestamp: new Date().toISOString(),
     }))
 
-    // 2. Run parallel cognitive streams — each is a focused DeepSeek call
+    // 2. Run parallel cognitive streams — each is a focused Claude call
     logger.info('AutonomousMaintenanceWorker: running cognitive streams...')
     const pressure = Number.isFinite(state.pressure) ? state.pressure : 0
     const isExplorationEligible = pressure <= 0.4 && _emptyCycles > 0 && _emptyCycles % 2 === 0
@@ -790,7 +790,7 @@ async function readSystemState() {
 // ═══════════════════════════════════════════════════════════════════════
 // PARALLEL COGNITIVE STREAMS
 //
-// Four simultaneous DeepSeek calls, each with its own focus:
+// Four simultaneous Claude calls, each with its own focus:
 //   1. Maintenance — "What needs fixing right now?"
 //   2. Exploration — "What could I become?" (only when calm)
 //   3. Perception — "What am I noticing?"
@@ -828,7 +828,7 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
   } catch (err) {
-    logger.warn('streamMaintenance: DeepSeek call failed, using fallback heuristics', { error: err.message })
+    logger.warn('streamMaintenance: Claude call failed, using fallback heuristics', { error: err.message })
     return { decisions: fallbackHeuristics(state), reflection: null }
   }
 }
@@ -876,7 +876,7 @@ Current time: ${new Date().toISOString()}. Pressure: ${(state.pressure || 0).toF
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
   } catch (err) {
-    logger.debug('streamExploration: DeepSeek call failed', { error: err.message })
+    logger.debug('streamExploration: Claude call failed', { error: err.message })
     return { decisions: [], reflection: null }
   }
 }
@@ -905,7 +905,7 @@ Current time: ${new Date().toISOString()}.`
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection }
   } catch (err) {
-    logger.debug('streamPerception: DeepSeek call failed', { error: err.message })
+    logger.debug('streamPerception: Claude call failed', { error: err.message })
     return { decisions: [], reflection: null }
   }
 }
@@ -947,7 +947,7 @@ Respond as JSON:
     const parsed = _parseStreamResponse(raw)
     return { decisions: parsed.decisions, reflection: parsed.reflection, action: parsed.action || null }
   } catch (err) {
-    logger.debug('streamReflection: DeepSeek call failed', { error: err.message })
+    logger.debug('streamReflection: Claude call failed', { error: err.message })
     return { decisions: [], reflection: null, action: null }
   }
 }
@@ -1008,7 +1008,7 @@ async function actOnDecision(decision, state) {
 
   // ─── HARD THEATER GATE ──────────────────────────────────────────────
   // If theater score is high, block investigation/diagnostic sessions at
-  // the code level. The prompt tells DeepSeek not to suggest them, but
+  // the code level. The prompt tells Claude not to suggest them, but
   // LLMs don't always listen. This is the backstop.
   if ((state.theaterScore || 0) >= 5 && decision.type === 'investigation') {
     logger.info(`AutonomousMaintenanceWorker: THEATER GATE — blocking investigation dispatch (theaterScore: ${state.theaterScore}): "${(decision.intent || '').slice(0, 80)}"`)
@@ -1338,7 +1338,7 @@ function _extractDedupKeywords(intent) {
 
 // ─── Decision Key Normalisation ──────────────────────────────────────
 // Extracts a stable key from a decision so we can detect duplicates
-// across cycles even when DeepSeek phrases the same intent differently.
+// across cycles even when Claude phrases the same intent differently.
 
 function _normaliseDecisionKey(decision) {
   // For polls, the intent IS the key

@@ -40,6 +40,11 @@
       "command": "/home/tate/ecodiaos/mcp-servers/bookkeeping/start.sh",
       "args": []
     },
+    "crm": {
+      "type": "stdio",
+      "command": "/home/tate/ecodiaos/mcp-servers/crm/start.sh",
+      "args": []
+    },
     "scheduler": {
       "type": "stdio",
       "command": "/home/tate/ecodiaos/mcp-servers/scheduler/start.sh",

@@ -9,10 +9,19 @@ const { createTask } = require('../db/queries/tasks')
 const kgHooks = require('./kgIngestionHooks')
 
 const GMAIL_ENABLED = (env.GMAIL_ENABLED || 'false').toLowerCase() === 'true'
-const INBOXES = (env.GMAIL_INBOXES
-  ? env.GMAIL_INBOXES.split(',').map(s => s.trim()).filter(Boolean)
-  : [env.GOOGLE_PRIMARY_ACCOUNT]).filter(Boolean)
 const MAX_TRIAGE_ATTEMPTS = parseInt(env.GMAIL_MAX_TRIAGE_ATTEMPTS || '0', 10) || Infinity
+
+// Inboxes live in the gmail_inboxes DB table so the OS can add/remove them at runtime.
+// Falls back to GMAIL_INBOXES env var then GOOGLE_PRIMARY_ACCOUNT (pre-migration safety).
+async function getInboxes() {
+  try {
+    const rows = await db`SELECT email FROM gmail_inboxes WHERE enabled = true ORDER BY added_at`
+    if (rows.length > 0) return rows.map(r => r.email)
+  } catch { /* table not yet migrated — fall through */ }
+  return (env.GMAIL_INBOXES
+    ? env.GMAIL_INBOXES.split(',').map(s => s.trim()).filter(Boolean)
+    : [env.GOOGLE_PRIMARY_ACCOUNT]).filter(Boolean)
+}
 
 // ─── Gmail Client ────────────────────────────────────────────────────────────
 
@@ -38,7 +47,7 @@ async function pollInbox() {
     logger.debug('Gmail polling disabled (GMAIL_ENABLED=false) — set to "true" in .env to re-enable')
     return
   }
-  for (const inbox of INBOXES) {
+  for (const inbox of await getInboxes()) {
     try {
       logger.info(`Polling inbox: ${inbox}`)
       const gmail = getGmailClient(inbox)
@@ -203,7 +212,7 @@ async function processThread(gmail, inbox, threadId) {
   logger.info(`[${inbox}] Processed: ${subject} from ${fromEmail}`)
 }
 
-// ─── DeepSeek Triage ─────────────────────────────────────────────────────────
+// ─── Claude Triage ──────────────────────────────────────────────────────────
 
 async function triagePendingEmails() {
   if (!env.ANTHROPIC_API_KEY) return
@@ -366,7 +375,7 @@ async function triagePendingEmails() {
         WHERE id = ${thread.id}
       `
 
-      // Auto-create task if DeepSeek says so
+      // Auto-create task if Claude says so
       if (triage.shouldCreateTask && triage.taskTitle) {
         await createTask({
           title: triage.taskTitle,
@@ -555,7 +564,7 @@ async function autoAct(thread, triage) {
 
 async function sendReplyToThread(thread, body) {
   if (!GMAIL_ENABLED) throw new Error('Gmail disabled (GMAIL_ENABLED=false)')
-  const inbox = thread.inbox || INBOXES[0]
+  const inbox = thread.inbox || (await getInboxes())[0]
   const gmail = getGmailClient(inbox)
 
   const raw = createRawEmail({
@@ -577,7 +586,7 @@ async function sendReplyToThread(thread, body) {
 
 async function silentArchive(thread) {
   try {
-    const gmail = getGmailClient(thread.inbox || INBOXES[0])
+    const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
     await gmail.users.threads.modify({
       userId: 'me',
       id: thread.gmail_thread_id,
@@ -590,7 +599,7 @@ async function silentArchive(thread) {
 }
 
 async function saveDraftToGmail(thread, draftBody) {
-  const inbox = thread.inbox || INBOXES[0]
+  const inbox = thread.inbox || (await getInboxes())[0]
   const gmail = getGmailClient(inbox)
 
   const raw = createRawEmail({
@@ -626,7 +635,7 @@ async function archiveThread(threadId) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
   await gmail.users.threads.modify({
     userId: 'me',
     id: thread.gmail_thread_id,
@@ -641,7 +650,7 @@ async function markRead(threadId) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
   await gmail.users.threads.modify({
     userId: 'me',
     id: thread.gmail_thread_id,
@@ -655,7 +664,7 @@ async function trashThread(threadId) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
   await gmail.users.threads.trash({
     userId: 'me',
     id: thread.gmail_thread_id,
@@ -670,7 +679,7 @@ async function sendReply(threadId, body) {
   const [thread] = await db`SELECT * FROM email_threads WHERE gmail_thread_id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const inbox = thread.inbox || INBOXES[0]
+  const inbox = thread.inbox || (await getInboxes())[0]
   const gmail = getGmailClient(inbox)
 
   const raw = createRawEmail({
@@ -758,7 +767,7 @@ async function searchThreads(query, limit = 20) {
 
   // Local DB empty — search Gmail API directly and sync matching threads
   const remoteResults = []
-  for (const inbox of INBOXES) {
+  for (const inbox of await getInboxes()) {
     try {
       const gmail = getGmailClient(inbox)
       const res = await gmail.users.threads.list({ userId: 'me', q: query, maxResults: Math.min(limit, 10) })
@@ -805,7 +814,7 @@ async function labelThread(threadId, labelName) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
 
   // Resolve label name to ID (create if it doesn't exist)
   const labelId = await _resolveOrCreateLabel(gmail, labelName)
@@ -829,7 +838,7 @@ async function removeLabel(threadId, labelName) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const gmail = getGmailClient(thread.inbox || INBOXES[0])
+  const gmail = getGmailClient(thread.inbox || (await getInboxes())[0])
   const labelId = await _resolveLabel(gmail, labelName)
   if (!labelId) return { removed: false, reason: 'Label not found' }
 
@@ -856,7 +865,7 @@ async function forwardThread(threadId, toEmail) {
   const [thread] = await db`SELECT * FROM email_threads WHERE id = ${threadId}`
   if (!thread) throw new Error('Thread not found')
 
-  const inbox = thread.inbox || INBOXES[0]
+  const inbox = thread.inbox || (await getInboxes())[0]
   const gmail = getGmailClient(inbox)
 
   const forwardBody = `---------- Forwarded message ----------
@@ -880,7 +889,7 @@ ${thread.full_body || thread.snippet || ''}`
 
 async function sendNewEmail(inbox, to, subject, body) {
   if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
-  const fromInbox = inbox || INBOXES[0]
+  const fromInbox = inbox || (await getInboxes())[0]
   const gmail = getGmailClient(fromInbox)
 
   const raw = createRawEmail({ to, from: fromInbox, subject, body })
@@ -961,7 +970,7 @@ async function getInboxStats() {
 
 async function listLabels(inbox) {
   if (!GMAIL_ENABLED) throw new Error('Gmail disabled')
-  const gmail = getGmailClient(inbox || INBOXES[0])
+  const gmail = getGmailClient(inbox || (await getInboxes())[0])
   const res = await gmail.users.labels.list({ userId: 'me' })
   return (res.data.labels || []).map(l => ({ id: l.id, name: l.name, type: l.type }))
 }
