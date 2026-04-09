@@ -283,7 +283,7 @@ async function transferRelationships(keepId, dupeId) {
 // ─── Phase 2: Abstraction ───────────────────────────────────────────────
 
 async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const synthesized = []
 
@@ -444,7 +444,7 @@ Respond as JSON:
 // ─── Phase 3: Causal Threading ──────────────────────────────────────────
 
 async function threadCausalChains({ dryRun = false, maxChains = 10 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const threaded = []
 
@@ -707,7 +707,7 @@ For each numbered relationship, respond as JSON:
 // ────────────────────────────────────────────────────────────────────────
 
 async function detectContradictions({ dryRun = false, maxPairs = 8 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const detected = []
 
@@ -812,7 +812,7 @@ Respond as JSON:
 // ────────────────────────────────────────────────────────────────────────
 
 async function synthesizeNarratives({ dryRun = false, maxNarratives = 5 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const narratives = []
 
@@ -919,7 +919,7 @@ Respond as JSON:
 // ────────────────────────────────────────────────────────────────────────
 
 async function generatePredictions({ dryRun = false, maxPredictions = 5 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const predictions = []
 
@@ -1141,7 +1141,7 @@ async function scoreImportance({ dryRun = false } = {}) {
 // ────────────────────────────────────────────────────────────────────────
 
 async function buildEpisodes({ dryRun = false, maxEpisodes = 10 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const episodes = []
 
@@ -1252,7 +1252,7 @@ Respond as JSON:
 // ────────────────────────────────────────────────────────────────────────
 
 async function freeAssociate({ dryRun = false, rounds, clusterSize = 6 } = {}) {
-  if (!env.DEEPSEEK_API_KEY) return []
+  if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   // Pressure-modulated dreaming — never fully skipped.
   // High pressure is EXACTLY when free association matters most: finding unexpected
