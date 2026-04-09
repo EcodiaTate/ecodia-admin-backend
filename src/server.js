@@ -17,6 +17,10 @@ try {
 const server = createServer(app)
 initWS(app, server)
 
+// Voice relay — Twilio ConversationRelay WebSocket + TwiML
+const { initVoiceRelay } = require('./routes/voiceRelay')
+initVoiceRelay(app)
+
 // Track open connections so we can force-destroy them on shutdown.
 // Without this, server.close() hangs on long-lived WebSocket connections
 // and PM2 SIGKILLs the process before process.exit() fires → orphans.
