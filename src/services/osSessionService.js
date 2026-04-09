@@ -271,10 +271,11 @@ async function sendMessage(content, opts = {}) {
       preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
     },
     model: env.OS_SESSION_MODEL || undefined,
-    // Disable SDK auto-compaction — it fires at 100k tokens by default and replaces
-    // conversation history with a lossy summary, destroying context mid-conversation.
-    // We manage context lifecycle ourselves via autoHandover() at 700k tokens.
-    compactionControl: { enabled: false },
+    // Enable SDK auto-compaction — it summarises older messages in-place, preserving
+    // conversational continuity within the same session. Far better than a full session
+    // handover which nukes all context.  Threshold is in tokens; with a 1M context window,
+    // 800k gives plenty of room for the compacted summary + ongoing conversation.
+    compactionControl: { enabled: true },
     // Extended thinking — enabled when energy level is full or healthy
     ...(canThink ? {
       thinking: {
@@ -593,19 +594,10 @@ async function sendMessage(content, opts = {}) {
     const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
     logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId, totalTokens })
 
-    // Auto-handover check: if we've used enough of the context window, seamlessly
-    // transition to a fresh session at the next natural pause (end of this turn).
-    // We pass the current conversation messages for frontend continuity display.
-    // Handover runs fire-and-forget — the current turn result is returned first,
-    // then the handover brief generation happens as the next exchange.
-    if (!handoverInProgress && totalTokens > COMPACT_THRESHOLD) {
-      // Delay slightly so the frontend gets this turn's response first
-      setImmediate(() => {
-        autoHandover(null).catch(err =>
-          logger.error('OS Session: auto-handover fire-and-forget failed', { error: err.message })
-        )
-      })
-    }
+    // Auto-handover DISABLED — was nuking full session context and replacing it with
+    // a lossy brief summary. SDK compaction (re-enabled above) handles context management
+    // by summarising older messages in-place within the same session, preserving continuity.
+    // The autoHandover() function is kept below for reference but no longer fires.
 
     return {
       sessionId: dbSessionId,
