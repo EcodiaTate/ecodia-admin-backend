@@ -306,9 +306,11 @@ async function _sendMessageImpl(content, opts = {}) {
   // Pre-flight: if we haven't already switched but account 1 is known-exhausted
   // from the quota check, preemptively switch to account 2 instead of letting
   // the SDK hang on a 429 that may never surface as an error.
+  // NOTE: When pctUsed is null (quota check failed / 401), we do NOT switch preemptively.
+  // We let the SDK try and rely on the inactivity timeout as the safety net.
   if (!usingAccount2 && hasAccount2 && energy) {
     const isExhausted = energy.rateLimitStatus === 'rejected' ||
-      energy.pctUsed >= 99 ||
+      (energy.pctUsed != null && energy.pctUsed >= 99) ||
       energy.level === 'critical'
     if (isExhausted) {
       usingAccount2 = true
@@ -360,14 +362,19 @@ async function _sendMessageImpl(content, opts = {}) {
   const collectedText = []
   let newCcSessionId = ccSessionId
 
-  // Inactivity timeout: if the SDK produces no messages for 5 minutes, abort.
+  // Inactivity timeout: if the SDK produces no messages for 90 seconds, abort.
   // This catches hangs from 429s, network issues, or stuck SDK state.
-  const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000
+  // 90s is generous enough for slow tool calls but catches silent hangs quickly.
+  const INACTIVITY_TIMEOUT_MS = 90 * 1000
   let _inactivityTimer = null
+  let _inactivityAborted = false
   const _resetInactivityTimer = () => {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     _inactivityTimer = setTimeout(() => {
-      logger.error('OS Session: inactivity timeout (5 min no messages) — aborting query')
+      logger.error('OS Session: inactivity timeout (90s no messages) — aborting query', {
+        usingAccount2, hasAccount2,
+      })
+      _inactivityAborted = true
       if (activeQuery) {
         try { activeQuery.close() } catch {}
         activeQuery = null
@@ -569,6 +576,28 @@ async function _sendMessageImpl(content, opts = {}) {
     // Session complete — clear inactivity timer and refresh real usage %
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     activeQuery = null
+
+    // If the loop ended due to inactivity timeout (not a normal completion),
+    // treat it as a hang and try switching accounts
+    if (_inactivityAborted) {
+      if (!usingAccount2 && hasAccount2) {
+        usingAccount2 = true
+        _exhaustedAt = Date.now()
+        ccSessionId = null
+        usageEnergy.setProvider('claude_max_2')
+        logger.warn('OS Session: inactivity timeout triggered account switch to account 2')
+        emitOutput({ type: 'system', content: '⚡ Account 1 appears hung — switching to account 2.' })
+        return sendMessage(content)
+      }
+      // Both accounts hung — report error
+      logger.error('OS Session: inactivity timeout on both accounts')
+      emitOutput({ type: 'error', content: 'Session timed out — no response received. Both accounts may be exhausted.' })
+      emitStatus('error', { error: 'inactivity_timeout' })
+      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
+    }
+
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })

@@ -229,6 +229,16 @@ async function _doQuotaCheck() {
       _cacheAt = 0
     }
 
+    // 401 = token expired or invalid — DON'T set weeklyUtilization to 0 (that looks healthy).
+    // Leave it as null so callers know we have no real data.
+    if (resp.status === 401) {
+      logger.warn('quota-check: 401 Unauthorized — OAuth token likely expired. Cannot determine usage.', {
+        provider: _state.currentProvider,
+      })
+      // Don't touch _state.weeklyUtilization — leave as null (unknown)
+      return
+    }
+
     logger.info('Claude quota-check complete', {
       status: resp.status,
       weeklyUtil: _state.weeklyUtilization,
@@ -270,11 +280,10 @@ async function getEnergy() {
     refreshQuotaCheck().catch(() => {})
   }
 
-  const pctUsed      = _state.weeklyUtilization ?? 0
-  const pctRemaining = Math.max(0, 1 - pctUsed)
-  const energy       = _energyState(pctUsed)
-
   const hasRealData  = _state.weeklyUtilization !== null
+  const pctUsed      = hasRealData ? _state.weeklyUtilization : null
+  const pctRemaining = hasRealData ? Math.max(0, 1 - pctUsed) : null
+  const energy       = _energyState(pctUsed ?? 0)  // energy state defaults to 'full' when unknown
 
   // Time until reset
   let hoursUntilReset = null
@@ -293,8 +302,8 @@ async function getEnergy() {
     source: hasRealData ? 'anthropic_headers' : (_state.currentProvider === 'claude_max_2' ? 'acct2_pending' : 'no_data'),
     currentProvider: _state.currentProvider,
     headersAge: _state.headersUpdatedAt ? Math.round((now - _state.headersUpdatedAt) / 1000) : null,
-    pctUsed:       Math.round(pctUsed * 1000) / 10,       // e.g. 42.3
-    pctRemaining:  Math.round(pctRemaining * 1000) / 10,  // e.g. 57.7
+    pctUsed:       pctUsed != null ? Math.round(pctUsed * 1000) / 10 : null,       // e.g. 42.3 or null if unknown
+    pctRemaining:  pctRemaining != null ? Math.round(pctRemaining * 1000) / 10 : null,  // e.g. 57.7 or null if unknown
     rateLimitStatus: _state.rateLimitStatus,
     rateLimitType:   _state.rateLimitType,
     isUsingOverage:  _state.isUsingOverage,
