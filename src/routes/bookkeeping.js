@@ -1,4 +1,5 @@
-const { Router } = require('express')
+const express = require('express')
+const { Router } = express
 const auth = require('../middleware/auth')
 const bk = require('../services/bookkeeperService')
 const logger = require('../config/logger')
