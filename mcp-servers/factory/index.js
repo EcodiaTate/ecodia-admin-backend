@@ -11,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 
 const API_BASE = process.env.FACTORY_API_BASE || 'http://localhost:3001'
-const API_TOKEN = process.env.FACTORY_API_TOKEN || process.env.JWT_TOKEN || ''
+const API_TOKEN = process.env.FACTORY_API_TOKEN || process.env.MCP_INTERNAL_TOKEN || process.env.JWT_TOKEN || ''
 
 async function api(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
