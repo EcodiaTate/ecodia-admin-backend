@@ -11,7 +11,7 @@ const env = require('../config/env')
 // ═══════════════════════════════════════════════════════════════════════
 
 function isEnabled() {
-  return !!(env.NEO4J_URI && env.DEEPSEEK_API_KEY)
+  return !!(env.NEO4J_URI && (env.ANTHROPIC_API_KEY || env.DEEPSEEK_API_KEY))
 }
 
 

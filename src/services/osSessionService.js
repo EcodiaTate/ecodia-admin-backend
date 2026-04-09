@@ -271,6 +271,10 @@ async function sendMessage(content, opts = {}) {
       preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
     },
     model: env.OS_SESSION_MODEL || undefined,
+    // Disable SDK auto-compaction — it fires at 100k tokens by default and replaces
+    // conversation history with a lossy summary, destroying context mid-conversation.
+    // We manage context lifecycle ourselves via autoHandover() at 700k tokens.
+    compactionControl: { enabled: false },
     // Extended thinking — enabled when energy level is full or healthy
     ...(canThink ? {
       thinking: {
@@ -281,9 +285,10 @@ async function sendMessage(content, opts = {}) {
     // Pass MCP servers programmatically — bypasses the .mcp.json trust prompt.
     // SDK-provided servers are implicitly trusted, so no per-project consent needed.
     mcpServers,
-    // Allow all tools from all MCP servers without per-call approval
+    // Allow all tools from all MCP servers without per-call approval.
+    // SDK uses mcp__<serverName>__<toolName> format — wildcard per server grants all tools.
     allowedTools: Object.keys(mcpServers).length > 0
-      ? Object.keys(mcpServers).map(name => `mcp__${name}`)
+      ? Object.keys(mcpServers).map(name => `mcp__${name}__*`)
       : undefined,
   }
 

@@ -116,7 +116,9 @@ registry.registerMany([
     params: {},
     handler: async () => {
       const gmail = require('../services/gmailService')
+      const { recordHeartbeat } = require('../workers/heartbeat')
       await gmail.triagePendingEmails()
+      await recordHeartbeat('gmail', 'active').catch(() => {})
       const stats = await gmail.getInboxStats()
       return { message: 'Triage complete', stats }
     },
@@ -146,7 +148,9 @@ registry.registerMany([
     params: {},
     handler: async () => {
       const gmail = require('../services/gmailService')
+      const { recordHeartbeat } = require('../workers/heartbeat')
       await gmail.pollInbox()
+      await recordHeartbeat('gmail', 'active').catch(() => {})
       const stats = await gmail.getInboxStats()
       return { synced: true, stats }
     },

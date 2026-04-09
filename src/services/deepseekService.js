@@ -48,7 +48,7 @@ async function checkBudget() {
     if (!_budgetCheckInFlight) {
       _budgetCheckInFlight = db`
         SELECT COALESCE(SUM(cost_usd), 0)::float AS spent
-        FROM deepseek_usage
+        FROM claude_usage
         WHERE date_trunc('month', created_at) = date_trunc('month', now())
       `.then(([row]) => {
         _budgetCache = { month, spentUSD: row?.spent ?? 0, checkedAt: Date.now() }
@@ -160,7 +160,7 @@ ${kgContext}
 
   // ─── 3. EXECUTE: Delegate to claudeService (Anthropic API) ─────────
   const { callClaude } = require('./claudeService')
-  const content = await callClaude(enrichedMessages, { module, temperature })
+  const content = await callClaude(enrichedMessages, { module, model, temperature })
 
   // ─── 4. LOG: Ingest the exchange back into the KG ──────────────────
   if (!skipLogging && kg && env.NEO4J_URI && env.OPENAI_API_KEY) {

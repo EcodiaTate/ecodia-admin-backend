@@ -63,11 +63,14 @@ function setProvider(provider) {
       _state.weeklyUtilization = 1.0  // exhausted (Bedrock fallback = Max is gone)
       _state.rateLimitStatus = 'rejected'
     }
-    // Switching to account 2 — reset inferred exhaustion so headers from acct2 can flow in
+    // Switching to account 2 — reset inferred exhaustion so headers from acct2 can flow in,
+    // then immediately fire a quota-check to get the real utilisation for this account.
     if (provider === 'claude_max_2') {
       _state.weeklyUtilization = null
       _state.headersUpdatedAt = null
       _state.rateLimitStatus = 'allowed'
+      // Fire immediately — don't wait for the 15-min stale threshold
+      setImmediate(() => refreshQuotaCheck().catch(() => {}))
     }
     _cache = null
     _cacheAt = 0
@@ -130,28 +133,45 @@ let _quotaCheckInFlight = null
 async function _doQuotaCheck() {
   try {
     // Use the correct config dir for the active provider:
-    //   claude_max_2 → CLAUDE_CONFIG_DIR_2 (account 2's ~/.claude.json)
-    //   everything else → default ~/.claude.json (account 1)
+    //   claude_max_2 → CLAUDE_CONFIG_DIR_2 (account 2)
+    //   everything else → CLAUDE_CONFIG_DIR_1 or default ~/.claude (account 1)
     const isAcct2 = _state.currentProvider === 'claude_max_2'
+    const home = process.env.HOME || process.env.USERPROFILE || ''
     const configDir = isAcct2
       ? (process.env.CLAUDE_CONFIG_DIR_2 || null)
-      : (process.env.CLAUDE_CONFIG_DIR_1 || path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude'))
+      : (process.env.CLAUDE_CONFIG_DIR_1 || path.join(home, '.claude'))
     if (!configDir) {
       logger.debug('quota-check: no config dir for provider, skipping', { provider: _state.currentProvider })
       return
     }
-    const claudeConfigPath = path.join(configDir, 'claude.json')
-    if (!fs.existsSync(claudeConfigPath)) {
-      logger.debug('quota-check: claude.json not found, skipping', { path: claudeConfigPath })
+
+    // CC stores config as either:
+    //   <configDir>/claude.json  (when CLAUDE_CONFIG_DIR points to the dir itself)
+    //   <configDir>.json         (when configDir IS the ~/.claude path — file is ~/.claude.json)
+    // Try both.
+    const candidates = [
+      path.join(configDir, 'claude.json'),   // e.g. /home/tate/.claude2/claude.json
+      configDir + '.json',                   // e.g. /home/tate/.claude.json (acct1 legacy)
+      path.join(configDir, '.claude.json'),  // less common fallback
+    ]
+    let claudeConfigPath = null
+    for (const p of candidates) {
+      if (fs.existsSync(p)) { claudeConfigPath = p; break }
+    }
+    if (!claudeConfigPath) {
+      logger.warn('quota-check: no claude.json found', { tried: candidates, provider: _state.currentProvider })
       return
     }
+
     const claudeConfig = JSON.parse(fs.readFileSync(claudeConfigPath, 'utf8'))
     const oauthToken = claudeConfig?.oauthAccount?.accessToken
 
     if (!oauthToken) {
-      logger.debug('quota-check: no OAuth token in claude.json, skipping', { provider: _state.currentProvider })
+      logger.warn('quota-check: no OAuth token found', { path: claudeConfigPath, provider: _state.currentProvider })
       return
     }
+
+    logger.info('quota-check: using config', { path: claudeConfigPath, provider: _state.currentProvider })
 
     const model = process.env.OS_SESSION_MODEL || 'claude-opus-4-5-20250514'
 

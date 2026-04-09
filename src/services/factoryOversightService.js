@@ -2,6 +2,7 @@ const db = require('../config/db')
 const logger = require('../config/logger')
 const { broadcastToSession, broadcast } = require('../websocket/wsManager')
 const { callClaude, callClaudeJSON } = require('./claudeService')
+const { callDeepSeek } = require('./deepseekService')
 const kgHooks = require('./kgIngestionHooks')
 
 // ═══════════════════════════════════════════════════════════════════════

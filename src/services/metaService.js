@@ -220,7 +220,7 @@ async function syncConversations(pageDbId, pageId, token, platform = 'messenger'
 // ─── AI Triage for Meta DMs ───────────────────────────────────────────
 
 async function triagePendingConversations() {
-  if (!env.DEEPSEEK_API_KEY) return
+  if (!env.ANTHROPIC_API_KEY) return
 
   // Get conversations with new unread messages that haven't been triaged recently
   const conversations = await db`

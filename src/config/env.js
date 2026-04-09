@@ -228,7 +228,7 @@ const envSchema = z.object({
   // OS Session tuning
   OS_SESSION_MODEL: z.string().default(''),
   OS_SESSION_CWD: z.string().default('/home/tate/ecodiaos'),
-  OS_SESSION_COMPACT_THRESHOLD: z.string().default('150000'),
+  OS_SESSION_COMPACT_THRESHOLD: z.string().default('700000'),
 })
 
 const parsed = envSchema.safeParse(process.env)

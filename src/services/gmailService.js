@@ -206,7 +206,7 @@ async function processThread(gmail, inbox, threadId) {
 // ─── DeepSeek Triage ─────────────────────────────────────────────────────────
 
 async function triagePendingEmails() {
-  if (!env.DEEPSEEK_API_KEY) return
+  if (!env.ANTHROPIC_API_KEY) return
 
   // Use FOR UPDATE SKIP LOCKED to prevent concurrent workers from triaging the same email
   const pending = await db`
