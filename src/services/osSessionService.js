@@ -65,12 +65,9 @@ function loadMcpServersFromCwd(cwd) {
   }
 }
 
-// Token tracking
-// Default: 700k tokens — uses most of 1M context window but leaves room for handover brief generation.
-// Override with OS_SESSION_COMPACT_THRESHOLD env var if needed.
-const COMPACT_THRESHOLD = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '700000', 10)
-
-// Whether a handover is already in progress (prevents double-trigger)
+// Token tracking (informational only — the SDK handles its own compaction internally
+// via compactionControl: { enabled: true }. We track tokens purely for the frontend
+// usage bar display, NOT to trigger any custom compaction/handover.)
 let handoverInProgress = false
 
 // In-memory state
@@ -80,6 +77,10 @@ let sessionTokenUsage = { input: 0, output: 0 }
 let usingAccount2 = false       // flipped true after account 1 exhausted → use CLAUDE_CONFIG_DIR_2
 let usingBedrock = false        // flipped true after both accounts exhausted → use Bedrock Opus
 let usingBedrockSonnet = false  // flipped true after Bedrock Opus daily limit → use Bedrock Sonnet
+
+// Message queue — prevents concurrent sendMessage calls from racing and clobbering
+// each other's queries. Each sendMessage waits for the previous one to finish.
+let _sendQueue = Promise.resolve()
 
 // Weekly reset detection: if it's a new week since we flipped to account2/bedrock,
 // try falling back to account1 again automatically.
@@ -193,11 +194,13 @@ function extractTextFromContent(content) {
 //
 // opts.suppressOutput = true: suppress WebSocket broadcast (used for internal handover brief generation)
 
-async function sendMessage(content, opts = {}) {
+// Internal implementation — callers use sendMessage() which serializes through _sendQueue
+async function _sendMessageImpl(content, opts = {}) {
   const { suppressOutput = false } = opts
   const queryFn = await getQuery()
 
-  // Kill any active query
+  // Kill any active query — SDK query() is one-shot, so each message needs a new call.
+  // Session continuity is maintained via options.resume + ccSessionId.
   if (activeQuery) {
     try { activeQuery.close() } catch {}
     activeQuery = null
@@ -558,8 +561,6 @@ async function sendMessage(content, opts = {}) {
                 input: sessionTokenUsage.input,
                 output: sessionTokenUsage.output,
                 total: totalTokens,
-                threshold: COMPACT_THRESHOLD,
-                needsCompaction: totalTokens > COMPACT_THRESHOLD,
               })
             }
             break
@@ -689,6 +690,16 @@ async function sendMessage(content, opts = {}) {
   }
 }
 
+// Serialized wrapper — all sendMessage calls queue through this so they never
+// race or clobber each other's queries. This prevents scheduler crons, factory
+// completions, and user messages from interrupting each other mid-stream.
+async function sendMessage(content, opts = {}) {
+  const promise = _sendQueue.then(() => _sendMessageImpl(content, opts))
+  // Always chain even on error so the queue doesn't stall
+  _sendQueue = promise.catch(() => {})
+  return promise
+}
+
 // ── Get current session status ──
 
 async function getStatus() {
@@ -737,7 +748,11 @@ async function getHistory(limit = 100) {
 
 // ── Compact — seamlessly transition to a new session with context ──
 
+// DEPRECATED — SDK native compaction handles context management internally.
+// This function DESTROYS the current session and starts fresh with a summary,
+// losing all conversation history. Only kept for the /compact endpoint backwards compat.
 async function compact(summary) {
+  logger.warn('compact() called — this is DEPRECATED and destroys session context. Use SDK compaction instead.')
   // Kill any active query
   if (activeQuery) {
     try { activeQuery.close() } catch {}
@@ -777,9 +792,8 @@ async function autoHandover(recentMessages) {
   handoverInProgress = true
 
   try {
-    logger.info('OS Session: auto-handover triggered', {
+    logger.info('OS Session: auto-handover triggered (DEPRECATED — SDK compaction handles this)', {
       tokens: sessionTokenUsage.input + sessionTokenUsage.output,
-      threshold: COMPACT_THRESHOLD,
     })
 
     // Signal frontend: handover is starting. Pass last 6 messages for continuity display.
@@ -899,8 +913,6 @@ function getTokenUsage() {
   return {
     ...sessionTokenUsage,
     total: sessionTokenUsage.input + sessionTokenUsage.output,
-    threshold: COMPACT_THRESHOLD,
-    needsCompaction: (sessionTokenUsage.input + sessionTokenUsage.output) > COMPACT_THRESHOLD,
   }
 }
 
