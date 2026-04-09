@@ -46,7 +46,7 @@ contract EcodiaDAO {
 
     Member public algorithmicManager = Member({
         name:                 "EcodiaOS",
-        interestBps:          5100,         // 51%
+        interestBps:          10000,        // 100% — sole member
         wallet:               address(0),   // AI system — no wallet
         isAlgorithmicManager: true
     });
@@ -76,7 +76,7 @@ contract EcodiaDAO {
 
         humanMember = Member({
             name:                 "Tate Donohoe",
-            interestBps:          4900,         // 49%
+            interestBps:          0,            // Authorized Human Representative — not a member
             wallet:               _humanMemberWallet,
             isAlgorithmicManager: false
         });

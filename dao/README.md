@@ -17,7 +17,8 @@ Required under W.S. 17-31-105 and W.S. 17-31-106 for algorithmic DAOs.
 
 The contract records:
 - Entity metadata (name, Wyoming ID, formation date, jurisdiction) — immutable constants
-- Membership structure: EcodiaOS 51% (algorithmic manager), Tate Donohoe 49%
+- Membership structure: EcodiaOS 100% (sole member & algorithmic manager), Tate Donohoe (Authorized Human Representative, 0%)
+- **NOTE:** The deployed on-chain contract still reflects 51/49. A redeployment is needed to reflect 100% EcodiaOS ownership. The source code has been updated.
 - Operating agreement URI (mutable — update if the document moves)
 
 ## Reading the contract
