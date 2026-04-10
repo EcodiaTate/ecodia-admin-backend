@@ -37,12 +37,29 @@ usageEnergy.refreshAllAccounts()
   .catch(() => {})
 
 
+// ─── Conductor Architecture ─────────────────────────────────────────────────
+// The OS session is a lightweight conductor (~35 tools) that delegates to
+// domain-specific subagents. Each subagent loads only its relevant MCP servers,
+// keeping the conductor's context window lean.
+//
+// Conductor keeps:  neo4j, scheduler, factory, supabase
+// Subagents:        comms (google-workspace+crm+sms), finance (bookkeeping+supabase),
+//                   ops (vps+supabase), social (business-tools)
+
+const CONDUCTOR_SERVERS = ['neo4j', 'scheduler', 'factory', 'supabase']
+
+const SUBAGENT_DOMAINS = {
+  comms:   ['google-workspace', 'crm', 'sms'],
+  finance: ['bookkeeping', 'supabase'],
+  ops:     ['vps', 'supabase'],
+  social:  ['business-tools'],
+}
+
 /**
- * Load MCP servers from .mcp.json in the given cwd and return them in the shape
- * the Agent SDK expects. Passing mcpServers programmatically bypasses the CLI
- * trust prompt that otherwise appears on every new project directory.
+ * Read .mcp.json and normalize ALL server configs into SDK format.
+ * This is the raw material that conductor + subagents both draw from.
  */
-function loadMcpServersFromCwd(cwd) {
+function getAllMcpServerConfigs(cwd) {
   try {
     const p = path.join(cwd, '.mcp.json')
     if (!fs.existsSync(p)) {
@@ -51,7 +68,6 @@ function loadMcpServersFromCwd(cwd) {
     }
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'))
     const servers = raw.mcpServers || {}
-    // Normalize: SDK accepts { type: 'stdio', command, args, env } entries
     const normalized = {}
     for (const [name, cfg] of Object.entries(servers)) {
       normalized[name] = {
@@ -61,11 +77,201 @@ function loadMcpServersFromCwd(cwd) {
         ...(cfg.env ? { env: cfg.env } : {}),
       }
     }
-    logger.info('Loaded MCP servers for OS session', { count: Object.keys(normalized).length, names: Object.keys(normalized) })
+    logger.info('Loaded all MCP server configs', { count: Object.keys(normalized).length, names: Object.keys(normalized) })
     return normalized
   } catch (err) {
-    logger.error('Failed to load .mcp.json for OS session', { cwd, error: err.message })
+    logger.error('Failed to load .mcp.json', { cwd, error: err.message })
     return {}
+  }
+}
+
+/**
+ * Extract only conductor-level servers (neo4j, scheduler, factory, supabase).
+ * These are the only MCP tools the OS session sees in its context window.
+ */
+function loadConductorServers(allConfigs) {
+  const conductor = {}
+  for (const name of CONDUCTOR_SERVERS) {
+    if (allConfigs[name]) conductor[name] = allConfigs[name]
+  }
+  logger.info('Conductor servers loaded', { count: Object.keys(conductor).length, names: Object.keys(conductor) })
+  return conductor
+}
+
+/**
+ * Build inline MCP server configs for a subagent domain.
+ * Returns array of AgentMcpServerSpec (Record<string, McpServerConfig>) entries.
+ */
+function _mcpForDomain(allConfigs, serverNames) {
+  const specs = []
+  for (const name of serverNames) {
+    if (allConfigs[name]) {
+      specs.push({ [name]: allConfigs[name] })
+    }
+  }
+  return specs
+}
+
+/**
+ * Build the agents object for query() options.
+ * Each subagent gets its own MCP servers (inline, not inherited from parent)
+ * so the conductor never sees those tools in its context.
+ */
+function buildSubagentConfigs(allConfigs) {
+  return {
+    comms: {
+      description: 'Communications hub: email triage and responses, calendar management, CRM updates, SMS. Use for anything involving Gmail, Calendar, Drive, contacts, CRM client management, or sending SMS messages.',
+      prompt: [
+        'You are the EcodiaOS communications specialist -- part of the Ecodia DAO LLC operating team.',
+        'You handle all email, calendar, CRM, and SMS operations with professional quality.',
+        '',
+        'Guidelines:',
+        '- Before responding to any email, check CRM (crm_search_clients, crm_get_intelligence) for context on the sender.',
+        '- After sending emails or SMS, update CRM: add activity notes (crm_add_note), update stage if warranted (crm_update_stage).',
+        '- For calendar events, always include timezone (AEST/Brisbane) and check for conflicts.',
+        '- Emails must sound like a sharp, professional business partner -- not a bot or template.',
+        '- Report back a concise summary of what you did and any follow-up actions needed.',
+      ].join('\n'),
+      model: 'sonnet',
+      mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.comms),
+      permissionMode: 'bypassPermissions',
+      maxTurns: 30,
+    },
+
+    finance: {
+      description: 'Finance and bookkeeping: transaction categorization, P&L reports, BAS/GST position, balance sheets, cash flow, billing, and accounting rules. Use for anything involving bookkeeping, financial reports, or transaction management.',
+      prompt: [
+        'You are the EcodiaOS finance officer -- part of the Ecodia DAO LLC operating team.',
+        'You handle all bookkeeping, financial reporting, and transaction management.',
+        '',
+        'Guidelines:',
+        '- Maintain double-entry accuracy. Every transaction must balance.',
+        '- Flag GST implications on all categorizations (10% AU GST).',
+        '- When running reports (bk_pnl, bk_balance_sheet, bk_bas), present clean summaries with key numbers highlighted.',
+        '- Auto-categorize transactions using rules (bk_list_rules) before falling back to manual categorization.',
+        '- Report back concise financial summaries, not raw data dumps.',
+      ].join('\n'),
+      model: 'sonnet',
+      mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.finance),
+      permissionMode: 'bypassPermissions',
+      maxTurns: 20,
+    },
+
+    ops: {
+      description: 'Infrastructure and operations: VPS server management, PM2 process control, shell commands, deployments, log analysis, database diagnostics. Use for anything involving server health, service restarts, deployment, or system debugging.',
+      prompt: [
+        'You are the EcodiaOS ops engineer -- part of the Ecodia DAO LLC operating team.',
+        'You manage VPS infrastructure, services, and deployments.',
+        '',
+        'Guidelines:',
+        '- Always diagnose before acting. Check logs (pm2_logs) and status (pm2_list) before restarting.',
+        '- Never restart a service without understanding why it needs restarting.',
+        '- For deployments: git pull, npm install if needed, pm2 restart, then verify with pm2_list.',
+        '- Report service health clearly: what is running, what is not, any error patterns.',
+        '- Use db_query via supabase for diagnostic queries when needed.',
+      ].join('\n'),
+      model: 'sonnet',
+      mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.ops),
+      permissionMode: 'bypassPermissions',
+      maxTurns: 20,
+    },
+
+    social: {
+      description: 'Social media and external platforms: Zernio social media posting/analytics, Vercel deployments, Xero accounting sync. Use for anything involving social media, website deployments, or Xero integration.',
+      prompt: [
+        'You are the EcodiaOS marketing and platform specialist -- part of the Ecodia DAO LLC operating team.',
+        'You manage social media presence, website deployments, and external platform integrations.',
+        '',
+        'Guidelines:',
+        '- Match the Ecodia brand voice: plain, concise, no hype or reassurance.',
+        '- Use zernio_best_time_to_post before scheduling content.',
+        '- For Vercel deploys, verify the deployment status after triggering.',
+        '- Report analytics concisely with key metrics highlighted.',
+      ].join('\n'),
+      model: 'sonnet',
+      mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.social),
+      permissionMode: 'bypassPermissions',
+      maxTurns: 15,
+    },
+  }
+}
+
+/**
+ * Build programmatic hooks for the OS session.
+ * These replace the shell-based hooks in vps-hooks/settings-account1.json
+ * with native JS callbacks -- faster, more reliable, guaranteed to fire.
+ */
+function buildProgrammaticHooks() {
+  return {
+    UserPromptSubmit: [{
+      hooks: [async (_input) => ({
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext: 'Think like a CEO. Check Neo4j for prior context if relevant. Is this subagent work (comms/finance/ops/social) or does it need your direct attention? Delegate domain tasks to the right subagent.',
+        },
+      })],
+      timeout: 3,
+    }],
+
+    PostToolUse: [
+      // Factory dispatch oversight
+      {
+        matcher: 'mcp__factory__start_cc_session',
+        hooks: [async (_input) => ({
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
+            additionalContext: 'You dispatched a Factory session. What are your acceptance criteria? Which spec docs might the diff affect? Set a mental checkpoint to review when it completes.',
+          },
+        })],
+        timeout: 3,
+      },
+      // Scheduler quality check
+      {
+        matcher: 'mcp__scheduler__schedule_cron|mcp__scheduler__schedule_delayed|mcp__scheduler__schedule_chain',
+        hooks: [async (_input) => ({
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
+            additionalContext: 'Re-read the prompt you scheduled. It will arrive with zero context -- does it have enough detail to act on cold?',
+          },
+        })],
+        timeout: 3,
+      },
+      // Neo4j memory quality
+      {
+        matcher: 'mcp__neo4j__graph_reflect|mcp__neo4j__graph_merge_node',
+        hooks: [async (_input) => ({
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
+            additionalContext: 'Cold-start test: would a new session reading only this node make a better decision? Good memory is specific context + reasoning, not vague summaries.',
+          },
+        })],
+        timeout: 3,
+      },
+      // Spec freshness on file writes (conductor-level -- catches CLAUDE.md edits etc.)
+      {
+        matcher: 'Write|Edit',
+        hooks: [async (input) => {
+          const filePath = input?.tool_input?.file_path || ''
+          if (filePath.includes('/src/') || filePath.includes('/mcp-servers/')) {
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PostToolUse',
+                additionalContext: `You modified ${filePath}. If this changes behaviour, API, or architecture -- update the relevant spec doc or CLAUDE.md so future sessions aren't blind to this change.`,
+              },
+            }
+          }
+          return { continue: true }
+        }],
+        timeout: 3,
+      },
+    ],
+
+    SubagentStop: [{
+      hooks: [async (input) => ({
+        systemMessage: `Subagent "${input.agent_type}" completed. Review its result and determine: any follow-up actions needed? CRM update? Neo4j entry? Scheduled task?`,
+      })],
+      timeout: 3,
+    }],
   }
 }
 
@@ -245,8 +451,11 @@ async function _sendMessageImpl(content, opts = {}) {
   // instead of blind pre-injection.
   const promptWithMemory = content
 
-  // Build SDK options
-  const mcpServers = loadMcpServersFromCwd(cwd)
+  // ─── Build SDK options (conductor architecture) ────────────────────────────
+  // Load ALL MCP configs, then split: conductor gets ~35 tools directly,
+  // subagents get their domain tools via inline MCP server definitions.
+  const allConfigs = getAllMcpServerConfigs(cwd)
+  const mcpServers = loadConductorServers(allConfigs)
 
   // Energy-gated thinking: use extended thinking when credits are ample (full/healthy)
   let energy = null
@@ -260,6 +469,7 @@ async function _sendMessageImpl(content, opts = {}) {
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],       // loads CLAUDE.md from cwd
     includePartialMessages: true,      // stream_event messages for real-time text
+    includeHookEvents: true,           // surface hook lifecycle in output stream
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
@@ -282,14 +492,20 @@ async function _sendMessageImpl(content, opts = {}) {
         budget_tokens: energyLevel === 'full' ? 10000 : 5000,
       },
     } : {}),
-    // Pass MCP servers programmatically — bypasses the .mcp.json trust prompt.
-    // SDK-provided servers are implicitly trusted, so no per-project consent needed.
+    // Conductor-level MCP servers only (neo4j, scheduler, factory, supabase).
+    // Subagent domains (comms, finance, ops, social) are defined below in agents.
     mcpServers,
-    // Allow all tools from all MCP servers without per-call approval.
-    // SDK uses mcp__<serverName>__<toolName> format — wildcard per server grants all tools.
-    allowedTools: Object.keys(mcpServers).length > 0
-      ? Object.keys(mcpServers).map(name => `mcp__${name}__*`)
-      : undefined,
+    // Allow conductor MCP tools + Agent tool for subagent delegation
+    allowedTools: [
+      ...Object.keys(mcpServers).map(name => `mcp__${name}__*`),
+      'Agent',
+    ],
+    // Domain subagents — each gets its own MCP servers inline (not inherited).
+    // The conductor never sees these tools in its context window.
+    agents: buildSubagentConfigs(allConfigs),
+    // Programmatic hooks — CEO pre-flight, factory oversight, scheduler quality,
+    // spec freshness, memory quality, subagent outcome logging.
+    hooks: buildProgrammaticHooks(),
   }
 
   // Resume existing session or start fresh
