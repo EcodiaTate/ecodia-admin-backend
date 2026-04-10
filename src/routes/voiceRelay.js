@@ -94,7 +94,7 @@ function initVoiceRelay(app) {
     logger.info('[Voice] Incoming call', { from, to: To, callSid: CallSid })
 
     const wsHost = process.env.API_DOMAIN || 'api.admin.ecodia.au'
-    const wsUrl = `wss://${wsHost}/api/voice/relay?from=${encodeURIComponent(from)}&callSid=${encodeURIComponent(CallSid || '')}`
+    const wsUrl = `wss://${wsHost}/api/voice/relay?from=${encodeURIComponent(from)}&amp;callSid=${encodeURIComponent(CallSid || '')}`
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
