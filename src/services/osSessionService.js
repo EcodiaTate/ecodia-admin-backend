@@ -10,9 +10,10 @@
  *
  * Messages stream to the frontend via WebSocket in real-time as they arrive.
  *
- * Provider fallback chain:
- *   1. Claude Max OAuth account 1 (primary, from ~/.claude.json)
- *   2. Claude Max OAuth account 2 (on 429/usage-exhausted)
+ * Provider fallback chain (smart selection via usageEnergyService.getBestProvider()):
+ *   1. Healthiest Claude Max account (whichever has more weekly + 5h headroom)
+ *   2. The other Claude Max account (if first is capped — weekly OR 5h session)
+ *   3. Bedrock Opus (final fallback when both Max accounts are exhausted)
  */
 
 const fs = require('fs')
@@ -25,10 +26,14 @@ const secretSafety = require('./secretSafetyService')
 const usageEnergy = require('./usageEnergyService')
 const sessionMemory = require('./sessionMemoryService')
 
-// Fire a quota-check on startup to get real usage % immediately
-usageEnergy.refreshQuotaCheck()
+// Fire quota-checks for BOTH accounts on startup to get real usage % immediately
+usageEnergy.refreshAllAccounts()
   .then(() => usageEnergy.getEnergy())
-  .then(e => logger.info('Claude energy on startup', { pctUsed: e.pctUsed, level: e.level }))
+  .then(e => logger.info('Claude energy on startup', {
+    pctUsed: e.pctUsed, level: e.level,
+    recommended: e.recommendedProvider, reason: e.providerReason,
+    acct1: e.accounts?.claude_max?.pctUsed, acct2: e.accounts?.claude_max_2?.pctUsed,
+  }))
   .catch(() => {})
 
 
@@ -73,29 +78,11 @@ let handoverInProgress = false
 let activeQuery = null          // the running Query object from the SDK
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
-let usingAccount2 = false       // flipped true after account 1 exhausted → use CLAUDE_CONFIG_DIR_2
+let _currentProvider = 'claude_max'  // tracks which provider the current session is using
 
 // Message queue — prevents concurrent sendMessage calls from racing and clobbering
 // each other's queries. Each sendMessage waits for the previous one to finish.
 let _sendQueue = Promise.resolve()
-
-// Weekly reset detection: if it's a new week since we flipped to account2,
-// try falling back to account1 again automatically.
-let _exhaustedAt = null  // timestamp when account1 was first marked exhausted
-
-function _shouldRetryPrimary() {
-  if (!_exhaustedAt) return false
-  // Claude Max resets weekly. If it's been >7 days, try account1 again.
-  return (Date.now() - _exhaustedAt) > 7 * 24 * 60 * 60 * 1000
-}
-
-function _resetToAccount1() {
-  usingAccount2 = false
-  _exhaustedAt = null
-  usageEnergy.setProvider('claude_max')
-  logger.info('OS Session: weekly reset detected — returning to account 1 (primary)')
-  emitOutput({ type: 'system', content: 'Weekly reset detected — switching back to primary Claude Max account.' })
-}
 
 // Detect usage exhaustion / rate limit errors from any error string
 function _isUsageExhausted(text) {
@@ -104,6 +91,20 @@ function _isUsageExhausted(text) {
     t.includes('capacity') || t.includes('out of extra usage') || t.includes('out of usage') ||
     t.includes('weekly') || t.includes('resets ') || t.includes('not logged in') ||
     t.includes('too many requests') || t.includes('quota')
+}
+
+// After an exhaustion event on the current provider, mark it rejected and pick the next best.
+// Returns { provider, reason, isBedrockFallback } or null if no alternative.
+function _switchAfterExhaustion() {
+  // Mark current provider as rejected so getBestProvider skips it
+  usageEnergy.markAccountRejected(_currentProvider, 'exhaustion_detected')
+  // Re-probe to see what's available
+  const best = usageEnergy.getBestProvider()
+  if (best.provider === _currentProvider) {
+    // getBestProvider returned the same one (best-effort) — no real alternative
+    return null
+  }
+  return best
 }
 
 // We lazy-import the ESM Agent SDK since the backend is CJS
@@ -268,7 +269,12 @@ async function _sendMessageImpl(content, opts = {}) {
     // conversational continuity within the same session. Far better than a full session
     // handover which nukes all context.  Threshold is in tokens; with a 1M context window,
     // 800k gives plenty of room for the compacted summary + ongoing conversation.
-    compactionControl: { enabled: true },
+    compactionControl: {
+      enabled: true,
+      ...(env.OS_SESSION_COMPACT_THRESHOLD && parseInt(env.OS_SESSION_COMPACT_THRESHOLD) > 0
+        ? { threshold: parseInt(env.OS_SESSION_COMPACT_THRESHOLD) }
+        : {}),
+    },
     // Extended thinking — enabled when energy level is full or healthy
     ...(canThink ? {
       thinking: {
@@ -291,72 +297,74 @@ async function _sendMessageImpl(content, opts = {}) {
     options.resume = ccSessionId
   }
 
-  // Provider selection — two-tier fallback:
-  //   account1 (primary) → account2 (CLAUDE_CONFIG_DIR_2)
-  //
-  // Account switching uses CLAUDE_CONFIG_DIR in options.env — the SDK reads this
-  // to locate ~/.claude/claude.json (OAuth token). Setting it to a different dir
-  // points the session at a different logged-in account, no API key needed.
+  // ─── Smart provider selection ──────────────────────────────────────────────
+  // getBestProvider() checks both accounts' weekly + 5h utilization and picks the
+  // healthiest. Falls back to Bedrock when both Max accounts are exhausted.
+  const best = usageEnergy.getBestProvider()
+  const prevProvider = _currentProvider
 
-  // Auto-reset: if it's been >7 days since account1 was exhausted, retry it
-  if (_shouldRetryPrimary()) _resetToAccount1()
-
-  const hasAccount2 = !!(env.CLAUDE_CONFIG_DIR_2)
-
-  // Pre-flight: if we haven't already switched but account 1 is known-exhausted
-  // from the quota check, preemptively switch to account 2 instead of letting
-  // the SDK hang on a 429 that may never surface as an error.
-  // NOTE: When pctUsed is null (quota check failed / 401), we do NOT switch preemptively.
-  // We let the SDK try and rely on the inactivity timeout as the safety net.
-  if (!usingAccount2 && hasAccount2 && energy) {
-    const isExhausted = energy.rateLimitStatus === 'rejected' ||
-      (energy.pctUsed != null && energy.pctUsed >= 99) ||
-      energy.level === 'critical'
-    if (isExhausted) {
-      usingAccount2 = true
-      _exhaustedAt = _exhaustedAt || Date.now()
+  if (best.isBedrockFallback) {
+    // Bedrock fallback — use ANTHROPIC_API_KEY with Bedrock model
+    _currentProvider = 'bedrock'
+    ccSessionId = null  // can't resume across providers
+    const sessionEnv = { ...process.env }
+    // For Bedrock via CC Agent SDK: set model to bedrock-prefixed model
+    // and provide AWS credentials in the environment
+    if (env.AWS_ACCESS_KEY_ID) sessionEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
+    if (env.AWS_SECRET_ACCESS_KEY) sessionEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
+    if (env.AWS_REGION) sessionEnv.AWS_REGION = env.AWS_REGION
+    // CC Agent SDK supports Bedrock via CLAUDE_CODE_USE_BEDROCK=1
+    sessionEnv.CLAUDE_CODE_USE_BEDROCK = '1'
+    options.env = sessionEnv
+    options.model = env.BEDROCK_MODEL || 'us.anthropic.claude-opus-4-0-20250514'
+    delete options.resume
+    emitOutput({ type: 'system', content: `⚡ Both Claude Max accounts exhausted — falling back to Bedrock (${options.model}).` })
+  } else if (best.provider === 'claude_max_2') {
+    _currentProvider = 'claude_max_2'
+    if (prevProvider !== 'claude_max_2') {
       ccSessionId = null  // can't resume across config dirs
-      logger.warn('OS Session: account 1 pre-flight exhausted — preemptively switching to account 2', {
-        rateLimitStatus: energy.rateLimitStatus, pctUsed: energy.pctUsed,
-      })
-      emitOutput({ type: 'system', content: '⚡ Account 1 exhausted (detected pre-flight) — switching to account 2.' })
     }
-  }
-
-  const shouldUseAccount2 = usingAccount2 && hasAccount2
-
-  // Keep energy service in sync
-  const currentProvider = shouldUseAccount2 ? 'claude_max_2' : 'claude_max'
-  usageEnergy.setProvider(currentProvider)
-
-  if (shouldUseAccount2) {
-    // Account 2 — different CLAUDE_CONFIG_DIR, same OAuth flow
     const sessionEnv = { ...process.env }
     if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
     sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
     options.env = sessionEnv
-    delete options.resume  // can't resume across config dirs
-    logger.info('OS Session using Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
+    if (prevProvider !== 'claude_max_2') {
+      delete options.resume
+      emitOutput({ type: 'system', content: `⚡ Switching to account 2 — ${best.reason}` })
+    }
   } else {
-    // Account 1 — primary (default CLAUDE_CONFIG_DIR from ~/.claude)
+    _currentProvider = 'claude_max'
+    if (prevProvider !== 'claude_max') {
+      ccSessionId = null
+    }
     const sessionEnv = { ...process.env }
     if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
     if (env.CLAUDE_CONFIG_DIR_1) sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
     options.env = sessionEnv
+    if (prevProvider && prevProvider !== 'claude_max') {
+      delete options.resume
+      emitOutput({ type: 'system', content: `Returning to account 1 — ${best.reason}` })
+    }
   }
 
-  // Log full provider decision for debugging hangs
+  usageEnergy.setProvider(_currentProvider)
+
+  // Log full provider decision for debugging
   logger.info('OS Session provider decision', {
-    hasAccount2,
-    shouldUseAccount2,
-    usingAccount2,
+    provider: _currentProvider,
+    reason: best.reason,
+    isBedrockFallback: best.isBedrockFallback,
+    prevProvider,
     configDir1: env.CLAUDE_CONFIG_DIR_1 || '(default)',
     configDir2: env.CLAUDE_CONFIG_DIR_2 || '(not set)',
     resume: options.resume || null,
     model: options.model || '(default)',
     energyLevel,
     energyPctUsed: energy?.pctUsed,
-    energyRateLimitStatus: energy?.rateLimitStatus,
+    acct1PctUsed: energy?.accounts?.claude_max?.pctUsed,
+    acct2PctUsed: energy?.accounts?.claude_max_2?.pctUsed,
+    acct1SessionPct: energy?.accounts?.claude_max?.sessionPctUsed,
+    acct2SessionPct: energy?.accounts?.claude_max_2?.sessionPctUsed,
   })
 
   const collectedText = []
@@ -372,7 +380,7 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     _inactivityTimer = setTimeout(() => {
       logger.error('OS Session: inactivity timeout (90s no messages) — aborting query', {
-        usingAccount2, hasAccount2,
+        currentProvider: _currentProvider,
       })
       _inactivityAborted = true
       if (activeQuery) {
@@ -476,7 +484,7 @@ async function _sendMessageImpl(content, opts = {}) {
               sessionTokenUsage.input  += turnInput
               sessionTokenUsage.output += turnOutput
               if (turnInput > 0 || turnOutput > 0) {
-                const provider = usingAccount2 ? 'claude_max_2' : 'claude_max'
+                const provider = _currentProvider
                 const model    = env.OS_SESSION_MODEL || null
                 // Log for history/turns-this-week count (non-blocking)
                 usageEnergy.logUsage({ sessionId: dbSessionId, source: 'os_session', provider, model, inputTokens: turnInput, outputTokens: turnOutput }).catch(() => {})
@@ -531,15 +539,12 @@ async function _sendMessageImpl(content, opts = {}) {
               }
 
               if (_isUsageExhausted(errTexts)) {
-                if (!usingAccount2 && hasAccount2) {
-                  // Account 1 exhausted → switch to account 2
-                  usingAccount2 = true
-                  _exhaustedAt = Date.now()
+                const next = _switchAfterExhaustion()
+                if (next) {
                   ccSessionId = null
                   activeQuery = null
-                  usageEnergy.setProvider('claude_max_2')
-                  logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
-                  emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
+                  logger.warn(`OS Session ${_currentProvider} exhausted — switching to ${next.provider}`, { reason: next.reason })
+                  emitOutput({ type: 'system', content: `⚡ ${_currentProvider} limit hit — switching to ${next.provider}.` })
                   throw { _accountRetry: true, message: content }
                 }
               }
@@ -580,18 +585,16 @@ async function _sendMessageImpl(content, opts = {}) {
     // If the loop ended due to inactivity timeout (not a normal completion),
     // treat it as a hang and try switching accounts
     if (_inactivityAborted) {
-      if (!usingAccount2 && hasAccount2) {
-        usingAccount2 = true
-        _exhaustedAt = Date.now()
+      const next = _switchAfterExhaustion()
+      if (next) {
         ccSessionId = null
-        usageEnergy.setProvider('claude_max_2')
-        logger.warn('OS Session: inactivity timeout triggered account switch to account 2')
-        emitOutput({ type: 'system', content: '⚡ Account 1 appears hung — switching to account 2.' })
+        logger.warn(`OS Session: inactivity timeout — switching from ${_currentProvider} to ${next.provider}`)
+        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung — switching to ${next.provider}.` })
         return sendMessage(content)
       }
-      // Both accounts hung — report error
-      logger.error('OS Session: inactivity timeout on both accounts')
-      emitOutput({ type: 'error', content: 'Session timed out — no response received. Both accounts may be exhausted.' })
+      // All providers exhausted — report error
+      logger.error('OS Session: inactivity timeout, no alternative providers available')
+      emitOutput({ type: 'error', content: 'Session timed out — no response received. All providers may be exhausted.' })
       emitStatus('error', { error: 'inactivity_timeout' })
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
@@ -604,8 +607,8 @@ async function _sendMessageImpl(content, opts = {}) {
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
     }
 
-    // Quota check fires in background — updates energy state from real headers
-    usageEnergy.refreshQuotaCheck()
+    // Quota check fires in background for both accounts — updates energy state from real headers
+    usageEnergy.refreshAllAccounts()
       .then(() => usageEnergy.getEnergy())
       .then(energy => { if (!suppressOutput) broadcast('os-session:energy', energy) })
       .catch(() => {})
@@ -663,24 +666,21 @@ async function _sendMessageImpl(content, opts = {}) {
     }
 
     const exhausted = _isUsageExhausted(errMsg)
-    const hasAccount2Catch = !!(env.CLAUDE_CONFIG_DIR_2)
-    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, hasAccount2: hasAccount2Catch, usingAccount2 })
+    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, currentProvider: _currentProvider })
 
-    // On usage exhaustion — fallback: account1 → account2
+    // On usage exhaustion — smart fallback to next best provider
     if (exhausted) {
-      if (!usingAccount2 && hasAccount2Catch) {
-        usingAccount2 = true
-        _exhaustedAt = Date.now()
+      const next = _switchAfterExhaustion()
+      if (next) {
         ccSessionId = null
-        usageEnergy.setProvider('claude_max_2')
-        logger.warn('OS Session account 1 exhausted — switching to Claude Max account 2', { configDir: env.CLAUDE_CONFIG_DIR_2 })
-        emitOutput({ type: 'system', content: '⚡ Account 1 weekly limit hit — switching to account 2 (full Opus, full thinking).' })
+        logger.warn(`OS Session ${_currentProvider} exhausted — switching to ${next.provider}`, { reason: next.reason })
+        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} limit hit — switching to ${next.provider}.` })
         return sendMessage(content)
       }
     }
 
-    // Both accounts exhausted or non-quota error
-    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, usingAccount2 })
+    // All providers exhausted or non-quota error
+    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, currentProvider: _currentProvider })
 
     emitOutput({ type: 'error', content: errMsg })
     emitStatus('error', { error: errMsg })
@@ -711,7 +711,7 @@ async function sendMessage(content, opts = {}) {
 
 async function getStatus() {
   const session = await getOSSession()
-  const provider = usingAccount2 ? 'claude-max-2' : 'claude-max'
+  const provider = _currentProvider
   return {
     active: !!activeQuery,
     sessionId: session?.id || null,
@@ -730,9 +730,10 @@ async function restart() {
     activeQuery = null
   }
   ccSessionId = null
-  usingAccount2 = false       // reset — try primary again on restart
-  _exhaustedAt = null
+  _currentProvider = 'claude_max'  // reset — smart selection will re-evaluate on next message
   usageEnergy.setProvider('claude_max')
+  // Refresh both accounts so the next message gets fresh data
+  usageEnergy.refreshAllAccounts().catch(() => {})
   const session = await createOSSession()
   emitStatus('idle', { sessionId: session.id, restarted: true })
   return { sessionId: session.id }

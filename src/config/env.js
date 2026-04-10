@@ -211,6 +211,12 @@ const envSchema = z.object({
   CLAUDE_CONFIG_DIR_2: z.string().default(''),  // account 2 dir — enables auto-failover
   // Explicit Factory override — takes priority over CLAUDE_CONFIG_DIR_2 for Factory sessions only
   FACTORY_CC_HOME: z.string().default(''),
+  // Bedrock fallback — used when BOTH Claude Max accounts are exhausted.
+  // Set AWS credentials + region to enable Bedrock as the final fallback tier.
+  AWS_ACCESS_KEY_ID: z.string().default(''),
+  AWS_SECRET_ACCESS_KEY: z.string().default(''),
+  AWS_REGION: z.string().default('us-east-1'),
+  BEDROCK_MODEL: z.string().default('us.anthropic.claude-opus-4-0-20250514'),  // Bedrock model ID
   // Supabase Storage
   SUPABASE_URL: z.string().default(''),
   SUPABASE_ANON_KEY: z.string().default(''),
@@ -220,7 +226,7 @@ const envSchema = z.object({
   // OS Session tuning
   OS_SESSION_MODEL: z.string().default(''),
   OS_SESSION_CWD: z.string().default('/home/tate/ecodiaos'),
-  OS_SESSION_COMPACT_THRESHOLD: z.string().default('700000'),
+  OS_SESSION_COMPACT_THRESHOLD: z.string().default('350000'),
 })
 
 const parsed = envSchema.safeParse(process.env)

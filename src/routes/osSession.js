@@ -101,10 +101,10 @@ router.get('/energy', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// Force a live quota-check (fires a 1-token API call to read real headers)
+// Force a live quota-check for both accounts (fires 1-token API calls to read real headers)
 router.post('/energy/refresh', async (_req, res, next) => {
   try {
-    await usageEnergy.refreshQuotaCheck()
+    await usageEnergy.refreshAllAccounts()
     const energy = await usageEnergy.getEnergy()
     res.json(energy)
   } catch (err) { next(err) }
@@ -116,6 +116,41 @@ router.get('/energy/history', async (req, res, next) => {
     const weeks = parseInt(req.query.weeks || '4', 10)
     const history = await usageEnergy.getWeeklyHistory(weeks)
     res.json({ history })
+  } catch (err) { next(err) }
+})
+
+// Upload an attachment to Supabase Storage and return a public URL.
+// Accepts base64-encoded file data — no multipart needed.
+router.post('/upload', async (req, res, next) => {
+  try {
+    const { name, type, base64 } = req.body
+    if (!name || !base64) return res.status(400).json({ error: 'name and base64 are required' })
+
+    const env = require('../config/env')
+    if (!env.SUPABASE_URL || !(env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)) {
+      return res.status(503).json({ error: 'Supabase not configured' })
+    }
+
+    const { createClient } = require('@supabase/supabase-js')
+    const sb = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)
+
+    // Decode base64 — strip data URL prefix if present
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64
+    const buffer = Buffer.from(raw, 'base64')
+
+    const ext = name.split('.').pop() || 'bin'
+    const slug = `attachments/${Date.now()}-${name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+    const contentType = type || 'application/octet-stream'
+
+    await sb.storage.createBucket('os-attachments', { public: true }).catch(() => {})
+    const { error } = await sb.storage.from('os-attachments').upload(slug, buffer, { contentType, upsert: true })
+    if (error) {
+      console.error('[OS Upload] Supabase error:', error.message)
+      return res.status(500).json({ error: error.message })
+    }
+
+    const { data } = sb.storage.from('os-attachments').getPublicUrl(slug)
+    res.json({ url: data.publicUrl, name, type: contentType, size: buffer.length })
   } catch (err) { next(err) }
 })
 

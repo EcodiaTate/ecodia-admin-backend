@@ -601,17 +601,35 @@ async function startSession(session) {
   const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
   delete ccEnv.ANTHROPIC_API_KEY
 
-  // Account routing for Factory sessions:
-  // FACTORY_CC_HOME (or CLAUDE_CONFIG_DIR_2) points to a second account's config dir.
-  // This keeps Factory coding sessions on a separate energy budget from the OS session.
-  //
-  // Priority:
-  //   1. FACTORY_CC_HOME — explicit override for factory (e.g. /home/tate/.claude2)
-  //   2. CLAUDE_CONFIG_DIR_2 — shared "account 2" config used by both OS and Factory
-  //   3. default — uses current user's ~/.claude (same account as OS session)
-  const factoryConfigDir = env.FACTORY_CC_HOME || env.CLAUDE_CONFIG_DIR_2
-  if (factoryConfigDir) {
-    ccEnv.CLAUDE_CONFIG_DIR = factoryConfigDir
+  // Smart account routing for Factory sessions:
+  // If FACTORY_CC_HOME is set, use it as explicit override.
+  // Otherwise, use usageEnergyService.getBestProvider() to pick the healthiest account.
+  // This ensures Factory sessions also benefit from dual-account load balancing.
+  if (env.FACTORY_CC_HOME) {
+    ccEnv.CLAUDE_CONFIG_DIR = env.FACTORY_CC_HOME
+  } else {
+    try {
+      const usageEnergy = require('../services/usageEnergyService')
+      const best = usageEnergy.getBestProvider()
+      if (best.isBedrockFallback) {
+        // Bedrock fallback for Factory
+        if (env.AWS_ACCESS_KEY_ID) ccEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
+        if (env.AWS_SECRET_ACCESS_KEY) ccEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
+        if (env.AWS_REGION) ccEnv.AWS_REGION = env.AWS_REGION
+        ccEnv.CLAUDE_CODE_USE_BEDROCK = '1'
+        logger.info('Factory session using Bedrock fallback', { reason: best.reason })
+      } else if (best.provider === 'claude_max_2' && env.CLAUDE_CONFIG_DIR_2) {
+        ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+        logger.info('Factory session using account 2', { reason: best.reason })
+      } else if (env.CLAUDE_CONFIG_DIR_1) {
+        ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
+        logger.info('Factory session using account 1', { reason: best.reason })
+      }
+    } catch (err) {
+      // Fallback to CLAUDE_CONFIG_DIR_2 if energy service unavailable
+      if (env.CLAUDE_CONFIG_DIR_2) ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+      logger.debug('Factory: energy service unavailable, using CLAUDE_CONFIG_DIR_2 fallback', { error: err.message })
+    }
   }
 
   const proc = spawn(CC_CLI, args, {
