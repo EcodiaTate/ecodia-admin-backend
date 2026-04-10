@@ -36,6 +36,10 @@ function ok(data) {
 function err(msg) {
   return { content: [{ type: 'text', text: `Error: ${msg}` }] }
 }
+function apiErr(status, data, fallback) {
+  const msg = typeof data === 'string' ? data : data?.error || data?.message || fallback
+  return err(`Factory API ${status}: ${msg}`)
+}
 
 const server = new McpServer({ name: 'factory', version: '1.0.0' })
 
@@ -57,14 +61,14 @@ server.tool(
     workingDir: z.string().optional().describe('Absolute VPS path to the working directory. Overrides codebase lookup.'),
   },
   async ({ prompt, codebaseName, workingDir }) => {
-    const { ok: success, data } = await api('POST', '/api/cc/sessions', {
+    const { ok: success, status, data } = await api('POST', '/api/cc/sessions', {
       initialPrompt: prompt,
       codebaseName: codebaseName || null,
       workingDir: workingDir || null,
       triggeredBy: 'proactive',
       triggerSource: 'cortex',
     })
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Failed to start session')
+    if (!success) return apiErr(status, data, 'Failed to start session')
     return ok({
       message: 'Factory session dispatched',
       sessionId: data.id,
@@ -81,8 +85,8 @@ server.tool(
   'Get an overview of all Factory sessions — active count, queue, and the 10 most recent sessions with status and confidence scores.',
   {},
   async () => {
-    const { ok: success, data } = await api('GET', '/api/cc/sessions?limit=10')
-    if (!success) return err('Failed to fetch factory status')
+    const { ok: success, status, data } = await api('GET', '/api/cc/sessions?limit=10')
+    if (!success) return apiErr(status, data, 'Failed to fetch factory status')
     const active = (data.sessions || []).filter(s => ['running', 'initializing', 'completing'].includes(s.status))
     const recent = (data.sessions || []).slice(0, 10)
     return ok({
@@ -109,8 +113,8 @@ server.tool(
     sessionId: z.string().describe('CC session UUID'),
   },
   async ({ sessionId }) => {
-    const { ok: success, data } = await api('GET', `/api/cc/sessions/${sessionId}`)
-    if (!success) return err(`Session not found: ${sessionId}`)
+    const { ok: success, status, data } = await api('GET', `/api/cc/sessions/${sessionId}`)
+    if (!success) return apiErr(status, data, `Session not found: ${sessionId}`)
     const s = data.session || data
     const logs = data.recentLogs || []
     const lastOutput = logs.length > 0 ? logs[logs.length - 1]?.chunk?.slice(-400) : null
@@ -142,8 +146,8 @@ server.tool(
     sessionId: z.string().describe('CC session UUID'),
   },
   async ({ sessionId }) => {
-    const { ok: success, data } = await api('GET', `/api/cc/sessions/${sessionId}`)
-    if (!success) return err(`Session not found: ${sessionId}`)
+    const { ok: success, status, data } = await api('GET', `/api/cc/sessions/${sessionId}`)
+    if (!success) return apiErr(status, data, `Session not found: ${sessionId}`)
     return ok(data)
   }
 )
@@ -158,8 +162,8 @@ server.tool(
     message: z.string().describe('Instruction or clarification to send'),
   },
   async ({ sessionId, message }) => {
-    const { ok: success, data } = await api('POST', `/api/cc/sessions/${sessionId}/message`, { message })
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Failed to send message')
+    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/message`, { message })
+    if (!success) return apiErr(status, data, 'Failed to send message')
     return ok({ sent: true, sessionId })
   }
 )
@@ -172,8 +176,8 @@ server.tool(
     message: z.string().describe('Follow-up instruction'),
   },
   async ({ sessionId, message }) => {
-    const { ok: success, data } = await api('POST', `/api/cc/sessions/${sessionId}/resume`, { message })
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Failed to resume')
+    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/resume`, { message })
+    if (!success) return apiErr(status, data, 'Failed to resume')
     return ok({ resumed: true, sessionId, newSessionId: data?.id || null })
   }
 )
@@ -189,8 +193,8 @@ server.tool(
     sessionId: z.string().describe('CC session UUID awaiting review'),
   },
   async ({ sessionId }) => {
-    const { ok: success, data } = await api('GET', `/api/cc/sessions/${sessionId}/review`)
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Review failed')
+    const { ok: success, status, data } = await api('GET', `/api/cc/sessions/${sessionId}/review`)
+    if (!success) return apiErr(status, data, 'Review failed')
     return ok(data)
   }
 )
@@ -204,10 +208,10 @@ server.tool(
     notes: z.string().optional().describe('Why you approved this — recorded as a learning for future sessions'),
   },
   async ({ sessionId, notes }) => {
-    const { ok: success, data } = await api('POST', `/api/cc/sessions/${sessionId}/approve`, {
+    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/approve`, {
       notes: notes || '',
     })
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Approval failed')
+    if (!success) return apiErr(status, data, 'Approval failed')
     return ok(data)
   }
 )
@@ -223,12 +227,12 @@ server.tool(
     correctedPrompt: z.string().optional().describe('Corrected prompt if redispatch is true'),
   },
   async ({ sessionId, reason, redispatch, correctedPrompt }) => {
-    const { ok: success, data } = await api('POST', `/api/cc/sessions/${sessionId}/reject`, {
+    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/reject`, {
       reason,
       redispatch: redispatch || false,
       correctedPrompt: correctedPrompt || null,
     })
-    if (!success) return err(typeof data === 'string' ? data : data?.message || 'Rejection failed')
+    if (!success) return apiErr(status, data, 'Rejection failed')
     return ok(data)
   }
 )
@@ -240,8 +244,8 @@ server.tool(
   'List all registered codebases with language, VPS path, and recent Factory activity.',
   {},
   async () => {
-    const { ok: success, data } = await api('GET', '/api/codebase')
-    if (!success) return err('Failed to fetch codebases')
+    const { ok: success, status, data } = await api('GET', '/api/codebase')
+    if (!success) return apiErr(status, data, 'Failed to fetch codebases')
     const codebases = (data.codebases || data || []).map(cb => ({
       id: cb.id,
       name: cb.name,
