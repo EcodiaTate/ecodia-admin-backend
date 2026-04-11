@@ -7,6 +7,7 @@ const express = require('express')
 const router = express.Router()
 const osSession = require('../services/osSessionService')
 const postgres = require('postgres')
+const validateTwilioSignature = require('../middleware/twilioValidation')
 
 const TATE_MOBILE = (process.env.TATE_MOBILE || '').replace(/['" ]/g, '')
 const db = postgres(process.env.DATABASE_URL, { max: 2, idle_timeout: 30 })
@@ -15,10 +16,10 @@ async function lookupContact(phone) {
   try {
     const rows = await db`SELECT name, relationship, context FROM contacts WHERE phone = ${phone} AND can_sms = true LIMIT 1`
     return rows[0] || null
-  } catch { return null }
+  } catch (err) { console.error('[SMS] Contact lookup failed:', err.message); return null }
 }
 
-router.post('/incoming', async (req, res) => {
+router.post('/incoming', validateTwilioSignature, async (req, res) => {
   const { From, Body } = req.body
   const from = (From || '').replace(/\s/g, '')
 

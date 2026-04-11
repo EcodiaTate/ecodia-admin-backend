@@ -85,9 +85,10 @@ async function haikuRespond(systemPrompt, userMessage) {
 function initVoiceRelay(app) {
   const db = require('../config/db')
   const osSession = require('../services/osSessionService')
+  const validateTwilioSignature = require('../middleware/twilioValidation')
 
   // ── TwiML Webhook — answers incoming calls ──
-  app.post('/api/voice/incoming', (req, res) => {
+  app.post('/api/voice/incoming', validateTwilioSignature, (req, res) => {
     const { From, To, CallSid } = req.body
     const from = (From || '').replace(/\s/g, '')
 

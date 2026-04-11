@@ -121,6 +121,15 @@ process.on('unhandledRejection', (reason) => {
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
 
+  // ── Boot: Schema Constraint Validator ─────────────────────────────
+  // Advisory check — warns if code enum values don't match DB constraints
+  try {
+    const { validateSchemaConstraints } = require('./utils/schemaValidator')
+    await validateSchemaConstraints(db)
+  } catch (err) {
+    logger.warn('Schema constraint validation failed (non-fatal)', { error: err.message })
+  }
+
   // ── Boot: Factory Bridge ──────────────────────────────────────────
   // Subscribe to Redis channels from factoryRunner for:
   // 1. Session completions → trigger oversight pipeline
