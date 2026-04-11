@@ -120,11 +120,13 @@ router.get('/energy/history', async (req, res, next) => {
 })
 
 // Upload an attachment to Supabase Storage and return a public URL.
-// Accepts base64-encoded file data — no multipart needed.
+// Accepts either base64-encoded file data OR raw text content — no multipart needed.
 router.post('/upload', async (req, res, next) => {
   try {
-    const { name, type, base64 } = req.body
-    if (!name || !base64) return res.status(400).json({ error: 'name and base64 are required' })
+    const { name, type, base64, text } = req.body
+    if (!name || (!base64 && typeof text !== 'string')) {
+      return res.status(400).json({ error: 'name and (base64 or text) are required' })
+    }
 
     const env = require('../config/env')
     if (!env.SUPABASE_URL || !(env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)) {
@@ -134,13 +136,18 @@ router.post('/upload', async (req, res, next) => {
     const { createClient } = require('@supabase/supabase-js')
     const sb = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)
 
-    // Decode base64 — strip data URL prefix if present
-    const raw = base64.includes(',') ? base64.split(',')[1] : base64
-    const buffer = Buffer.from(raw, 'base64')
+    // Decode payload — text files come through as raw UTF-8, binaries as base64
+    let buffer
+    if (typeof text === 'string') {
+      buffer = Buffer.from(text, 'utf-8')
+    } else {
+      const raw = base64.includes(',') ? base64.split(',')[1] : base64
+      buffer = Buffer.from(raw, 'base64')
+    }
 
     const ext = name.split('.').pop() || 'bin'
     const slug = `attachments/${Date.now()}-${name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-    const contentType = type || 'application/octet-stream'
+    const contentType = type || (typeof text === 'string' ? 'text/plain' : 'application/octet-stream')
 
     await sb.storage.createBucket('os-attachments', { public: true }).catch(() => {})
     const { error } = await sb.storage.from('os-attachments').upload(slug, buffer, { contentType, upsert: true })

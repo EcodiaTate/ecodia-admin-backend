@@ -1,0 +1,401 @@
+Impromptu Google Meet Meeting - April 10
+VIEW RECORDING - 79 mins (No highlights): https://fathom.video/share/rv_3tLLojwWyHzA4yZmrF8UPbExebxta
+
+---
+
+0:00 - Eugene Kerner
+  Hey, mate. How are you? Hello. Very good.
+
+0:02 - Tate Donohoe (Ecodia)
+  Thank you. I've just got my note-taking thing. Yeah.
+
+0:08 - Eugene Kerner
+  Okay. That's great. Have you got a bit of time at the moment? Yes, I do. I'm here. You're going to need a coffee.  All right. Let's have a look. What's the best way to do this? I'll just share my screen and we'll start getting into it.  I usually have... I can't see it there, so... All right. Have you got access in here?
+
+1:03 - Tate Donohoe (Ecodia)
+  No, I haven't been added to anything yet.
+
+1:10 - Eugene Kerner
+  All right. The setup's a bit primitive. We usually would assign you an email address and add you to everything in that so that if it doesn't work out and we've got to boot you out, we can just switch off the email address.  Yeah. It's much easier than going through each one. Yeah, sure. But you're onshore anyway, so just give me your email address.  And which one you want to use?
+
+1:46 - Tate Donohoe (Ecodia)
+  Yeah, I'll probably do the code at Ecodia.au.
+
+1:51 - Eugene Kerner
+  Okay. What have we got here? That's Craig, that's Mark, and that's me.
+
+2:05 - Tate Donohoe (Ecodia)
+  Wow.
+
+2:07 - Eugene Kerner
+  Is it making the lawn white? It's absolutely hailing a blizzard here. Really?
+
+2:16 - Tate Donohoe (Ecodia)
+  Wow.
+
+2:21 - Eugene Kerner
+  Konyo.au, was it? Yeah.
+
+2:24 - Tate Donohoe (Ecodia)
+  Thank you.
+
+2:35 - Eugene Kerner
+  He's a member. Mark's an admin. I probably should make Craig an admin and share you as a member. But for now, we can have a look here.  Yeah, what did I do? There he is. I flicked that a little bit quick. It's pretty messy in here and a bit crude.  And, you know, you'll see that Craig makes what he'll make you a particular board. I kind of tend to, that's like, that's kind of like you're in progress.  And then you'll see there's a done or there'll be like a Tate done. Yeah, sure.
+
+3:38 - Tate Donohoe (Ecodia)
+  Whatever, whatever works.
+
+3:39 - Eugene Kerner
+  But in here somewhere, and then he has high priority leave. It's sometimes tricky to find what you're looking for.  Where in the hell is it? B2C OrthBase 1, what's going on? Well, there was a whole bunch of stuff in here.  I wonder why I can't see it now. Trello, fixers, Chan. It's been a while since I made it, but I did.  Ah, here it is. Yes. This is the one we're very much interested in, right? And we were talking. So we got set up the Cognito B2C service.  You're not interested in that because it's in AWS and it's done. Right, okay. If it doesn't work, you're going to sort of reach out to me and say, hey, it doesn't work.  But it does work because I tested it already with one of the other devs. You may find that I need this feature added or it's not doing this or the scopes aren't working or something, right?  You'll have to assign something to me. So that was basically related to set up and brand a basic AWS Cognito B2C service, user pool, blah, blah, blah.  And then it had a bunch of requirements and I believe it's done.
+
+5:56 - Tate Donohoe (Ecodia)
+  Awesome. Backend Cognito.
+
+6:00 - Eugene Kerner
+  So identities integration, right? So this is the guy that did it, did it, and he was with us a long time, but then he got, yeah, he got distracted and, I don't know, he dropped off, you know.  So I had a look and I think it's mostly pretty good. So what it is, the back end has user CRUD endpoints.  You know what that means, right?
+
+6:38 - Tate Donohoe (Ecodia)
+  Yeah.
+
+6:39 - Eugene Kerner
+  And so add a user, update a user, delete a user. So when you add a user, it creates that user and it creates, or authenticate, log in a user, register a user, right?  Yeah. So all of these standard authentication type endpoints. Oh, my God. Oh, my God. My wife and dog are both mad.  It's hailing. It's kind of stopped hailing now. And my wife wanted to capture that. So she's gone down to the river with her camera and her dog to get some good footage of the hail.  So I guess she's never been caught in a decent hailstorm before. Wow. Because if the stones get bigger, she's going to realize, oh, , this was a bad idea.  Wow. She's got a harder head than me, though. Yeah. So basically register a user. It would, in the old way, it would make a user.  the the user. in the database and all of that kind of stuff, save their password, and it's been updated.  So, and I think there's a feature flag. know what a feature flag is?
+
+8:10 - Tate Donohoe (Ecodia)
+  Yeah. Yeah.
+
+8:11 - Eugene Kerner
+  So I think it's toggled off. It's behind a feature flag. We turn it on. It should, all of those standard endpoints should now just work by making the user incognito instead.  So when it tries to authenticate, it's going to look at the JWT, go, oh, yeah, I can tell which type of user it is from that.  Like, say you make a request, it's supposed to look at the JWT, go, yeah, I can see what type of user, and then do the authentication based on the type of token that was sent through.  Let's have a look at it. So let's have a bit of a look at it. I think we can probably close most of that and start with a clean slate there.  Okay. It's a Nest.js backend, which is basically a Node.js framework.
+
+9:12 - Tate Donohoe (Ecodia)
+  Yeah.
+
+9:13 - Eugene Kerner
+  So you'll see normal stuff, you know.
+
+9:17 - Tate Donohoe (Ecodia)
+  Yeah. Right.
+
+9:21 - Eugene Kerner
+  This is all going to look pretty familiar to you. That's familiar. This is the database interface configuration. It's at the top level.  Yep. This folder, you know, your build folder, your public folder there, a reasoning markdown. I'll add you to the repo soon, but I guess we'll find something to look at by – all right.  You can see that it's right through there, and the user service is probably the one we're most interested in.  So what I'm – So I'm kind of going to say about this is this is done in theory.
+
+10:06 - Tate Donohoe (Ecodia)
+  I reviewed it.
+
+10:07 - Eugene Kerner
+  I didn't have any front end to be able to test it too much. They were not using anything like Postman or whatever in here.  I could have probably spun up a Postman to test it. But essentially, I reviewed it. had a look. It looked kind of sane.  And I thought, all right, we'll refine that once we start to glue the front end in. So when you go to registry user, it'll work or it won't, right?  And you might find yourself in the back end adjusting it. So let's look at the user service. I don't know.  Just searching here for Cognito. Find by Cognito subscription, which is important. I guess there's going to be... A register function.  It's been a while since I looked in here. Check unit number. What else have we got? Oh, auth module.  Probably more likely in here. That's just a definition so it can be imported. Guards, Cognito and Authguards. So this is like your mechanism for doing auth.  Passwords, create user. That's a DTO. That's a database definition. So it is going to be in. Here we go.  So I've got the controller now. Yeah, and it's on register, and let's see what it does. Generate a raw token, all service register.  I knew there was going to be a register function in there somewhere, so what does it do? User service create user.  Now, this is where I'd expect it to. It doesn't. It doesn't do anything of the sort. It's just using the local database to create a user.  Prisma invitation. Hmm. I wonder if the branch was never merged in. I might have to try and find that branch, and it would be a bit risky to merge it in now because that was six months ago.
+
+13:22 - Tate Donohoe (Ecodia)
+  Wow. Yeah.
+
+13:24 - Eugene Kerner
+  But I did find Cognito strategy. Yeah. Why did I find Cognito in there? So there's the user service. Cognito identity provider client is imported.  All right.
+
+13:54 - Tate Donohoe (Ecodia)
+  Yep.
+
+14:02 - Eugene Kerner
+  Okay. So he has done something. This is obviously less done than I thought it was. But basically, he's saying you can test it by adding plus cog.  So code plus cog minus one at Ecodia, whatever, would cause that registered user to get registered incognito. Right? Right?
+
+14:28 - Tate Donohoe (Ecodia)
+  Yeah.
+
+14:29 - Eugene Kerner
+  I'm going to say that this is not done. Right? And this is where you're going to want to start.  So let's go back to I don't want to go on. I remember at the time he wrote it, I reviewed it was kind of there.  But basically, I can see what he's done here. He said that for the purpose of testing, if I use this type of email address, then it's going to register me a Cognito user.  Obviously, that's purely for testing because what you would really want to do is have a feature flag because that's his feature flag, isn't it?  Yeah. What you'd really want to do would be have a feature flag and switch it on or off. So we've got UAT and prod.  What I'd do is have a look at the create user, update user, mainly not so much the user. So update user might need it, but register, log in, recover password, these type of endpoints, which are going to be in here, is where you're going to be interested.  So basically, and the best place to look at that is over here. So description, integrate the backend with Cognito B2C to support user authentication and management.  I already did the research which package we're going to use to provision. So install the package. We saw he's already added that.  Configure the AWS credentials. That's already in the end files. And pretty sure I can confirm that. So this is prod backend.  Let's get out of there. UAT backend. We should be able to find Cognito in the .end file. And we can.  So it's configured. It's using one provider for prod and UAT or test, which is obviously not ideal, but in our scenario, it's not bad.  You know, how did a user management interface in the app, we would want to then. Be able to distinguish between UAT and prod, at least to filter them out.  And if the thing scales right out, we'd probably just want to add another Cognito service separate for UAT to not pollute the prod space with UAT users.  But for now, let's just keep it simple, right? So install, that makes sense. Configure, that's done. Update the type of tick.  But let's just say it's done, right? This one's done. Update the user endpoints. So registration, login, add user, remove user, get user, password reset, any other endpoints that directly in the...  I'd start with registration and login, right? Yeah. Register a user, adding a user, I don't know, you'd have to, obviously there's going to be some onboarding and learning curve, getting across, getting your development environment set up.  We'll worry about that in a minute. But as we move through this conversation, I'll just add you to stuff as we go, and then you'll be able to check out the code.  And we will send you an IP agreement at some stage. I went to do that yesterday, and I couldn't get logged into the signing platform we had.  So registration, add user, remove user. Yeah, so this is partially done. I'm going to say it's not done, because I've got no confidence in it.  I saw, we just saw a little bit where he hasn't got a feature flag. He's got the email. So it's probably a smart way to have it at the moment, because it means that you can deploy it to UAT.  It can even deploy through the prod, which it has been, and... Unless someone by some freak accident happens to have that sequence of characters in their email.  Yeah. You know, so I think leave the feature flag as it is for now, whatever works for you. JWT authentication support.  So implement logic to support both the existing JWT and the new JWT. Now, it's easy enough to show. So if I go to audit.  This is the test front end, right? Yeah. And I'm logged in here. So I should be able to, you know, if you don't know what I'm doing here, then you may as well go now.  Headers. This is web UAT audit. UAT audit. This is web is No, we need a request. Let's make a request here so we can find it.  No, audits. That should have done it. Auth profile. All right. So we should have in the request headers, there it is.  Yeah. So this is the makeshift JWT that the bespoke auth, and you'll see it's pretty good. It kind of works, but like I said, it keeps passwords local and that puts a huge onus on us, security breaches, and it doesn't support role-based access control and multiple roles per user.  It sort of was, you a user can kind of have. Well, you'll see as you go, it doesn't really work, right?  So each user has a role, you know. They can have multiple roles, but the code right through kind of only looks at one and one of the – and each role doesn't really have permissions attached to it.  So the way that features are disabled or toggled or disallowed based on the – this is kind of programmatic rather than role-based, you know.
+
+21:26 - Tate Donohoe (Ecodia)
+  Yeah.
+
+21:27 - Eugene Kerner
+  So if we look at that, what do we want? A JWT parser. Get this off here so we're not looking at ourselves.  I think you can just close it. Yeah. So it's a very crude it's a very crude JWT. I think it's all spoofed.  It's not really a proper one. So it's got some claims in there. It's got some roles in there. It does support an array of roles, but the way they're added and managed is kind of crude.  So how could you tell? Well, there's going to be a way to tell the difference between this type of token or – because if you – once you get a Cognito token, just have a look at it and ask yourself the question, right, how am I going to tell the difference between these two tokens?  And because this one's so crude, there's going to be fields in the other one that make it obvious that, you know, this is a Cognito token.  Let me know if you're feeling like running away or if I'm not making any sense. I'm surprised to say there's your token.  There is some kind of switch. There is something going on in here. Let's go back to the ticket. So authentication support.  Develop a mechanism to distinguish between the two tokens. Implement JWT verification for both types. So basically where it validates the token or verifies the proper word, isn't it?  The token, at the moment, it's going to be looking up a database row using Prisma. But what you're going to do is check the type of token it is first and then go, right, I need to validate this via Cognito or via Prisma, right?  So it's going to, in parallel, support both. And as you write that code, you'll have a switch in there that, oh, well, I guess you're going to have to consider that later on in an ideal world.  We roll all of those legacy users over into the new system, and then we delete that database, and we delete all the code that handles it, right?  Yeah, that's what I was going to say.
+
+24:11 - Tate Donohoe (Ecodia)
+  When we check one of the old JWTs, could we also just give them a new one at the same time, and then just kick their old one out?  Yeah, that's good thinking.
+
+24:26 - Eugene Kerner
+  So I'm not sure what the migration process looks like, because I don't know if their password is a one-way hash in our database.  If it's not, then we know their password, which is nasty, and we can just, yeah, like you said, the next time they make a request, make them a Cognito user and return them a new token, right?  Yeah. Bog them in and return them a new token. So Cognito, like most management clients, most ortho It has a management client and a user client, you know, so the management client allows you to do stuff that you could do if you were logged into Auth0 or Cognito, and the user client just basically allows you to authenticate, create users or whatever.  So the management client, I think, is available, and it's somewhere mentioned in here, to be able to do stuff like that.  Create and verify a user, because what they prefer you to do is that you have nothing to do with that.  You just ask it for a user. That user gets via their SMS or email. Yeah, click here, and then they go through and create their account.  But no, we're going to hopefully be able to pick up their password. Yeah, but that's for, so phase one is, you know, well, the step one.  Step is set up the Cognito client. Step two is in progress. Make it so the back end supports both, right?  And we can switch between them. Like at the moment, having this test email in there is good, but you'll also want to have a feature flag switch.  So you can say, right, we've switched it on. Anyone that comes through now is going through to the new system.  And then step three is going to be update the front end. So it's now using it in the right way, you know?  And then step four is going to be, okay, how do we migrate the old users over? And then step five is going to be, right, let's remove all this legacy code, right?  So extract user roles from the appropriate claim. Yeah, evaluate. I'm not sure what that is, but I'm sure it's relevant because I did a lot of research.  When I built, when I fleshed this out, user object mapping. So create a mapping function to transform the Cognito JWT claims to a user object that aligns with the existing user object structure, right?  Yeah. So that's about when we create a user, we create an entry in the database. And let's see if I can see that because I'm logged in as a different user.
+
+27:40 - Tate Donohoe (Ecodia)
+  I should be all good with all of this. I just need to look around the code a bit.
+
+27:54 - Eugene Kerner
+  I did have the MySQL database is running on the same instance. So. So you could, forget that, this one.  In the .m somewhere is going to be the database. Okay, there you go. Database URL. So it's got a full connection string there, right?  Yeah. So you can use that to connect. I don't want to do it right now, but you can see into the database.  Basically, we have a user row, and that user row has the user data, and it gets other data added to it as the user gets updated.  But it also has in there, I think in the same row, the user login details. So when you create a Cognito user, you're going to want to put, instead of in their password field, you're going to want to put something or null or something to indicate that this user is actually managed inside Cognito, right?  Yes. That's why I'm saying you still have to make the user row when you create a user, but you're not going to put the auth stuff in there.  Instead, you're going to put some flag in there that means the user is managed inside or zero. Probably, obviously, the sub ID from the Cognito user.  I meant to say Cognito, not ETH or zero. So if you put the sub ID in, you'll be able to then link them up.  User data synchronization. Implement logic to create a corresponding user record in the application's database. So that's what I mean by these two, right?  When you create a user, you're still going to want to put the user record in our database, but it doesn't now also have the auth record attached to it, or columns populated, because there's fields that we keep, that we, you know, well, you'll see.
+
+30:20 - Tate Donohoe (Ecodia)
+  Yeah, you can see it by Prisma, probably schema.
+
+30:29 - Eugene Kerner
+  Yeah, so that's the schema Prisma. And if I search for user in here, there's model user, it looks like it's going to be there.  So this is your user. It's got a whole bunch of information, obviously, right? Yeah, because like, there's all different stuff we might want to associate with that.  Like when you create the user in the beginning, it doesn't have much information. But as Craig goes into the settings page or whatever, just let me log out as this user.  Because that's fire. No, log out. See, he didn't have much in the left menu. But now I log him in as this user.  This is an admin. He's got much more going on. And if I go into a building, there's audits, invitations, contractors, or users, right?  So this is where he's added you. We can only add you one role there. That's a problem. That's more information.  But likewise, if I go into buildings and I edit one of these buildings, you see that there's quite a few settings in there.  And different stuff that can go on. And that occupant in... So, as you edit stuff in here, it does update, it can update the user record.  So, yeah, so, where were we? User data, implement logic, create corresponding user. Yeah, that's right. handled the handled user self-registration.  Determine how to handle user self-registration implementation mechanism. So that means they scan to, there's different types of users, right?  There's invite-only users, like a BCM, a building manager can't just register themselves as a building manager. The building gets added, and then the admin, there's a bunch of different scenarios, right, and use cases.  So, the building gets added, and then an audit admin, like Craig, will... and Attain the contact details for the building manager and add them.  Obviously, you can't just add yourself to any building as a building manager because that gives you control over that building, right?  So that's an invite-only user. Some are just, they get added and they get a notification, you've been added. Some are invite users, so they get invited to be added.  And some are self-service users, like a contractor comes along and goes, all right, I'm in the building, scans a QR code, or a tenant scans a QR code on the back of their door and goes through a sign-up process, right?  So self-service users, and that's what this is talking about. So, you know, it's more than handles self-service registration. It's, you know, how does each type of user going to, so look, BCM buildings.  We go to Auditor, Audits, the best way to do it. So I think if we go to a contractor, no, I thought I'd have that in my, okay, the best way to look at it is like this, Source, Pages, Pages, no, too much context switching here, Companies, Base, Files, Documents.  It's definitely going to be, I really thought there was a building. So there's an orth, there's an orth path here.  Auth, Auth Module, Auth Service. Is it searching real time?
+
+35:18 - Tate Donohoe (Ecodia)
+  Like, oh no, no, no.
+
+35:22 - Eugene Kerner
+  Oh, yeah, I'm just using the command line here, and I'm just hitting tab. Right. So, I mean, there's all search stuff in here, but nothing works as well as the command line.  So, okay, so I don't know, I don't know why I've forgotten how to use Next.js, and I thought it was going to have a pages, but here's a better way.  Next uses app. Oh, yeah, maybe.
+
+36:05 - Tate Donohoe (Ecodia)
+  Oh, I know the problem.
+
+36:07 - Eugene Kerner
+  I'm in the back end. So this is nest. If we open up the front end, and then everything I was just doing is going to, trying to show you, is going to work, right?  well, that gave me a bit of headache. So, all right. Pages. Yeah. So, but if we do find source name auth type directory, this is where you're going to get a headache, right?  So pages tenant auth, pages contractor auth, pages OSM auth. Each different type of user has their own login screen, which I was trying to explain to you the other day.  Yeah. Each one has nuances. So, for example, a BSN won't have a registration because they can't. Self-register. They'll have a login and it requires them to set up a two-factor.  A tenant doesn't need the two-factor and they can self-register. A contractor, it's not even a login. It logs them in and it doesn't even require them to verify their email or anything like that.  So it's more of a register. Anyone can go and log in as a contractor, right? It's more of a, I'm registered as in the building, like a ledger, you know?  So each one of these is slightly different. And I'll recommend you start with the BCM and, you know, admin maybe.  But we'll have a meeting and categorize these and you need to understand the different use cases so that you can make sure the back end, where we were over here, supports the various ways.  Obviously, it already supports it in the current way, but you need to make sure that Cognito supports that. So where you thought it was a real simple job, this is the part that makes it tricky, right?  Yeah, sure. And you eat an elephant one bite at a time, right? So get it working, apply it to a use case, and then go, right, what's the next use case?  You'll get Craig to explain it to you. So Craig's explaining stuff to techos is not one of Craig's strong points.  So assume that you already know everything. You'll find that very quickly that he'll tell you something, and you'll be like, okay, that made no sense whatsoever.  You need to go talk to me like my five-year-old, because I just don't know. He knows this all so well.  So if you kind of get stuck on that, just grab me, and I'll put it into TechSpeak for you.  Thank you. Just if I can figure it out. So, all right, where were we? Handle user, so time, scope, and estimation tasks.  This is a breakdown of these tasks up here. This card involves significant changes to the back end. You've got the feature flag stuff as well.  You'll probably make a first pass over it and get it working. And then as you work through the nuanced users, you're going to come back here and go, all right, I have to tweak this and that.  And so that's fine. And what scope did I put on it? I put 40 to 60 hours, right?
+
+39:43 - Tate Donohoe (Ecodia)
+  Okay.
+
+39:44 - Eugene Kerner
+  40 to 60 hours. But that was 40 to 60 hours to a kind of semi-green offshore Philippine developer, right?  So I bloated these times out. Yeah.
+
+39:58 - Tate Donohoe (Ecodia)
+  I bloated it out.
+
+40:00 - Eugene Kerner
+  I would expect that, you know, 1 to 1.5 weeks. I'd be aiming for this.
+
+40:05 - Tate Donohoe (Ecodia)
+  Yeah. You've got to take your time to understand it.
+
+40:10 - Eugene Kerner
+  And, you know, you can see there's a bit going on in there. There's a few use cases and it's integration.  So getting it to work with the platform and you'll probably immediately put in just a dirty login form and a register form on the front end, you know.  So we're on the front end where you've got, you've got what, common auth, that's a shared library, pages, admin auth, for example, right?  So I'd make one called pages, admin, auth two or something like that. It's not really linked to anything, but you can sort of come along and go, all right, pages, admin.  Auth probably should take you to a page. Wait a minute. Why didn't that? Let me have a look. So another workspace.  What did I say? Pages, admin.
+
+41:21 - Tate Donohoe (Ecodia)
+  Is that not live? No, it's live.
+
+41:26 - Eugene Kerner
+  Auth sign up in there. So it hasn't got Auth. It's got Auth sign up. Right. It hasn't got Auth.  I don't know where the login page is. So Auth what? It's only got sign up in there. Maybe it's not that used.  I don't know. But still, this is something because that's how next works. That's your actual path. So I said admin or sign up.  That should be something. And it is, right? So, and it's redirected to slash login. So what you want to do is figure out what happened there and make yourself a login to, you know?
+
+42:11 - Tate Donohoe (Ecodia)
+  Yeah.
+
+42:12 - Eugene Kerner
+  You can go to login to or login something, login cognito. No one else knows it's there. And you've got a login screen there that specifically, when posted, triggers the feature flag or has, or what he's currently doing is going Cray plus, what did he say?  Cog. Sorry? Plus Cog.
+
+42:35 - Tate Donohoe (Ecodia)
+  Oh, Cognito.
+
+42:37 - Eugene Kerner
+  So that in theory, that in theory would, you know, use the new, I wonder what's going to happen. I'm trying to login.  There's no such account. So you're really more interested in a registration account to register. So reset. There's no rego here, right?  But for example... They're all a bit different. So if I go to contractor auth, I've got a few in there, right?  I've got forgot password, login, reset password, sign up, and verify, right? Yeah. So sign up is probably what we're interested in to start with.  Yes. So if I go to contractor auth, sign up, I would expect you'll have a dev environment running, though.  But if I go to contractor auth, sign up, here we are. So it's nuanced as well. It looks different.  Are you a contractor, emergency services, or a guest, right? Yeah. Or do you have an account, login? So you see they're all a little bit different, and that's why, I mean, some of them are a lot different, and some are a little bit different.  So in some cases, like in this case in particular, you probably won't be able to integrate this login form into the one-size-fits-all login form.  So the end goal is to kind of, where possible, have a one-size-fits-all login form. These guys get a QR code, which sends them here.  So they rock up at the building. I'm saying, here to do some contractor work on the building, and there's a thing there on the door, on the entry that says, are you a contractor scanned here?  Sometimes it's where they issue you key. But basically, you scan a QR code, and it brings you here, and you go, yeah, I'm a contractor.  Do you already have an account? No, register my visit, like that, right?
+
+44:53 - Tate Donohoe (Ecodia)
+  Yeah.
+
+44:53 - Eugene Kerner
+  So the first pass, I wouldn't be trying to, because... The amalgamation of these multiple login forms into one-size-fits-all is considered a completely separate task, right?  I wouldn't think of it as part of the auth. My goal in the first pass is going to be, let's get what's already there working for the new auth system, right?  Without trying to reinvent the wheel. Yeah, sure. So let's have it so that whether the feature flag's on or off, it's going to work the same except the registrations go on to Cognito rather than the database, yeah?
+
+45:36 - Tate Donohoe (Ecodia)
+  Yeah.
+
+45:39 - Eugene Kerner
+  All right. I think that's enough said there. And I think that's kind of reasonable now. You need to have a look.  And if you come back and say, look, I don't need 40 hours, I only need 20, or I do need 60 hours for this.  You know, but as long as we sort of agree. You know, make an estimate up front, and then within a reasonable variance, we try and estimate as closely as possible.  Yeah, sure. So this is the first ticket, I think. You need to get the back end working after you've got your dev environment set up.  So, for example, let me know if you run out of time. Just got to make sure those guys aren't having a meltdown.  Yes? All right. So this is the back end. This is done, and if you need anything further in there, let me know.  This is back end. There's a code base for that. It's in Bitbucket, which I'll add you to in a minute.  And this is the front end. It's going to come later in testing. So... I'd start here. All right, so let's talk about the dev env.  I do that much context switching that I need to just have a look, obviously, at the package JSON. I've opened it up there.  We're in the front end. So we've got dev UAT. This is kind of – dev is if you've got a local database running, right?  So there's a way you can export the database. It's MySQL, and then you can find it locally. can either run a local MySQL.  What I do is I have a Docker container for it somewhere. Let me think. When we go to set your environment up, I mean, you can probably get yourself pretty much going if I pass you the –  End Files. The README file probably has most instructions in it. Yeah, so getting started. Run your frontend connected to the UAT backend.  If you're just doing frontend work, this is the quickest way to get up and running. So you'll see that I've got a .env file there.
+
+48:26 - Tate Donohoe (Ecodia)
+  So I've got an end local.
+
+48:28 - Eugene Kerner
+  That's if I've got a local database running. Let's have a look at it. Obviously, oh, that's the frontend, right?  So it's going to... Oh, it gets overwritten, actually. So here's the actual end local. And you'll see that it's got my local database service configured in there.
+
+48:58 - Tate Donohoe (Ecodia)
+  Yeah. Right?
+
+49:00 - Eugene Kerner
+  And I've got a way to deploy that. I can't remember. There's probably a Docker Compose file somewhere. I'm not sure.  We'll have to worry about that in a minute. But the quickest way is we run devuat, which copies the envlocal to envlocal back.  So you've got a backup of it. Pretty crude, nasty way. But it then clobbers your envlocal with the envuat file and runs that, right?  So, yeah. So basically, if I do yarn this, I should be up and running pretty quick. My front end running.  Locally, and using the remote UAT backend, right? So it's running on localhost 3000, and there it is. Yep. Each user gets a largely different view here, but that's really quick to get started.  So what you need is, well, whoops, open here, source frontend. How do you show the, what's the shortcut for Mac to show the hidden files?
+
+50:56 - Tate Donohoe (Ecodia)
+  Command, full stop. Command, comma?
+
+51:08 - Eugene Kerner
+  No, think that was it. I think that was it. Command, full stop. It really rang a bell for me.  Got my key mapping switch. So I'm already here. Remember everything, can't you? Jesus. Oh, Command-Shift period. Yeah.
+
+52:13 - Tate Donohoe (Ecodia)
+  All right.
+
+52:13 - Eugene Kerner
+  So you need these three.
+
+52:25 - Tate Donohoe (Ecodia)
+  Yeah.
+
+52:28 - Eugene Kerner
+  Oh, I've got you on a different space, on a different workspace. So we need to go. That's annoying. I know what it'll do.  Yeah, you'll need those three. These are front-end files. It's always annoying adding users in here because you've got to add...  So if you can accept that invite, and then I can add you to the code bases. Did you get it?
+
+55:00 - Tate Donohoe (Ecodia)
+  Yeah, sorry, I'm just trying to get an email where I code in.
+
+55:39 - Eugene Kerner
+  I'll add you to the, what did I do? I added you to the backend, invitation pending. So you've got another invitation.  So you have to sort of add to Bitbucket, and then you can add to each repository.
+
+56:00 - Tate Donohoe (Ecodia)
+  Yeah, right.
+
+56:02 - Eugene Kerner
+  So, and then I've got to also invite you in the front end. And I don't know how much you've used Bitbucket, but you'll basically go into your account settings, right?  Okay. Account settings like that on the top right. And that's where you can set up your, maybe I, probably here.  Well,  it, Google it. I can't remember how to, but basically. Basically, you can add your SSH keys, right? Oh, yeah, yeah.  I can't remember how to do it. That's good. I'll find it out. So you can add your SSH keys, do a Git clone.  There's two repositories. There's repositories. There's front end and back end. And in the README, there should be the branching strategy.  So it's basically always branch from UAT, right?
+
+57:40 - Tate Donohoe (Ecodia)
+  Yeah.
+
+57:41 - Eugene Kerner
+  So we only push to main. We always branch from UAT and then merge back to UAT, right?
+
+57:49 - Tate Donohoe (Ecodia)
+  Yeah.
+
+57:50 - Eugene Kerner
+  It's not normal, but it's what we've been doing. So what I'll do here, I'm in the front end. I don't think that's an in-progress.  Fathom not, so I'll just do a, however you prefer to do it, but you would normally check out UAT, right, so, and then do a git call, get the latest, it's already up to date, and then to branch you would do a checkout minus B, and a git, check out, I might be a bit old school here, minus B, you can do it all via this, but I've just been doing it this way for so many years that Yeah, and then a branch, like, if you have a look at the branches, some of us have tried to make some naming conventions, like if you do a git branch, you'll see that there's feet for feature, or there's no restriction, you can call the branch anything you want really, someone's used feet, someone's used feature  There's also Fix, Fix Slash, whatever. I kind of use Feet Slash or Fix Slash, right? It doesn't matter. So if I had a task called, you know, back-end Cognito auth updates, I'd just literally do git, check out, new branch, Cognito, Cognito updates.  You know, something like that, and then your branch. then when you push that branch, so say I do, so I've got, I'm in a test branch now.  I'm in the front end, and if I make some edit in here, it's in the README, right? I think everything I'm telling you is in the README.  Yeah. You don't have to worry about this stuff. That's universal.
+
+1:00:20 - Tate Donohoe (Ecodia)
+  No, this step is already done.
+
+1:00:25 - Eugene Kerner
+  Yeah. You won't need to do this. So I made a change here, add the change, testing, commit the change, publish the branch, normal stuff.  But then when you come over here, was that back end or front end? That was front end. So in front end pull requests now, if I create new, it will detect that branch, that latest one, and it's trying to merge it to main.  So if I want to merge that to main, it looks like main and UAT are kind of in sync at the moment because there's not too many changes there, but I really want to merge it to UAT, right?  And when I create that pull request, it's got an automated pipeline, so it'll automatically run all the checks, and then when I merge it, when it gets approved.  So normally now, I would say to you, I'd copy this and message you, hey, Tate, please review my PR, right?  Yeah, sure. So you'll, especially in the beginning, I mean, sometimes I'm away, you're busy, and you'll be like, I'm going to slip that one through without a review, you know?  But in most cases, then you'll be able to review it. And you'll approve it or whatever you do, you know.
+
+1:02:04 - Tate Donohoe (Ecodia)
+  Yep.
+
+1:02:04 - Eugene Kerner
+  Once it's approved and these are passed, so you can't merge this at the moment because, you know, let me see.  You can check the running pipelines. So because I merged that in, there's an in-progress pipeline. The first pipeline does all the checks.  The second pipeline runs after your build, and that actually deploys it to the UAT cloud, right?
+
+1:02:31 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:02:32 - Eugene Kerner
+  So the first one just does the checks to make sure that it's mergeable, yeah?
+
+1:02:38 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:02:40 - Eugene Kerner
+  What that means is, like, if you have a look in your package JSON, there's a format, right?
+
+1:02:48 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:02:49 - Eugene Kerner
+  Which runs prettier, and then there's a link.
+
+1:02:53 - Tate Donohoe (Ecodia)
+  Oh, so all of that actually gets run on it? Yeah, not all of that.
+
+1:02:58 - Eugene Kerner
+  This gets run for... So this gets run, actually. So if you haven't run Pretia, which is format right, so the only things you'll really want at the end of your work before you commit your branch, you'll want to run this, which will, you know, fix up any formatting.  Yeah.
+
+1:03:21 - Tate Donohoe (Ecodia)
+  And you see there's a bit of code there.
+
+1:03:23 - Eugene Kerner
+  And then you'll want to run Lint. You'll want to run Lint to – it'll make sure Pretia was run.  And it'll also – we could probably put those both in one command, but it doesn't really matter. And then it'll check your Linting, right?  So you didn't fail. If this fails here, then it'll fail in the pipeline too, right? So the pipeline's making sure that you ran that.  Yeah. You'll notice, as I mentioned before, in the ESLint config, you'll See, you know, no unused files is turned off.  I really want to turn that on, but if I turn that on and I rerun the linter, we've got a shitload of errors.  And it's quite high risk to, oh, that just did the linting check. Like, forget it, right?
+
+1:04:40 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:04:40 - Eugene Kerner
+  Every single file, just about, you see how many?
+
+1:04:44 - Tate Donohoe (Ecodia)
+  Wow.
+
+1:04:45 - Eugene Kerner
+  Yeah. And all that means is if we look at one, if we look at one, this one, you see the red there?
+
+1:04:56 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:04:57 - Eugene Kerner
+  It's got this defined and it's never... So it's kind of harmless, but it's lazy coding. Like these guys had it all the way through.  Yeah. Well, they had one, is URL match, and then they didn't like it. They wanted to make another one, but they just renamed that to is URL match.  And they made a new one, and then they never came back and deleted this one. And then likewise here, this is never used, not even needed, right?  But if you're going to go through that many files and start deleting  that shouldn't be there, in an ideal world, there's no risk to removing that and that.  But the problem is, if you're going to edit that many files deleting stuff, the chance that you accidentally delete a line you didn't mean to delete is high, right?
+
+1:05:51 - Tate Donohoe (Ecodia)
+  Yeah. Or it's valid.
+
+1:05:52 - Eugene Kerner
+  So to me, there's quite a bit of risk. Someone needs to do it. So what I thought I'd do is, as I'm working,  Working on the files, if I see that, take it out, right? So if I happen to be working on this file, I would see that and I'd go, all right, I'll get rid of that.  It's gone. I'd see that. I'd get rid of it. So if we work on these files for the next 6, 12 months, then we turn this on and check.  We'll find that there's much less to do, right? Yes. now I'm just going to leave it off, you know?  So, all right. Just going to confirm that you've got those invites and you've got access to pull, to clone the repos.  If you come into here, front-end source, there's going to be a clone button here. There it is. So there's your clone command.  You'll have to set up your SSH keys. a one-and-a-half-hour meeting, clock your time.
+
+1:07:03 - Tate Donohoe (Ecodia)
+  I only have fire auditors, but I don't have a front-end or a back-end.
+
+1:07:12 - Eugene Kerner
+  Okay, you would have got an invite for each of those. Go back to your email. No, yeah, I've refreshed.
+
+1:07:17 - Tate Donohoe (Ecodia)
+  I don't have one. Maybe you had to be in there.
+
+1:07:24 - Eugene Kerner
+  All right, let's see. So people, Tate, you're there. These guys are mostly disabled. Oh, I'm not an admin to be able to disable them, actually.  So that's something, or am I? Maybe it's in. I'll come back to that later. So I can see you there.  And then if I go to the front-end repository settings, repository permissions. You're right. You're not there. One invitation pending.  Resend invitation. Did I spell that right? Code at Ecodia. Oh, that's the problem. I spelled it wrong.
+
+1:08:14 - Tate Donohoe (Ecodia)
+  Users.
+
+1:08:15 - Eugene Kerner
+  Read right. Code at Ecodia.au. That's better. Yep. That was the front end. I did it to the back end too.  Yes, I got it. Yeah, I messed that up as well.
+
+1:08:51 - Tate Donohoe (Ecodia)
+  All right, got it.
+
+1:08:57 - Eugene Kerner
+  Oops, we need to rewrite. Confirm. All right, you should be able to set up your SSH keys, pull down the code.  You should be able to run the front end by dropping those .en files in there and running Yarn, W, T, and you'll have the front end open.  Yeah. That's already made you one user, but there's like a whole plethora of users. Like you'll end up with an admin user, a BCM user, an O, whatever, like each type of user.  Yeah. Or you can make yourself new users in the case where the user supports self-registration. But really just start to get across the code base.  The next step is going to be and start to get across that this, you know? Yeah, yeah.
+
+1:09:46 - Tate Donohoe (Ecodia)
+  Have a look at the back end.
+
+1:09:47 - Eugene Kerner
+  Have a look where you think you want to change the code. Set up a test in the front end, like just a detached login screen that allows you to create a Cognito user.  I'll probably add you to the, at some stage soon, to the AWS, so that you can, you won't really need it, but you'll be able to, you won't really need it, but it'll be good to ensure that your user was created properly, but you'll know because this will be able to log in, right?  So it might be good for you to have an access in there. One thing we will want to do is, when you're working on the back end, at the moment, you've got to deploy it to UAT.  If you're set up using dev UAT on the front end, that's your front end local, but connected to your remote back end, which means if you make a change in the back end and you want it to reflect in your dev environment, you've got to deploy the PR, get it reviewed, three minutes to test, three or four minutes to deploy.  It's like 10 minutes just to get. The thing deployed so you can check your changes.
+  ACTION ITEM: Send Tate MySQL dump + .env files; then Tate sets up local MySQL (Audit/Admin) + local FE/BE - WATCH: https://fathom.video/share/rv_3tLLojwWyHzA4yZmrF8UPbExebxta?timestamp=4261.9999
+
+1:11:02 - Tate Donohoe (Ecodia)
+  Wait, so we're not running local backends? Yeah, we are running local backends.
+
+1:11:07 - Eugene Kerner
+  You're not set up for it yet. So what we need to do is get into AWS. Yeah, sure. Make a MySQL dump of the current backend.  And then you've got to deploy a local MySQL. There's a Docker image for it, right?
+
+1:11:27 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:11:27 - Eugene Kerner
+  So basically, I need to pass you a MySQL dump. And then you would go in and deploy that locally, right?
+
+1:11:42 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:11:42 - Eugene Kerner
+  I'm sure you can stand up a MySQL service locally. I would do it in Docker, but it's up to you how you do it.  And then if you go into your frontend and you have a look at the... So... think going to... So...  So... So... So... Thank you. What you would do is you would set up your dev local, so the .end local.  So .end local has been clobbered by .end UAT, but what I would do is I would say, if I wanted to run locally, I'd say copy this one over top of that one, right?  And then I'd edit this one, because my local database deployment is here. Yeah, sure. And I would probably set it up with no auth, or maybe the auth is configured in the back end or something.  So when I've deployed my local MySQL instance on port on localize 3008, I probably set it up with the  With the same password that the remote one has. So if I go into my back end and I look at the .m file in there, which I probably should send you as well.  Yeah, I will definitely need to send you that. So if I do open here, and then what was it?  That, so I can see that.
+
+1:13:27 - Tate Donohoe (Ecodia)
+  Where is it? Oh, no, you just turned it off, I think. Oh, yeah, good call.
+
+1:13:35 - Eugene Kerner
+  I'll send you both of those, but this one's out of date, really.
+
+1:13:43 - Tate Donohoe (Ecodia)
+  That's you? Yes. Yep.
+
+1:13:50 - Eugene Kerner
+  That's the back end .m files. This one you're interested in, let's have a look at it. Database URL. Okay, so the database is called Audit, the user is Admin, and the password is that, right?  So when you deploy your local, not now, I've got to take off now, and you've got plenty to do, but you're going to very soon be saying, Colin, Eugene, I'm ready for that database.  So basically, you'll deploy a local, I'll give you a dump, you'll deploy a local MySQL, you'll make this database.  With this user, identified by that, right? Yeah. And then whatever port you deploy that on, the default is going to be 3008, that's the default MySQL port.  So then on your front end, so your back end, you won't change anything. If you use these passwords, you don't need to.  So, and then on your front end, all you'll do is... don't know. And then... ... Instead of running, where is that, package.json, yeah, all you'll do is you'll copy this env local back over top of env local, so you'll have your local database port set up in there, right?  Yeah. And also the public API URL, instead of pointing remotely, it'll point locally, and then you'll start your back end, this is the front end, you'll start, after you start your back end, you'll start your front end with Yarn Dev instead of Yarn Dev UAT.  Before you do that, you'll start your back end, I'm not sure, I haven't done it in a while, but if we look at the back end service, and we look at the package.json, I'm sure we can tell how to start it locally, it's going to be start, or start dev, probably you'll run that, you know?
+
+1:15:59 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:16:01 - Eugene Kerner
+  I don't know who the  was running it on Windows. I'm on Windows. Oh, well, you'll run this then. Yeah.
+
+1:16:13 - Tate Donohoe (Ecodia)
+  Fair enough. Yeah.
+
+1:16:15 - Eugene Kerner
+  Like you already catered for. So basically, you know, you'll run this and then you'll go over your front end, you'll run that, and then you'll have your front end talking to your back end API using your local database, right?  Yeah. And then you can make back end changes. You'll notice in that back end end file that I sent you, there's a bunch of, keep that secure because there's a bunch of stuff in there.
+
+1:16:44 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:16:45 - Eugene Kerner
+  This is the Xero invoicing client Sentry. I don't think we're using Sentry, but it must have been set up at some stage.  That's great to have. Maybe we switch that back on later. And push notification. Oh, yeah, it does push notifications via Vapid.  So that's set up Google Client Secret. Don't know what that's used for. Maps, I think, right? Yeah. Uploads directory.  All of the files you upload, just go to the local instance, which sucks absolute balls. So we've got to, at some stage, set up a cloud storage, you know, S3 bucket.
+
+1:17:31 - Tate Donohoe (Ecodia)
+  Yeah.
+
+1:17:32 - Eugene Kerner
+  And it's a later on task, but I want all of the files to go into an S3 bucket rather than go into the local instance.  Yeah. It's in an EC2 or something like that, I guess. There's a mail host configured in there. And, yeah, database connection string.  So I don't know if we're, I don't know. know know So if we're using Redis, I don't think so because I've run this back end before without deploying a Redis service.  It's a cache, so it's configured there, but I really don't think it's used. Anyway, dive in, man. That's a one-hour, 45-minute meeting, and that's going to keep you busy.  The next thing I've got to do is pass you a database dump so that you can stand up your back end.  Your full stack locally. Yep. Don't get too precious about making magic scripts that run it all in one or anything like that.  mean, it's no drama to start the back end, start the front end. Yeah.
+
+1:18:46 - Tate Donohoe (Ecodia)
+  Yeah. All right. All right. Thank you, Eugene. Very cool. No worries.
+
+1:18:52 - Eugene Kerner
+  And you've got access to the tickets, so you can sort of start to get across that and start to understand what is.  It needs to happen, all right? Have fun. I've got to go. Awesome.
+
+1:19:03 - Tate Donohoe (Ecodia)
+  All right, see ya.
