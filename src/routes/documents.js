@@ -128,6 +128,153 @@ router.post('/render', async (req, res) => {
   }
 })
 
+// Generate a project proposal from structured input
+router.post('/proposal', async (req, res) => {
+  const { clientName, contactName, projectTitle, summary, features, notIncluded, timeline, price, paymentTerms, validFor } = req.body
+  if (!clientName || !projectTitle || !summary || !features) {
+    return res.status(400).json({ error: 'clientName, projectTitle, summary, and features are required' })
+  }
+
+  const slug = `proposal-${projectTitle.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}-${Date.now()}`
+  const html = buildProposalHtml({ clientName, contactName, projectTitle, summary, features, notIncluded, timeline, price, paymentTerms, validFor })
+  const htmlPath = path.join(DOCS_DIR, `${slug}.html`)
+  fs.writeFileSync(htmlPath, html)
+
+  const htmlStorageUrl = await uploadToStorage(`${slug}.html`, Buffer.from(html, 'utf8'), 'text/html')
+  const htmlLocalUrl = `${API_BASE}/api/docs/files/${slug}.html`
+  const previewUrl = `${API_BASE}/api/docs/preview/${slug}`
+
+  try {
+    const puppeteer = require('puppeteer')
+    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
+    const page = await browser.newPage()
+    await page.setContent(html, { waitUntil: 'networkidle0' })
+    const pdfPath = path.join(DOCS_DIR, `${slug}.pdf`)
+    await page.pdf({ path: pdfPath, format: 'A4', margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' }, printBackground: true })
+    await browser.close()
+
+    const pdfBuffer = fs.readFileSync(pdfPath)
+    const pdfStorageUrl = await uploadToStorage(`${slug}.pdf`, pdfBuffer, 'application/pdf')
+    const pdfLocalUrl = `${API_BASE}/api/docs/files/${slug}.pdf`
+
+    res.json({
+      html: htmlStorageUrl || htmlLocalUrl,
+      pdf: pdfStorageUrl || pdfLocalUrl,
+      preview: previewUrl,
+      filename: slug,
+      downloadHtml: `download://${htmlStorageUrl || htmlLocalUrl}`,
+      downloadPdf: `download://${pdfStorageUrl || pdfLocalUrl}`,
+    })
+  } catch (err) {
+    res.json({
+      html: htmlStorageUrl || htmlLocalUrl,
+      pdf: null,
+      preview: previewUrl,
+      filename: slug,
+      downloadHtml: `download://${htmlStorageUrl || htmlLocalUrl}`,
+      error: `PDF generation failed: ${err.message}`,
+    })
+  }
+})
+
+function buildProposalHtml({ clientName, contactName, projectTitle, summary, features, notIncluded, timeline, price, paymentTerms, validFor }) {
+  const date = new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
+  const greeting = contactName ? `Hi ${esc(contactName)},` : `Hi ${esc(clientName)},`
+  const featuresHtml = (features || []).map(f => `<li>${esc(f)}</li>`).join('')
+  const notIncludedHtml = (notIncluded || []).map(n => `<li>${esc(n)}</li>`).join('')
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proposal - ${esc(projectTitle)}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #1a1a1a; background: #fff; line-height: 1.7; font-size: 14px; }
+    .page { max-width: 720px; margin: 0 auto; padding: 56px 48px; }
+    .header { margin-bottom: 48px; padding-bottom: 24px; border-bottom: 2px solid #111; }
+    .brand { display: inline-flex; margin-bottom: 8px; }
+    .brand-eco { background: #000; color: #fff; padding: 5px 8px; font-size: 12px; font-weight: 800; letter-spacing: 0.15em; }
+    .brand-tagline { font-size: 11px; color: #999; letter-spacing: 0.08em; margin-top: 4px; }
+    .header-meta { font-size: 12px; color: #666; margin-top: 16px; line-height: 1.8; }
+    .title { font-size: 26px; font-weight: 300; margin: 24px 0 8px; letter-spacing: -0.01em; }
+    .subtitle { font-size: 13px; color: #888; }
+    .greeting { margin: 32px 0 16px; font-size: 14px; }
+    .section { margin-bottom: 32px; }
+    .section-title { font-size: 10px; font-weight: 700; letter-spacing: 0.25em; text-transform: uppercase; color: #999; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+    .section-body { font-size: 14px; line-height: 1.8; color: #333; }
+    .feature-list { list-style: none; padding: 0; }
+    .feature-list li { padding: 8px 0 8px 24px; position: relative; border-bottom: 1px solid #f5f5f5; }
+    .feature-list li:last-child { border-bottom: none; }
+    .feature-list li::before { content: ''; position: absolute; left: 0; top: 16px; width: 8px; height: 8px; background: #111; border-radius: 50%; }
+    .excluded-list { list-style: none; padding: 0; }
+    .excluded-list li { padding: 6px 0 6px 24px; position: relative; color: #888; font-size: 13px; }
+    .excluded-list li::before { content: ''; position: absolute; left: 2px; top: 14px; width: 12px; height: 2px; background: #ccc; }
+    .investment-box { background: #fafafa; padding: 28px; margin-bottom: 32px; }
+    .investment-price { font-size: 32px; font-weight: 300; color: #111; margin-bottom: 8px; }
+    .investment-terms { font-size: 13px; color: #666; line-height: 1.8; }
+    .timeline-box { display: inline-block; background: #111; color: #fff; padding: 10px 20px; font-size: 13px; font-weight: 600; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .next-steps { background: #f9f9f9; padding: 24px; font-size: 14px; line-height: 1.8; color: #333; }
+    .valid-note { font-size: 12px; color: #aaa; margin-top: 24px; font-style: italic; }
+    .footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #eee; font-size: 10px; color: #bbb; display: flex; justify-content: space-between; letter-spacing: 0.1em; text-transform: uppercase; }
+    @media print { body { padding: 0; } .page { padding: 24px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="brand"><span class="brand-eco">ECODIA</span></div>
+      <div class="brand-tagline">The world we build next</div>
+      <div class="header-meta">code@ecodia.au</div>
+      <h1 class="title">${esc(projectTitle)}</h1>
+      <p class="subtitle">Proposal for ${esc(clientName)} &mdash; ${date}</p>
+    </div>
+
+    <p class="greeting">${greeting}</p>
+
+    <div class="section">
+      <div class="section-title">Summary</div>
+      <div class="section-body">${esc(summary)}</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">What We'll Build</div>
+      <ul class="feature-list">${featuresHtml}</ul>
+    </div>
+
+${notIncludedHtml ? `    <div class="section">
+      <div class="section-title">What's Not Included</div>
+      <ul class="excluded-list">${notIncludedHtml}</ul>
+    </div>
+` : ''}
+${timeline ? `    <div class="section">
+      <div class="section-title">Timeline</div>
+      <div class="timeline-box">${esc(timeline)}</div>
+    </div>
+` : ''}
+${price ? `    <div class="investment-box">
+      <div class="section-title" style="border: none; padding: 0; margin-bottom: 16px;">Investment</div>
+      <div class="investment-price">${esc(price)}</div>
+${paymentTerms ? `      <div class="investment-terms">${esc(paymentTerms)}</div>` : ''}
+    </div>
+` : ''}
+    <div class="section">
+      <div class="section-title">Next Steps</div>
+      <div class="next-steps">Reply to this proposal to confirm and we'll send a payment link to get started. Once payment is received, we'll kick off immediately.</div>
+    </div>
+
+${validFor ? `    <p class="valid-note">This proposal is valid for ${esc(validFor)} from the date above.</p>` : ''}
+
+    <div class="footer">
+      <span>Ecodia Pty Ltd | ABN 86 688 476 082</span>
+      <span>ecodia.au</span>
+    </div>
+  </div>
+</body>
+</html>`
+}
+
 function buildHtml(title, type, sections, metadata) {
   return `<!DOCTYPE html>
 <html lang="en">
