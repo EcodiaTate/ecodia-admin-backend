@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tate Travel Planner - Oct-Dec 2026</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 20px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 300; margin-bottom: 4px; color: #fff; }
+  .subtitle { color: #666; font-size: 13px; margin-bottom: 24px; }
+  .toggles { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .toggle { padding: 10px 18px; border: 1px solid #333; border-radius: 8px; cursor: pointer; font-size: 13px; transition: all 0.2s; user-select: none; }
+  .toggle.on { background: #1a3a1a; border-color: #2d5a2d; color: #6fcf6f; }
+  .toggle.off { background: #1a1a1a; border-color: #333; color: #666; text-decoration: line-through; }
+  .toggle:hover { border-color: #555; }
+  .itinerary { display: flex; flex-direction: column; gap: 2px; margin-bottom: 24px; }
+  .leg { display: grid; grid-template-columns: 110px 1fr 100px 50px; align-items: center; padding: 14px 16px; background: #141414; border-radius: 6px; gap: 12px; }
+  .leg.flight { background: #0d1117; border-left: 3px solid #2d5a8a; }
+  .leg.trip { background: #141414; border-left: 3px solid #2d8a2d; }
+  .leg.gap { background: #111; border-left: 3px solid #444; opacity: 0.6; }
+  .leg-dates { font-size: 12px; color: #888; font-family: monospace; }
+  .leg-name { font-size: 14px; font-weight: 600; color: #ddd; }
+  .leg-detail { font-size: 11px; color: #666; margin-top: 2px; }
+  .leg-cost { font-size: 14px; font-weight: 600; text-align: right; color: #e8a848; }
+  .leg-link a { color: #4a9eff; font-size: 11px; text-decoration: none; }
+  .leg-link a:hover { text-decoration: underline; }
+  .summary { background: #141414; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .summary-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; }
+  .summary-row.total { border-top: 1px solid #333; margin-top: 8px; padding-top: 12px; font-size: 18px; font-weight: 600; color: #fff; }
+  .summary-row .label { color: #888; }
+  .summary-row .value { color: #e8a848; font-weight: 600; }
+  .summary-row.total .value { color: #6fcf6f; }
+  .revenue { background: #0d1117; border-radius: 8px; padding: 20px; }
+  .revenue h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; color: #4a9eff; margin-bottom: 12px; }
+  .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .bar-label { width: 100px; font-size: 12px; color: #888; }
+  .bar-track { flex: 1; height: 20px; background: #1a1a1a; border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .bar-value { width: 80px; text-align: right; font-size: 13px; font-weight: 600; }
+  .note { font-size: 11px; color: #555; margin-top: 16px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<h1>Travel Planner</h1>
+<p class="subtitle">Oct - Dec 2026. Toggle legs on/off to see cost impact.</p>
+<div class="toggles">
+  <div class="toggle on" id="tog-lombok" onclick="toggle('lombok')">Lombok ($4,100)</div>
+  <div class="toggle on" id="tog-costa" onclick="toggle('costa')">Costa Rica ($5,500)</div>
+</div>
+<div class="itinerary" id="itinerary"></div>
+<div class="summary" id="summary"></div>
+<div class="revenue">
+  <h3>Can you afford it?</h3>
+  <div id="revenue-bars"></div>
+  <p class="note" id="revenue-note"></p>
+</div>
+<script>
+var state = { lombok: true, costa: true };
+var LEGS = [
+  { id:'fiji_flight', type:'flight', dates:'Oct 9', name:'BNE to Nadi', detail:'Fiji Airways / Virgin', cost:750, sky:'https://www.skyscanner.com.au/transport/flights/bne/nan/261009/?adults=1', show:'always' },
+  { id:'fiji', type:'trip', dates:'Oct 10-17', name:'Fiji', detail:'Tiger Shark Diving. Non-refundable.', cost:3000, show:'always' },
+  { id:'fiji_lom_flight', type:'flight', dates:'Oct 17', name:'Nadi to Bali to Lombok', detail:'Via Denpasar', cost:1100, sky:'https://www.skyscanner.com.au/transport/flights/nan/dps/261017/?adults=1', show:'lombok' },
+  { id:'lombok', type:'trip', dates:'Oct 18-25', name:'Lombok', detail:'Coral Restoration. 100% refundable.', cost:3000, show:'lombok' },
+  { id:'lom_home', type:'flight', dates:'Oct 25', name:'Lombok to Home', detail:'Via Bali', cost:500, sky:'https://www.skyscanner.com.au/transport/flights/dps/bne/261025/?adults=1', show:'lombok' },
+  { id:'fiji_home', type:'flight', dates:'Oct 17', name:'Nadi to Home', detail:'Direct or via SYD', cost:400, sky:'https://www.skyscanner.com.au/transport/flights/nan/bne/261017/?adults=1', show:'!lombok' },
+  { id:'gap1', type:'gap', dates:'Oct 26-Nov 1', name:'Home / Buffer', detail:'Earning Ordit $$$ wherever you are.', cost:0, show:'always' },
+  { id:'home_africa', type:'flight', dates:'Nov 1', name:'Home to Windhoek', detail:'Via Perth or Dubai', cost:1500, sky:'https://www.skyscanner.com.au/transport/flights/bne/wdh/261101/?adults=1', show:'always' },
+  { id:'namibia', type:'trip', dates:'Nov 2-15', name:'Namibia', detail:'Independent leg.', cost:2000, show:'always' },
+  { id:'nam_jhb', type:'flight', dates:'Nov 15', name:'Windhoek to Johannesburg', detail:'Internal Africa', cost:400, sky:'https://www.skyscanner.com.au/transport/flights/wdh/jnb/261115/?adults=1', show:'always' },
+  { id:'intrepid', type:'trip', dates:'Nov 16-30', name:'Co-Exist / Intrepid', detail:'Johannesburg. Trip cost.', cost:3500, show:'always' },
+  { id:'jhb_kili', type:'flight', dates:'Nov 30', name:'Johannesburg to Kilimanjaro', detail:'Kenya Airways / Ethiopian', cost:1000, sky:'https://www.skyscanner.com.au/transport/flights/jnb/jro/261130/?adults=1', show:'always' },
+  { id:'kili', type:'trip', dates:'Dec 1-9', name:'Kilimanjaro', detail:'Solo climb, group tour.', cost:2500, show:'always' },
+  { id:'kili_costa', type:'flight', dates:'Dec 9', name:'Kilimanjaro to San Jose', detail:'Via Nairobi + Miami/Houston', cost:2000, sky:'https://www.skyscanner.com.au/transport/flights/jro/sjo/261209/?adults=1', show:'costa' },
+  { id:'costa', type:'trip', dates:'Dec 10-17', name:'Costa Rica', detail:'With friends. The flex leg.', cost:3500, show:'costa' },
+  { id:'costa_home', type:'flight', dates:'Dec 17', name:'San Jose to Home', detail:'Via LAX/SFO', cost:2300, sky:'https://www.skyscanner.com.au/transport/flights/sjo/bne/261217/?adults=1', show:'costa' },
+  { id:'kili_home', type:'flight', dates:'Dec 10', name:'Kilimanjaro to Home', detail:'Via Nairobi + Dubai/Singapore', cost:2000, sky:'https://www.skyscanner.com.au/transport/flights/jro/bne/261210/?adults=1', show:'!costa' },
+  { id:'woodford', type:'trip', dates:'Dec 25-Jan 3', name:'Woodford Folk Fest', detail:'Home for Christmas.', cost:0, show:'always' }
+];
+
+function isVisible(leg) {
+  if (leg.show === 'always') return true;
+  if (leg.show === 'lombok') return state.lombok;
+  if (leg.show === '!lombok') return !state.lombok;
+  if (leg.show === 'costa') return state.costa;
+  if (leg.show === '!costa') return !state.costa;
+  return true;
+}
+
+function toggle(key) {
+  state[key] = !state[key];
+  document.getElementById('tog-' + key).className = 'toggle ' + (state[key] ? 'on' : 'off');
+  render();
+}
+
+function render() {
+  var tripCost = 0, flightCost = 0;
+  var html = '';
+  for (var i = 0; i < LEGS.length; i++) {
+    var leg = LEGS[i];
+    if (!isVisible(leg)) continue;
+    var costStr = leg.cost > 0 ? '$' + leg.cost.toLocaleString() : '--';
+    var linkHtml = leg.sky ? '<a href="' + leg.sky + '" target="_blank">Search</a>' : '';
+    html += '<div class="leg ' + leg.type + '">';
+    html += '<div class="leg-dates">' + leg.dates + '</div>';
+    html += '<div><div class="leg-name">' + leg.name + '</div><div class="leg-detail">' + leg.detail + '</div></div>';
+    html += '<div class="leg-cost">' + costStr + '</div>';
+    html += '<div class="leg-link">' + linkHtml + '</div>';
+    html += '</div>';
+    if (leg.type === 'trip') tripCost += leg.cost;
+    if (leg.type === 'flight') flightCost += leg.cost;
+  }
+  document.getElementById('itinerary').innerHTML = html;
+
+  var total = tripCost + flightCost;
+  document.getElementById('summary').innerHTML =
+    '<div class="summary-row"><span class="label">Trips</span><span class="value">$' + tripCost.toLocaleString() + '</span></div>' +
+    '<div class="summary-row"><span class="label">Flights</span><span class="value">$' + flightCost.toLocaleString() + '</span></div>' +
+    '<div class="summary-row total"><span class="label">Total</span><span class="value">$' + total.toLocaleString() + '</span></div>';
+
+  var coexist = 1300 * 6;
+  var ordit = 3200 * 6;
+  var lendy = 5000;
+  var projected = coexist + ordit + lendy;
+  var surplus = projected - total;
+
+  document.getElementById('revenue-bars').innerHTML =
+    bar('Co-Exist', coexist, total, '#2d8a2d', '#6fcf6f') +
+    bar('Ordit', ordit, total, '#2d5a8a', '#4a9eff') +
+    bar('Hello Lendy', lendy, total, '#8a5a2d', '#e8a848') +
+    bar('Projected', projected, total, surplus >= 0 ? '#2d8a2d' : '#8a2d2d', surplus >= 0 ? '#6fcf6f' : '#cf6f6f');
+
+  document.getElementById('revenue-note').textContent = surplus >= 0
+    ? 'Projected surplus: $' + surplus.toLocaleString() + '. Assumes Ordit (10hrs/wk @ $80/hr) + Co-Exist + Hello Lendy $5k. Landcare not included.'
+    : 'Shortfall: $' + Math.abs(surplus).toLocaleString() + '. Need Landcare or additional clients to close the gap.';
+}
+
+function bar(label, value, total, bgColor, textColor) {
+  var pct = Math.min(100, Math.round(value / total * 100));
+  return '<div class="bar-row">' +
+    '<span class="bar-label">' + label + '</span>' +
+    '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + bgColor + ';"></div></div>' +
+    '<span class="bar-value" style="color:' + textColor + '">$' + value.toLocaleString() + '</span></div>';
+}
+
+render();
+</script>
+</body>
+</html>
