@@ -202,19 +202,25 @@ function buildSubagentConfigs(allConfigs) {
  * with native JS callbacks -- faster, more reliable, guaranteed to fire.
  */
 function buildProgrammaticHooks() {
+  // NOTE: UserPromptSubmit hook removed 2026-04-11.
+  // Reason: it injected "Think like a CEO..." every turn, which (a) is redundant
+  // with CLAUDE.md, and (b) breaks the prompt cache boundary by inserting fresh
+  // content between the cached system prompt and conversation, forcing full re-bill
+  // of the system prompt each turn. Anthropic prompt caching is prefix-based —
+  // any insertion invalidates the cache from that point down.
+  //
+  // Dead hook removed:
+  //   - `Write|Edit` PostToolUse: conductor's allowedTools only includes
+  //     mcp__*__* and Agent. Write/Edit never fire at the conductor level.
+  //
+  // NOTE: neo4j PostToolUse matcher retained — the VPS ~/ecodiaos/.mcp.json
+  // DOES include a neo4j server (confirmed by OS Session using graph_merge_node
+  // and graph_create_relationship in active sessions). Local d:/.code/EcodiaOS/.mcp.json
+  // is drifted and missing neo4j; the VPS copy is authoritative. If you edit
+  // the local .mcp.json, scp to VPS or copy from VPS before pushing.
   return {
-    UserPromptSubmit: [{
-      hooks: [async (_input) => ({
-        hookSpecificOutput: {
-          hookEventName: 'UserPromptSubmit',
-          additionalContext: 'Think like a CEO. Check Neo4j for prior context if relevant. Is this subagent work (comms/finance/ops/social) or does it need your direct attention? Delegate domain tasks to the right subagent.',
-        },
-      })],
-      timeout: 3,
-    }],
-
     PostToolUse: [
-      // Factory dispatch oversight
+      // Factory dispatch oversight — fires only when Factory session is kicked off
       {
         matcher: 'mcp__factory__start_cc_session',
         hooks: [async (_input) => ({
@@ -225,7 +231,7 @@ function buildProgrammaticHooks() {
         })],
         timeout: 3,
       },
-      // Scheduler quality check
+      // Scheduler quality check — fires only on schedule creation
       {
         matcher: 'mcp__scheduler__schedule_cron|mcp__scheduler__schedule_delayed|mcp__scheduler__schedule_chain',
         hooks: [async (_input) => ({
@@ -236,7 +242,7 @@ function buildProgrammaticHooks() {
         })],
         timeout: 3,
       },
-      // Neo4j memory quality
+      // Neo4j memory quality — fires on graph writes
       {
         matcher: 'mcp__neo4j__graph_reflect|mcp__neo4j__graph_merge_node',
         hooks: [async (_input) => ({
@@ -247,37 +253,75 @@ function buildProgrammaticHooks() {
         })],
         timeout: 3,
       },
-      // Spec freshness on file writes (conductor-level -- catches CLAUDE.md edits etc.)
-      {
-        matcher: 'Write|Edit',
-        hooks: [async (input) => {
-          const filePath = input?.tool_input?.file_path || ''
-          if (filePath.includes('/src/') || filePath.includes('/mcp-servers/')) {
-            return {
-              hookSpecificOutput: {
-                hookEventName: 'PostToolUse',
-                additionalContext: `You modified ${filePath}. If this changes behaviour, API, or architecture -- update the relevant spec doc or CLAUDE.md so future sessions aren't blind to this change.`,
-              },
-            }
-          }
-          return { continue: true }
-        }],
-        timeout: 3,
-      },
     ],
 
     SubagentStop: [{
       hooks: [async (input) => ({
-        systemMessage: `Subagent "${input.agent_type}" completed. Review its result and determine: any follow-up actions needed? CRM update? Neo4j entry? Scheduled task?`,
+        systemMessage: `Subagent "${input.agent_type}" completed. Review its result and decide: any follow-up actions, CRM update, or scheduled task needed?`,
       })],
       timeout: 3,
     }],
   }
 }
 
-// Token tracking (informational only — the SDK handles its own compaction internally
-// via compactionControl: { enabled: true }. We track tokens purely for the frontend
-// usage bar display, NOT to trigger any custom compaction/handover.)
+// ─── Custom system prompt builder ───────────────────────────────────────────
+// Context-burn investigation 2026-04-11 — verified in SDK v0.2.92 cli.js that
+// when `systemPrompt` is omitted OR `{type:'preset'}` is passed without a string,
+// the CLI loads the full `GW()` default section array (~5-6k tokens of Claude
+// Code CLI scaffolding: output style, tool permission guidance, tone rules,
+// coding instructions, session guidance, env info, auto-memory scanner, etc.).
+//
+// By passing a plain STRING systemPrompt, `Lx()` in cli.js bypasses the entire
+// default array — we get only the string we provide. That saves ~5k input tokens
+// per turn AND preserves the prompt cache boundary (since our string is stable).
+//
+// We inline CLAUDE.md ourselves so `settingSources: ['project']` can be dropped
+// (which also disables auto-memory file scanning — another per-turn cost).
+let _cachedSystemPrompt = null
+let _cachedSystemPromptCwd = null
+
+function buildCustomSystemPrompt(cwd) {
+  if (_cachedSystemPrompt && _cachedSystemPromptCwd === cwd) {
+    return _cachedSystemPrompt
+  }
+  // Read project CLAUDE.md (the OS's operational identity)
+  let claudeMd = ''
+  try {
+    const claudeMdPath = path.join(cwd, 'CLAUDE.md')
+    if (fs.existsSync(claudeMdPath)) {
+      claudeMd = fs.readFileSync(claudeMdPath, 'utf8')
+    }
+  } catch (err) {
+    logger.warn('Failed to read CLAUDE.md for custom system prompt', { cwd, error: err.message })
+  }
+
+  // Minimal environment context — replaces the SDK's verbose default env block
+  const today = new Date().toISOString().slice(0, 10)
+  const envBlock = `# Environment
+Working directory: ${cwd}
+Platform: linux
+Date: ${today}
+You are powered by Claude (Anthropic's model). Running inside the EcodiaOS conductor via the Claude Agent SDK.`
+
+  // Minimal tone/behavior rules — only the non-obvious things the model needs.
+  // Everything else is either in CLAUDE.md or is default model behavior.
+  const behaviorBlock = `# Behavior
+- You are a conductor. Delegate domain work (email, finance, ops, social) to the subagent with the right tools via the Agent tool. Do not try to do that work yourself — you don't have those tools.
+- Keep responses terse. The user can read tool outputs; don't restate them.
+- When referencing files, use markdown links like [file.js:42](path/to/file.js#L42).
+- All text you output outside of tool use is shown to the user.`
+
+  _cachedSystemPrompt = [claudeMd, envBlock, behaviorBlock].filter(Boolean).join('\n\n---\n\n')
+  _cachedSystemPromptCwd = cwd
+  logger.info('Custom system prompt built', {
+    bytes: _cachedSystemPrompt.length,
+    hasClaudeMd: !!claudeMd,
+  })
+  return _cachedSystemPrompt
+}
+
+// Token tracking (informational only — SDK/CLI handles its own context management;
+// we track tokens purely for the frontend usage bar display.)
 let handoverInProgress = false
 
 // In-memory state
@@ -457,35 +501,41 @@ async function _sendMessageImpl(content, opts = {}) {
   const allConfigs = getAllMcpServerConfigs(cwd)
   const mcpServers = loadConductorServers(allConfigs)
 
-  // Energy-gated thinking: use extended thinking when credits are ample (full/healthy)
+  // Energy-gated thinking: extended thinking on full/healthy.
+  // The OS uses thinking for strategic reasoning, diff/code review, and multi-step
+  // planning on Opus 1M — 2k was confirmed too low, 10k/5k is the right ceiling.
   let energy = null
   try { energy = await usageEnergy.getEnergy() } catch {}
   const energyLevel = energy?.level || 'healthy'
   const canThink = energyLevel === 'full' || energyLevel === 'healthy'
 
+  // Build the custom system prompt (cached per-cwd). This replaces the SDK's
+  // default ~5-6k-token scaffolding entirely — see buildCustomSystemPrompt docs.
+  const customSystemPrompt = buildCustomSystemPrompt(cwd)
+
   const options = {
     cwd,
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
-    settingSources: ['project'],       // loads CLAUDE.md from cwd
+    // settingSources intentionally omitted — we inline CLAUDE.md ourselves via
+    // buildCustomSystemPrompt. Setting it would trigger the CLI's auto-memory
+    // subsystem (bl8 in cli.js) on top of our own inlined copy.
     includePartialMessages: true,      // stream_event messages for real-time text
-    includeHookEvents: true,           // surface hook lifecycle in output stream
-    systemPrompt: {
-      type: 'preset',
-      preset: 'claude_code',           // use CC's full system prompt (includes CLAUDE.md)
-    },
+    // includeHookEvents intentionally omitted — the frontend doesn't render hook
+    // lifecycle events, and having them on adds events to the conversation stream
+    // that the SDK persists in history, bloating resume payloads.
+    //
+    // systemPrompt as a plain STRING replaces the CLI's full default prompt array.
+    // SDK v0.2.92 cli.js function Lx: `customSystemPrompt ? [customSystemPrompt] : defaultSystemPrompt`.
+    systemPrompt: customSystemPrompt,
     model: env.OS_SESSION_MODEL || undefined,
-    // Enable SDK auto-compaction — it summarises older messages in-place, preserving
-    // conversational continuity within the same session. Far better than a full session
-    // handover which nukes all context.  Threshold is in tokens; with a 1M context window,
-    // 800k gives plenty of room for the compacted summary + ongoing conversation.
-    compactionControl: {
-      enabled: true,
-      ...(env.OS_SESSION_COMPACT_THRESHOLD && parseInt(env.OS_SESSION_COMPACT_THRESHOLD) > 0
-        ? { threshold: parseInt(env.OS_SESSION_COMPACT_THRESHOLD) }
-        : {}),
-    },
-    // Extended thinking — enabled when energy level is full or healthy
+    // NOTE: `compactionControl` option was removed 2026-04-11. Verified against SDK
+    // v0.2.92 sdk.mjs — the option is destructured in HL() but never forwarded to
+    // the CLI subprocess transport (only BetaToolRunner uses it, which is a
+    // different API path). Passing it was a no-op. The CLI manages compaction
+    // internally based on context-window pressure; we can't override that from JS.
+    //
+    // Extended thinking — scales with energy level.
     ...(canThink ? {
       thinking: {
         type: 'enabled',
@@ -503,8 +553,9 @@ async function _sendMessageImpl(content, opts = {}) {
     // Domain subagents — each gets its own MCP servers inline (not inherited).
     // The conductor never sees these tools in its context window.
     agents: buildSubagentConfigs(allConfigs),
-    // Programmatic hooks — CEO pre-flight, factory oversight, scheduler quality,
-    // spec freshness, memory quality, subagent outcome logging.
+    // Programmatic hooks — factory dispatch oversight, scheduler quality,
+    // subagent completion review. UserPromptSubmit + dead matchers removed
+    // 2026-04-11 to preserve prompt cache boundary across turns.
     hooks: buildProgrammaticHooks(),
   }
 
@@ -541,7 +592,11 @@ async function _sendMessageImpl(content, opts = {}) {
       ccSessionId = null  // can't resume across config dirs
     }
     const sessionEnv = { ...process.env }
-    if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+    // CRITICAL: strip ANTHROPIC_API_KEY on OAuth paths. If present, the CLI/SDK
+    // silently prefers it over the OAuth credentials in CLAUDE_CONFIG_DIR and
+    // bills the API wallet instead of Claude Max. Confirmed in memory
+    // project_os_session_mcp_fix_apr2026: "Never set ANTHROPIC_API_KEY".
+    delete sessionEnv.ANTHROPIC_API_KEY
     sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
     options.env = sessionEnv
     if (prevProvider !== 'claude_max_2') {
@@ -554,7 +609,8 @@ async function _sendMessageImpl(content, opts = {}) {
       ccSessionId = null
     }
     const sessionEnv = { ...process.env }
-    if (env.ANTHROPIC_API_KEY) sessionEnv.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+    // Same ANTHROPIC_API_KEY strip — see claude_max_2 branch above for rationale.
+    delete sessionEnv.ANTHROPIC_API_KEY
     if (env.CLAUDE_CONFIG_DIR_1) sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
     options.env = sessionEnv
     if (prevProvider && prevProvider !== 'claude_max') {
