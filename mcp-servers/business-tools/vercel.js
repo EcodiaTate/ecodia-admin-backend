@@ -36,10 +36,10 @@ export function registerVercelTools(server) {
 
   server.tool('vercel_list_deployments',
     'List recent deployments for a Vercel project.',
-    z.object({
+    {
       projectId: z.string().optional().describe('Project ID or name'),
       limit: z.number().optional().describe('Max results (default 10)'),
-    }),
+    },
     async ({ projectId, limit = 10 } = {}) => {
       const params = projectId ? `?projectId=${projectId}&limit=${limit}` : `?limit=${limit}`
       const data = await vercelFetch(`/v6/deployments${params}`)
@@ -58,7 +58,7 @@ export function registerVercelTools(server) {
 
   server.tool('vercel_get_deployment',
     'Get details of a specific deployment including build logs.',
-    z.object({ deploymentId: z.string().describe('Deployment ID') }),
+    { deploymentId: z.string().describe('Deployment ID') },
     async ({ deploymentId }) => {
       const [deploy, events] = await Promise.all([
         vercelFetch(`/v13/deployments/${deploymentId}`),
@@ -77,10 +77,10 @@ export function registerVercelTools(server) {
 
   server.tool('vercel_trigger_deploy',
     'Trigger a new deployment for a project (redeploy latest).',
-    z.object({
+    {
       projectId: z.string().describe('Project ID or name'),
       target: z.string().optional().describe('"production" or "preview" (default: production)'),
-    }),
+    },
     async ({ projectId, target = 'production' }) => {
       const data = await vercelFetch(`/v6/deployments?projectId=${projectId}&limit=1&target=${target}`)
       const latest = data.deployments?.[0]
