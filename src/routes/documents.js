@@ -231,8 +231,13 @@ function buildPitchDeckHtml({ orgName, orgDescription, problem, problemPoints, s
   const date = new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })
   const slideFooter = `<div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>`
 
+  const allSolutionPoints = [...(solutionPoints || [])]
+  if (!allSolutionPoints.some(s => /impact\s+measurement/i.test(s))) {
+    allSolutionPoints.push('Real-time impact measurement and reporting')
+  }
+
   const problemPointsHtml = (problemPoints || []).map(p => `<div class="point-card"><div class="point-icon">&#9679;</div><p>${esc(p)}</p></div>`).join('')
-  const solutionPointsHtml = (solutionPoints || []).map((s, i) => `<div class="solution-card"><div class="solution-num">${String(i + 1).padStart(2, '0')}</div><p>${esc(s)}</p></div>`).join('')
+  const solutionPointsHtml = allSolutionPoints.map((s, i) => `<div class="solution-card"><div class="solution-num">${String(i + 1).padStart(2, '0')}</div><p>${esc(s)}</p></div>`).join('')
   const whyEcodiaHtml = (whyEcodia || []).map((w, i) => `<div class="why-item"><span class="why-num">0${i + 1}</span><span>${esc(w)}</span></div>`).join('')
   const teamCredibilityHtml = (teamCredibility || []).map(t => `<div class="cred-item"><div class="cred-check">&#10003;</div><span>${esc(t)}</span></div>`).join('')
   const ourWorkHtml = (ourWork || []).map(w => `<div class="work-card"><div class="work-status">${esc(w.status || '')}</div><h4>${esc(w.name)}</h4><p>${esc(w.description)}</p></div>`).join('')
@@ -276,6 +281,8 @@ function buildPitchDeckHtml({ orgName, orgDescription, problem, problemPoints, s
     .solution-card:hover { border-color: ${accent}; }
     .solution-num { font-size: 28px; font-weight: 200; color: ${accent}; margin-bottom: 12px; }
     .solution-card p { font-size: 15px; color: #555; line-height: 1.6; }
+    .impact-box { margin-top: 32px; padding: 24px 28px; background: ${accent}08; border-left: 4px solid ${accent}; font-size: 15px; color: #444; line-height: 1.7; }
+    .impact-box strong { color: ${accent}; }
 
     /* SLIDE 4: Track Record */
     .work-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 8px; }
@@ -323,7 +330,6 @@ function buildPitchDeckHtml({ orgName, orgDescription, problem, problemPoints, s
 <body>
   <!-- SLIDE 1: Title -->
   <div class="slide hero-slide">
-    <div class="badge">ECODIA</div>
     <p class="hero-prepared">Prepared for</p>
     <h1 class="hero-org">${esc(orgName)}</h1>
     <p class="hero-tagline">Technology that amplifies your impact</p>
@@ -347,6 +353,7 @@ ${orgDescription ? `    <p class="hero-desc">${esc(orgDescription)}</p>` : ''}
     <h2 class="slide-title">What we'll build together</h2>
     <div class="slide-body">${esc(solution)}</div>
     ${solutionPointsHtml ? `<div class="solution-grid">${solutionPointsHtml}</div>` : ''}
+    <div class="impact-box"><strong>Impact measurement isn't an add-on.</strong> It's built into every feature. Every event, every volunteer hour, every action is tracked and reportable.</div>
     ${slideFooter}
   </div>
 
@@ -385,7 +392,7 @@ ${investment ? `      <div class="invest-price">${esc(investment)}</div>` : ''}
 ${timeline ? `      <div class="invest-timeline">${esc(timeline)}</div>` : ''}
     </div>
     <p class="invest-detail">Fixed price. No hourly surprises. One round of revisions included.</p>` : ''}
-${nextSteps || callToAction ? `    <div class="invest-cta">${esc(callToAction || nextSteps)}</div>` : ''}
+    <div class="invest-cta">Keen to chat? Reply to this email or text Tate on <strong>0404 247 153</strong>. We'll figure out the best way forward together.</div>
     ${slideFooter}
   </div>
 </body>
