@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pitch Deck - Bush Heritage Australia</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, 'Helvetica Neue', Arial, sans-serif; color: #ffffff; background: #0a0a0a; }
+    .slide { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 80px 80px 60px; position: relative; page-break-after: always; }
+    .slide-footer { position: absolute; bottom: 32px; left: 80px; right: 80px; font-size: 10px; color: #444; letter-spacing: 0.12em; text-transform: uppercase; border-top: 1px solid #1a1a1a; padding-top: 16px; }
+    .badge { display: inline-block; font-size: 14px; font-weight: 800; letter-spacing: 0.2em; text-transform: uppercase; padding: 8px 16px; border: 1px solid #333; margin-bottom: 48px; }
+    .slide-label { font-size: 10px; font-weight: 700; letter-spacing: 0.3em; text-transform: uppercase; color: #6fcf6f; margin-bottom: 32px; }
+    .hero-org { font-size: 42px; font-weight: 200; line-height: 1.2; margin-bottom: 16px; letter-spacing: -0.02em; }
+    .hero-tagline { font-size: 20px; font-weight: 300; color: #888; line-height: 1.5; max-width: 600px; }
+    .hero-desc { font-size: 14px; color: #555; margin-top: 24px; max-width: 500px; line-height: 1.7; }
+    .slide-title { font-size: 36px; font-weight: 200; margin-bottom: 40px; letter-spacing: -0.01em; }
+    .slide-body { font-size: 16px; color: #aaa; line-height: 1.8; max-width: 600px; margin-bottom: 40px; }
+    .point-item { display: flex; align-items: flex-start; gap: 16px; padding: 16px 0; border-bottom: 1px solid #1a1a1a; font-size: 18px; font-weight: 300; line-height: 1.5; }
+    .point-item:last-child { border-bottom: none; }
+    .point-marker { flex-shrink: 0; width: 8px; height: 8px; background: #fff; border-radius: 50%; margin-top: 8px; }
+    .point-marker.accent { background: #6fcf6f; }
+    .why-item { display: flex; align-items: flex-start; gap: 24px; padding: 20px 0; border-bottom: 1px solid #1a1a1a; }
+    .why-item:last-child { border-bottom: none; }
+    .why-num { font-size: 12px; font-weight: 700; color: #6fcf6f; letter-spacing: 0.1em; flex-shrink: 0; margin-top: 4px; }
+    .why-item span:last-child { font-size: 17px; font-weight: 300; line-height: 1.5; }
+    .invest-price { font-size: 48px; font-weight: 200; color: #6fcf6f; margin-bottom: 8px; }
+    .invest-timeline { font-size: 20px; color: #888; font-weight: 300; margin-bottom: 48px; }
+    .invest-cta { font-size: 18px; font-weight: 300; color: #aaa; line-height: 1.7; max-width: 500px; padding: 32px; border: 1px solid #222; }
+    @media print {
+      .slide { padding: 60px; }
+      .slide-footer { bottom: 24px; left: 60px; right: 60px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="slide">
+    <div class="badge">ECODIA</div>
+    <h1 class="hero-org">Bush Heritage Australia</h1>
+    <p class="hero-tagline">A better way to engage your volunteers</p>
+    <p class="hero-desc">Protects 12M+ hectares of Australian landscape. 683+ donors. 4.9 star rating.</p>
+    <div class="slide-footer">Ecodia Pty Ltd &nbsp;|&nbsp; ABN 86 688 476 082 &nbsp;|&nbsp; code@ecodia.au</div>
+  </div>
+
+  <div class="slide">
+    <div class="slide-label">The Problem</div>
+    <h2 class="slide-title">What's broken</h2>
+    <div class="slide-body">Bush Heritage has a strong brand and donor base but no digital volunteer engagement. Field volunteers use basic tools. Donor engagement is email-only.</div>
+    <div class="points-list"><div class="point-item"><span class="point-marker"></span><span>Web-form based volunteer management</span></div><div class="point-item"><span class="point-marker"></span><span>No field reporting app for reserve volunteers</span></div><div class="point-item"><span class="point-marker"></span><span>Donor engagement limited to email newsletters</span></div><div class="point-item"><span class="point-marker"></span><span>No real-time reporting from 12M+ hectares of reserves</span></div></div>
+    <div class="slide-footer">Ecodia Pty Ltd &nbsp;|&nbsp; ABN 86 688 476 082 &nbsp;|&nbsp; code@ecodia.au</div>
+  </div>
+
+  <div class="slide">
+    <div class="slide-label">The Solution</div>
+    <h2 class="slide-title">What we'll build</h2>
+    <div class="slide-body">A field volunteer app with real-time reserve reporting and a donor impact dashboard.</div>
+    <div class="points-list"><div class="point-item"><span class="point-marker accent"></span><span>Field volunteer app with offline capability</span></div><div class="point-item"><span class="point-marker accent"></span><span>Real-time reporting from reserves (species sightings, conditions)</span></div><div class="point-item"><span class="point-marker accent"></span><span>Donor impact dashboard showing tangible outcomes</span></div><div class="point-item"><span class="point-marker accent"></span><span>Volunteer management and event coordination</span></div></div>
+    <div class="slide-footer">Ecodia Pty Ltd &nbsp;|&nbsp; ABN 86 688 476 082 &nbsp;|&nbsp; code@ecodia.au</div>
+  </div>
+
+  <div class="slide">
+    <div class="slide-label">Why Ecodia</div>
+    <h2 class="slide-title">The right team for this</h2>
+    <div class="why-list"><div class="why-item"><span class="why-num">01</span><span>Built Co-Exist - conservation volunteer app</span></div><div class="why-item"><span class="why-num">02</span><span>AI-native operations = faster, more efficient delivery</span></div><div class="why-item"><span class="why-num">03</span><span>Conservation-first dev studio</span></div><div class="why-item"><span class="why-num">04</span><span>Africa wildlife trip builds further conservation credibility</span></div></div>
+    <div class="slide-footer">Ecodia Pty Ltd &nbsp;|&nbsp; ABN 86 688 476 082 &nbsp;|&nbsp; code@ecodia.au</div>
+  </div>
+
+  <div class="slide">
+    <div class="slide-label">Investment</div>
+    <div class="invest-price">$10,000 - $20,000</div>
+    <div class="invest-timeline">6-8 weeks</div>
+    <div class="invest-cta">We'd love to learn about your volunteer and donor engagement challenges.</div>
+    <div class="slide-footer">Ecodia Pty Ltd &nbsp;|&nbsp; ABN 86 688 476 082 &nbsp;|&nbsp; code@ecodia.au</div>
+  </div>
+</body>
+</html>
