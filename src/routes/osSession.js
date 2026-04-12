@@ -6,6 +6,7 @@ const express = require('express')
 const router = express.Router()
 const osSession = require('../services/osSessionService')
 const usageEnergy = require('../services/usageEnergyService')
+const { saveHandoffState } = require('../services/sessionHandoff')
 
 // Send a message to the OS session (response streams via WebSocket)
 router.post('/message', async (req, res, next) => {
@@ -159,6 +160,18 @@ router.post('/upload', async (req, res, next) => {
     const { data } = sb.storage.from('os-attachments').getPublicUrl(slug)
     res.json({ url: data.publicUrl, name, type: contentType, size: buffer.length })
   } catch (err) { next(err) }
+})
+
+// Save session handoff state for restart recovery
+router.post('/save-state', async (req, res, next) => {
+  try {
+    const { current_work, active_plan, tate_last_direction, deliverables_status } = req.body
+    const state = await saveHandoffState({ current_work, active_plan, tate_last_direction, deliverables_status })
+    res.json({ ok: true, saved_at: state.saved_at })
+  } catch (err) {
+    console.error('[OS Session /save-state] Error:', err.message)
+    next(err)
+  }
 })
 
 module.exports = router

@@ -511,7 +511,18 @@ async function _sendMessageImpl(content, opts = {}) {
 
   // Build the custom system prompt (cached per-cwd). This replaces the SDK's
   // default ~5-6k-token scaffolding entirely — see buildCustomSystemPrompt docs.
-  const customSystemPrompt = buildCustomSystemPrompt(cwd)
+  let customSystemPrompt = buildCustomSystemPrompt(cwd)
+
+  // Prepend restart recovery state if a recent handoff snapshot exists
+  try {
+    const { readHandoffState } = require('./sessionHandoff')
+    const recoveryBlock = await readHandoffState()
+    if (recoveryBlock) {
+      customSystemPrompt = recoveryBlock + '\n\n---\n\n' + customSystemPrompt
+    }
+  } catch (err) {
+    logger.warn('Failed to prepend handoff state', { error: err.message })
+  }
 
   const options = {
     cwd,
