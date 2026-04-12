@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pitch Deck - Bush Heritage Australia</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Helvetica Neue', system-ui, -apple-system, Arial, sans-serif; color: #111111; background: #ffffff; }
+    .slide { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 80px 100px 80px; position: relative; page-break-after: always; }
+    .slide::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: #8B6914; }
+    .slide-footer { position: absolute; bottom: 32px; left: 100px; right: 100px; font-size: 10px; color: #999; letter-spacing: 0.1em; text-transform: uppercase; border-top: 1px solid #e8e8e8; padding-top: 16px; display: flex; justify-content: space-between; }
+    .slide-divider { width: 100%; height: 1px; background: linear-gradient(to right, #8B691422, #8B691488, #8B691422); margin: 0; }
+    .section-label { font-size: 11px; font-weight: 700; letter-spacing: 0.35em; text-transform: uppercase; color: #8B6914; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+    .section-label::after { content: ''; flex: 1; height: 1px; background: #e0e0e0; }
+    .slide-title { font-size: 38px; font-weight: 300; margin-bottom: 32px; letter-spacing: -0.02em; color: #111; line-height: 1.2; }
+    .slide-body { font-size: 17px; color: #555; line-height: 1.85; max-width: 640px; margin-bottom: 40px; }
+
+    /* SLIDE 1: Hero */
+    .hero-slide { background: #fafafa; }
+    .badge { display: inline-block; font-size: 12px; font-weight: 800; letter-spacing: 0.25em; text-transform: uppercase; padding: 8px 20px; border: 2px solid #8B6914; color: #8B6914; margin-bottom: 48px; }
+    .hero-prepared { font-size: 13px; font-weight: 500; letter-spacing: 0.15em; text-transform: uppercase; color: #999; margin-bottom: 20px; }
+    .hero-org { font-size: 52px; font-weight: 200; line-height: 1.15; margin-bottom: 20px; letter-spacing: -0.03em; color: #111; }
+    .hero-tagline { font-size: 22px; font-weight: 300; color: #666; line-height: 1.6; max-width: 600px; }
+    .hero-desc { font-size: 15px; color: #888; margin-top: 32px; max-width: 520px; line-height: 1.8; }
+    .hero-date { font-size: 12px; color: #bbb; margin-top: 40px; letter-spacing: 0.1em; }
+
+    /* SLIDE 2: Problem */
+    .point-card { background: #f7f7f7; border-left: 3px solid #ddd; padding: 20px 24px; margin-bottom: 12px; display: flex; align-items: flex-start; gap: 16px; }
+    .point-card p { font-size: 16px; color: #444; line-height: 1.6; font-weight: 400; }
+    .point-icon { color: #cc4444; font-size: 8px; margin-top: 7px; flex-shrink: 0; }
+
+    /* SLIDE 3: Solution */
+    .solution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .solution-card { background: #ffffff; border: 1px solid #e8e8e8; padding: 24px; border-radius: 4px; }
+    .solution-card:hover { border-color: #8B6914; }
+    .solution-num { font-size: 28px; font-weight: 200; color: #8B6914; margin-bottom: 12px; }
+    .solution-card p { font-size: 15px; color: #555; line-height: 1.6; }
+    .impact-box { margin-top: 32px; padding: 24px 28px; background: #8B691408; border-left: 4px solid #8B6914; font-size: 15px; color: #444; line-height: 1.7; }
+    .impact-box strong { color: #8B6914; }
+
+    /* SLIDE 4: Track Record */
+    .work-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 8px; }
+    .work-card { background: #fafafa; border: 1px solid #eee; padding: 28px 24px; border-radius: 4px; position: relative; }
+    .work-card h4 { font-size: 20px; font-weight: 500; color: #111; margin-bottom: 12px; }
+    .work-card p { font-size: 14px; color: #666; line-height: 1.7; }
+    .work-status { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #8B6914; background: #8B691411; padding: 4px 10px; border-radius: 2px; margin-bottom: 16px; }
+    .tech-note { margin-top: 32px; padding: 20px 24px; background: #f5f5f5; border-left: 3px solid #8B6914; font-size: 14px; color: #666; line-height: 1.7; }
+    .tech-note strong { color: #333; }
+
+    /* SLIDE 5: Why Us */
+    .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+    .why-item { display: flex; align-items: flex-start; gap: 20px; padding: 24px 24px 24px 0; border-bottom: 1px solid #eee; }
+    .why-item:nth-child(even) { padding-left: 24px; border-left: 1px solid #eee; }
+    .why-item:last-child, .why-item:nth-last-child(2):nth-child(odd) { border-bottom: none; }
+    .why-num { font-size: 11px; font-weight: 800; color: #8B6914; letter-spacing: 0.1em; flex-shrink: 0; margin-top: 2px; background: #8B691411; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+    .why-item span:last-child { font-size: 16px; font-weight: 400; line-height: 1.6; color: #444; }
+    .cred-section { margin-top: 40px; padding-top: 32px; border-top: 1px solid #eee; }
+    .cred-title { font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #999; margin-bottom: 20px; }
+    .cred-item { display: flex; align-items: flex-start; gap: 14px; padding: 10px 0; font-size: 15px; color: #444; line-height: 1.5; }
+    .cred-check { color: #8B6914; font-size: 14px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+
+    /* SLIDE 6: How We Work */
+    .steps-timeline { position: relative; padding-left: 0; }
+    .step-item { display: flex; align-items: flex-start; gap: 24px; padding: 24px 0; position: relative; }
+    .step-item:not(:last-child) { border-bottom: 1px solid #f0f0f0; }
+    .step-num { font-size: 24px; font-weight: 200; color: #8B6914; flex-shrink: 0; width: 48px; height: 48px; border: 2px solid #8B691422; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+    .step-item p { font-size: 17px; color: #444; line-height: 1.6; padding-top: 10px; }
+
+    /* SLIDE 7: Investment */
+    .invest-slide { background: #fafafa; }
+    .invest-hero { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+    .invest-price { font-size: 56px; font-weight: 200; color: #8B6914; }
+    .invest-timeline { font-size: 18px; color: #888; font-weight: 300; }
+    .invest-detail { margin-top: 24px; margin-bottom: 48px; font-size: 15px; color: #888; line-height: 1.7; max-width: 500px; }
+    .invest-cta { font-size: 18px; font-weight: 400; color: #333; line-height: 1.8; max-width: 560px; padding: 32px; background: #ffffff; border: 2px solid #8B691433; border-radius: 4px; }
+    .invest-cta strong { color: #8B6914; }
+
+    @media print {
+      .slide { padding: 60px 80px; }
+      .slide-footer { bottom: 24px; left: 80px; right: 80px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- SLIDE 1: Title -->
+  <div class="slide hero-slide">
+    <p class="hero-prepared">Prepared for</p>
+    <h1 class="hero-org">Bush Heritage Australia</h1>
+    <p class="hero-tagline">Technology that amplifies your impact</p>
+    <p class="hero-desc">Protecting irreplaceable Australian landscapes. Bush Heritage owns and manages over 1.2 million hectares of ecologically significant land across the country.</p>
+    <p class="hero-date">12 April 2026</p>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 2: Problem -->
+  <div class="slide">
+    <div class="section-label">01 &nbsp; The Problem</div>
+    <h2 class="slide-title">What's holding you back</h2>
+    <div class="slide-body">Managing conservation properties across vast remote landscapes requires coordination that spreadsheets and email cannot deliver. Volunteer land managers, ecological monitoring data, and property management tasks are scattered across disconnected systems.</div>
+    <div class="points-list"><div class="point-card"><div class="point-icon">&#9679;</div><p>Property monitoring data lives in dozens of separate spreadsheets</p></div><div class="point-card"><div class="point-icon">&#9679;</div><p>Volunteer land stewards have no mobile tools for field reporting</p></div><div class="point-card"><div class="point-icon">&#9679;</div><p>Ecological survey results take weeks to reach decision-makers</p></div><div class="point-card"><div class="point-icon">&#9679;</div><p>No unified view of conservation outcomes across all properties</p></div></div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 3: Solution -->
+  <div class="slide">
+    <div class="section-label">02 &nbsp; The Solution</div>
+    <h2 class="slide-title">What we'll build together</h2>
+    <div class="slide-body">A field-ready property management and ecological monitoring platform. Give your land managers mobile tools for real-time reporting, centralise monitoring data, and create a living dashboard of conservation outcomes across every Bush Heritage property.</div>
+    <div class="solution-grid"><div class="solution-card"><div class="solution-num">01</div><p>Mobile field reporting app - photo, GPS, species observations with offline support</p></div><div class="solution-card"><div class="solution-num">02</div><p>Centralised property dashboard showing ecological health across all sites</p></div><div class="solution-card"><div class="solution-num">03</div><p>Volunteer coordination portal with task assignment and completion tracking</p></div><div class="solution-card"><div class="solution-num">04</div><p>Automated reporting - pull monitoring data into quarterly impact reports</p></div><div class="solution-card"><div class="solution-num">05</div><p>Interactive map layer showing property boundaries, surveys, and management zones</p></div><div class="solution-card"><div class="solution-num">06</div><p>Alert system for urgent issues - fire risk, invasive species, access problems</p></div><div class="solution-card"><div class="solution-num">07</div><p>Real-time impact measurement and reporting</p></div></div>
+    <div class="impact-box"><strong>Impact measurement isn't an add-on.</strong> It's built into every feature. Every event, every volunteer hour, every action is tracked and reportable.</div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 4: Track Record -->
+  <div class="slide">
+    <div class="section-label">03 &nbsp; Our Track Record</div>
+    <h2 class="slide-title">Proven delivery in conservation tech</h2>
+    <div class="work-grid"><div class="work-card"><div class="work-status">Live on iOS &amp; Android</div><h4>Co-Exist</h4><p>Conservation volunteer engagement platform with event discovery, check-in, impact tracking, and gamification.</p></div><div class="work-card"><div class="work-status">In Development</div><h4>Roam</h4><p>Location-based travel and discovery app with offline-first architecture for field conditions.</p></div><div class="work-card"><div class="work-status">Production</div><h4>EcodiaOS</h4><p>Autonomous business operating system managing clients, finances, deployments, and operations.</p></div></div>
+    <div class="tech-note"><strong>Built with:</strong> Next.js, React Native, Supabase, Vercel</div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 5: Why Us -->
+  <div class="slide">
+    <div class="section-label">04 &nbsp; Why Ecodia</div>
+    <h2 class="slide-title">The right team for this</h2>
+    <div class="why-grid"><div class="why-item"><span class="why-num">01</span><span>We built Co-Exist for conservation volunteer coordination - same domain, proven delivery</span></div><div class="why-item"><span class="why-num">02</span><span>Our Roam app handles offline-first location-based content - exactly what field work needs</span></div><div class="why-item"><span class="why-num">03</span><span>Fixed-price model means you know the cost before we start</span></div><div class="why-item"><span class="why-num">04</span><span>We build with modern infrastructure that scales from 10 properties to 100</span></div></div>
+    <div class="cred-section"><div class="cred-title">Specifically for Bush Heritage Australia</div><div class="cred-item"><div class="cred-check">&#10003;</div><span>Built offline-first mobile apps (Roam) - essential for remote property management</span></div><div class="cred-item"><div class="cred-check">&#10003;</div><span>Conservation domain expertise from building Co-Exist volunteer platform</span></div><div class="cred-item"><div class="cred-check">&#10003;</div><span>Experience with geospatial data and interactive mapping</span></div><div class="cred-item"><div class="cred-check">&#10003;</div><span>Australian-based, understand the unique challenges of managing vast landscapes</span></div></div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 6: How We Work -->
+  <div class="slide">
+    <div class="section-label">05 &nbsp; How We Work</div>
+    <h2 class="slide-title">From conversation to launch</h2>
+    <div class="steps-timeline"><div class="step-item"><div class="step-num">01</div><div class="step-line"></div><p>Discovery conversation to understand your needs, workflows, and goals</p></div><div class="step-item"><div class="step-num">02</div><div class="step-line"></div><p>Scope and fixed-price proposal within 48 hours</p></div><div class="step-item"><div class="step-num">03</div><div class="step-line"></div><p>Design and build with weekly progress updates</p></div><div class="step-item"><div class="step-num">04</div><div class="step-line"></div><p>Launch, test, and iterate based on real usage</p></div><div class="step-item"><div class="step-num">05</div><div class="step-line"></div><p>Ongoing support and maintenance as needed</p></div></div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+
+  <!-- SLIDE 7: Investment -->
+  <div class="slide invest-slide">
+    <div class="section-label">06 &nbsp; Investment</div>
+    <h2 class="slide-title">Let's make it happen</h2>
+    <div class="invest-hero">
+      <div class="invest-price">$12,000 - $20,000</div>
+      <div class="invest-timeline">6-8 weeks to launch</div>
+    </div>
+    <p class="invest-detail">Fixed price. No hourly surprises. One round of revisions included.</p>
+    <div class="invest-cta">Keen to chat? Reply to this email or text Tate on <strong>0404 247 153</strong>. We'll figure out the best way forward together.</div>
+    <div class="slide-footer"><span>Ecodia Pty Ltd &nbsp;&bull;&nbsp; ABN 86 688 476 082</span><span>code@ecodia.au &nbsp;&bull;&nbsp; ecodia.au</span></div>
+  </div>
+</body>
+</html>
