@@ -893,10 +893,14 @@ async function _sendMessageImpl(content, opts = {}) {
     const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
     logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId, totalTokens })
 
-    // Auto-handover DISABLED — was nuking full session context and replacing it with
-    // a lossy brief summary. SDK compaction (re-enabled above) handles context management
-    // by summarising older messages in-place within the same session, preserving continuity.
-    // The autoHandover() function is kept below for reference but no longer fires.
+    // Auto-handover: when conversation exceeds threshold, generate a handover brief
+    // and start a fresh session. Prevents unbounded context growth which multiplies
+    // token cost on every subsequent turn (resume re-sends full history).
+    const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '250000', 10)
+    if (totalTokens > handoverThreshold && !suppressOutput) {
+      logger.info('OS Session: triggering auto-handover', { totalTokens, threshold: handoverThreshold })
+      autoHandover().catch(err => logger.error('Auto-handover failed', { error: err.message }))
+    }
 
     return {
       sessionId: dbSessionId,
@@ -1072,7 +1076,7 @@ async function autoHandover(recentMessages) {
   handoverInProgress = true
 
   try {
-    logger.info('OS Session: auto-handover triggered (DEPRECATED — SDK compaction handles this)', {
+    logger.info('OS Session: auto-handover triggered', {
       tokens: sessionTokenUsage.input + sessionTokenUsage.output,
     })
 
