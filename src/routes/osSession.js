@@ -8,18 +8,27 @@ const osSession = require('../services/osSessionService')
 const usageEnergy = require('../services/usageEnergyService')
 const { saveHandoffState } = require('../services/sessionHandoff')
 
-// Send a message to the OS session (response streams via WebSocket)
+// Send a message to the OS session.
+// Response streams in real-time via WebSocket (text_delta, tool_use, os-session:complete).
+// The HTTP response returns IMMEDIATELY with { accepted: true } — it does NOT block
+// for the entire agentic loop. This prevents:
+//   1. Frontend hanging for 5-30 minutes on a single await
+//   2. User unable to send follow-up messages while previous is processing
+//   3. "Connection error: Network Error" when HTTP times out on long sessions
+// The frontend relies on WebSocket for the actual conversation flow.
 router.post('/message', async (req, res, next) => {
-  res.setTimeout(1_800_000) // 30 min
   try {
     const { message } = req.body
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'message is required' })
     }
-    // Fire and forget — response streams via WebSocket
-    // But we wait for completion so the HTTP response indicates success
-    const result = await osSession.sendMessage(message)
-    res.json(result)
+    // Return immediately — the real response streams via WebSocket
+    res.json({ accepted: true, status: 'streaming' })
+
+    // Process in background — errors are broadcast via WS, not HTTP
+    osSession.sendMessage(message).catch(err => {
+      console.error('[OS Session /message] Background error:', err.message)
+    })
   } catch (err) {
     console.error('[OS Session /message] Error:', err.message)
     next(err)
