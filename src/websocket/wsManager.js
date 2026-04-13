@@ -29,7 +29,10 @@ function initWS(app, server) {
     }
 
     clients.add(ws)
+    ws._isAlive = true
     logger.info('WS client connected', { userId })
+
+    ws.on('pong', () => { ws._isAlive = true })
 
     ws.on('close', () => {
       clients.delete(ws)
@@ -41,6 +44,22 @@ function initWS(app, server) {
       clients.delete(ws)
     })
   })
+
+  // Ping every 30s — detects dead connections (NAT timeout, proxy drop).
+  // Without this, the server keeps broadcasting to dead sockets and the
+  // client never knows it disconnected (no close event fires).
+  setInterval(() => {
+    for (const ws of clients) {
+      if (!ws._isAlive) {
+        logger.debug('WS client unresponsive — terminating')
+        clients.delete(ws)
+        ws.terminate()
+        continue
+      }
+      ws._isAlive = false
+      ws.ping()
+    }
+  }, 30_000)
 }
 
 function createTicket(userId) {
