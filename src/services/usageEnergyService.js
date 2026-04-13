@@ -222,7 +222,6 @@ async function _doQuotaCheck(account) {
     }
 
     if (resp.status === 401) {
-      logger.warn('quota-check: 401 Unauthorized — token likely expired', { account })
       return
     }
 
