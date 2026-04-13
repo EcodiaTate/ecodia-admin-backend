@@ -987,7 +987,21 @@ async function _sendMessageImpl(content, opts = {}) {
 // Serialized wrapper — all sendMessage calls queue through this so they never
 // race or clobber each other's queries. This prevents scheduler crons, factory
 // completions, and user messages from interrupting each other mid-stream.
+//
+// Priority messages (user-initiated from frontend) skip the queue entirely:
+// they abort the active query, flush the queue, and send immediately.
+// The CC session resumes via session_id so no context is lost.
 async function sendMessage(content, opts = {}) {
+  if (opts.priority && activeQuery) {
+    logger.info('Priority message — aborting active query to deliver immediately')
+    try { activeQuery.close() } catch {}
+    activeQuery = null
+    // Flush the queue — stale system messages shouldn't fire after a user interrupt
+    _sendQueue = Promise.resolve()
+    // Broadcast that the previous stream was interrupted so frontend can finalize it
+    broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true })
+  }
+
   const promise = _sendQueue.then(() => _sendMessageImpl(content, opts))
   // Always chain even on error so the queue doesn't stall
   _sendQueue = promise.catch(() => {})
@@ -1246,4 +1260,28 @@ async function recoverResponse(sinceTs) {
   }
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover }
+// ── Abort — kill the active query immediately ──
+
+async function abort() {
+  if (!activeQuery) {
+    return { aborted: false, reason: 'no_active_query' }
+  }
+  try { activeQuery.close() } catch {}
+  activeQuery = null
+
+  // Clear the send queue so queued messages don't auto-fire
+  _sendQueue = Promise.resolve()
+
+  const session = await getOSSession()
+  if (session) {
+    await updateOSSession(session.id, { status: 'complete' })
+  }
+
+  emitStatus('complete', { sessionId: session?.id, aborted: true })
+  broadcast('os-session:complete', { sessionId: session?.id, code: 0, aborted: true })
+
+  logger.info('OS Session aborted by user')
+  return { aborted: true }
+}
+
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }

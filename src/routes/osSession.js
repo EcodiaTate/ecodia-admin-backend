@@ -25,8 +25,13 @@ router.post('/message', async (req, res, next) => {
     // Return immediately — the real response streams via WebSocket
     res.json({ accepted: true, status: 'streaming' })
 
-    // Process in background — errors are broadcast via WS, not HTTP
-    osSession.sendMessage(message).catch(err => {
+    // Process in background — errors are broadcast via WS, not HTTP.
+    // priority: true means if the OS is mid-stream doing tool calls,
+    // abort it immediately and deliver this message NOW. The session
+    // resumes via session_id so no context is lost — the user's message
+    // just gets seen between turns instead of waiting behind the entire
+    // agentic loop.
+    osSession.sendMessage(message, { priority: true }).catch(err => {
       console.error('[OS Session /message] Background error:', err.message)
     })
   } catch (err) {
@@ -169,6 +174,17 @@ router.post('/upload', async (req, res, next) => {
     const { data } = sb.storage.from('os-attachments').getPublicUrl(slug)
     res.json({ url: data.publicUrl, name, type: contentType, size: buffer.length })
   } catch (err) { next(err) }
+})
+
+// Abort — kill the active query immediately so the user can send a new message
+router.post('/abort', async (_req, res, next) => {
+  try {
+    const result = await osSession.abort()
+    res.json(result)
+  } catch (err) {
+    console.error('[OS Session /abort] Error:', err.message)
+    next(err)
+  }
 })
 
 // Save session handoff state for restart recovery
