@@ -46,6 +46,9 @@ const CHECK_INTERVAL_MS = 30 * 60 * 1000
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 10_000
 
+// Anthropic API base for live token validation
+const ANTHROPIC_API_BASE = 'https://api.anthropic.com'
+
 // ─── State ──────────────────────────────────────────────────────────────────
 
 let _checkTimer = null
@@ -138,6 +141,41 @@ async function _refreshToken(refreshToken, scopes) {
   }
 }
 
+// ─── Live token validation ──────────────────────────────────────────────────
+//
+// "expiresAt is in the future" is NOT proof a token works. The Anthropic server
+// can invalidate a token early (refresh-token rotation race, scope mismatch,
+// account-level revocation) and the SDK's local clock has no idea. We hit a
+// minimal endpoint to confirm the bearer is actually accepted.
+//
+// Uses the OAuth-only model listing endpoint with the bearer — it's free,
+// fast, and returns 401 when the token is dead.
+
+async function _validateAccessToken(accessToken) {
+  try {
+    const resp = await fetch(`${ANTHROPIC_API_BASE}/v1/models?limit=1`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (resp.status === 200) return { valid: true }
+    if (resp.status === 401 || resp.status === 403) {
+      const body = await resp.text().catch(() => '')
+      return { valid: false, status: resp.status, body: body.slice(0, 200) }
+    }
+    // Other statuses (5xx, 429): treat as inconclusive — don't punish a healthy token
+    // for a server hiccup.
+    return { valid: true, inconclusive: true, status: resp.status }
+  } catch (err) {
+    // Network error — inconclusive.
+    return { valid: true, inconclusive: true, error: err.message }
+  }
+}
+
 // ─── Per-account refresh logic ──────────────────────────────────────────────
 
 async function refreshAccount(account, { force = false } = {}) {
@@ -161,8 +199,20 @@ async function refreshAccount(account, { force = false } = {}) {
 
   if (!force && timeUntilExpiry > REFRESH_BUFFER_MS) {
     const hoursLeft = Math.round(timeUntilExpiry / 3_600_000 * 10) / 10
-    logger.debug('Token refresh: token still fresh', { account, hoursLeft })
-    return { skipped: true, reason: 'still_fresh', hoursUntilExpiry: hoursLeft }
+
+    // "expiresAt is in the future" is necessary but not sufficient. Validate the
+    // token actually works against the API — Anthropic can revoke it server-side
+    // (refresh-token rotation race, scope drift) without telling us.
+    const check = await _validateAccessToken(oauth.accessToken)
+    if (check.valid) {
+      logger.debug('Token refresh: token still fresh and validated', { account, hoursLeft })
+      return { skipped: true, reason: 'still_fresh', hoursUntilExpiry: hoursLeft }
+    }
+
+    logger.warn('Token refresh: token claims fresh but API rejected it — forcing refresh', {
+      account, hoursLeft, status: check.status, body: check.body,
+    })
+    // Fall through to refresh path below
   }
 
   // Token needs refresh
@@ -195,6 +245,25 @@ async function refreshAccount(account, { force = false } = {}) {
 
       _writeCredentials(credPath, cred)
 
+      // Validate the new token actually works. The refresh endpoint can return
+      // a 200 with a token that the API still rejects (scope mismatch, account
+      // state, etc). We must not log SUCCESS until we've confirmed end-to-end.
+      const postCheck = await _validateAccessToken(fresh.accessToken)
+      if (!postCheck.valid && !postCheck.inconclusive) {
+        if (!_accountStatus[account]) _accountStatus[account] = {}
+        _accountStatus[account].lastError = `post-refresh validation failed (${postCheck.status})`
+        _accountStatus[account].consecutiveFailures = (_accountStatus[account].consecutiveFailures || 0) + 1
+        logger.error('Token refresh: refreshed but validation failed — token is dead-on-arrival', {
+          account, status: postCheck.status, body: postCheck.body,
+        })
+        return {
+          error: true,
+          isRevoked: false,
+          deadOnArrival: true,
+          message: `Refreshed token rejected by API (${postCheck.status}): ${postCheck.body}`,
+        }
+      }
+
       // Update status
       if (!_accountStatus[account]) _accountStatus[account] = {}
       _accountStatus[account].lastRefresh = now
@@ -207,6 +276,7 @@ async function refreshAccount(account, { force = false } = {}) {
         newExpiresInHours: newHoursLeft,
         attempt,
         gotNewRefreshToken: fresh.refreshToken !== oauth.refreshToken,
+        validated: !postCheck.inconclusive,
       })
 
       return {
@@ -214,6 +284,7 @@ async function refreshAccount(account, { force = false } = {}) {
         expiresAt: fresh.expiresAt,
         expiresInHours: newHoursLeft,
         gotNewRefreshToken: fresh.refreshToken !== oauth.refreshToken,
+        validated: !postCheck.inconclusive,
       }
     } catch (err) {
       lastErr = err
@@ -326,6 +397,7 @@ async function _runCheckCycle() {
     const summary = Object.entries(results).map(([acct, r]) => {
       if (r.skipped) return `${acct}: ${r.reason}${r.hoursUntilExpiry ? ` (${r.hoursUntilExpiry}h left)` : ''}`
       if (r.refreshed) return `${acct}: REFRESHED (${r.expiresInHours}h until next expiry)`
+      if (r.deadOnArrival) return `${acct}: DEAD-ON-ARRIVAL — refreshed but API rejected new token`
       if (r.error) return `${acct}: ERROR ${r.isRevoked ? '(REVOKED)' : ''} — ${r.message?.slice(0, 100)}`
       return `${acct}: unknown`
     }).join(' | ')
@@ -359,10 +431,24 @@ function stop() {
   }
 }
 
+// Public validator — read credentials for an account and check the access token
+// against the live API. Used by the OS session to confirm an empty CLI exit was
+// actually an auth failure (vs some other CLI bug) before paying the cost of a
+// full refresh + retry round-trip.
+async function validateAccount(account) {
+  const result = _readCredentials(account)
+  if (!result) return { valid: false, reason: 'no_credentials' }
+  const token = result.cred?.claudeAiOauth?.accessToken
+  if (!token) return { valid: false, reason: 'no_token' }
+  const check = await _validateAccessToken(token)
+  return check
+}
+
 module.exports = {
   refreshAccount,
   refreshAllAccounts,
   getTokenHealth,
+  validateAccount,
   start,
   stop,
 }
