@@ -1,31 +1,22 @@
-const Anthropic = require('@anthropic-ai/sdk')
-const env = require('../config/env')
+const { spawn } = require('child_process')
 const logger = require('../config/logger')
 const db = require('../config/db')
 
 // ═══════════════════════════════════════════════════════════════════════
-// CLAUDE SERVICE — Direct Anthropic API
+// CLAUDE SERVICE — Uses Claude Code CLI (Max plan)
 //
 // Single LLM layer for all background/service-level AI calls.
-// Uses the same ANTHROPIC_API_KEY as the OS Session.
-// Haiku by default (fast + cheap for mechanical tasks).
-// Pass model: 'claude-sonnet-4-6' for anything needing more reasoning.
+// Calls `claude --print` which uses the Max subscription directly.
+// No API key needed. No separate billing.
+//
+// Previous version used direct Anthropic API (ANTHROPIC_API_KEY).
+// Switched Apr 14 2026 to use Max plan via CLI instead.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Sonnet is the default: strong enough for reasoning, triage, code review.
-// Pass model: 'claude-haiku-4-5-20251001' explicitly for mechanical/high-volume tasks.
-const DEFAULT_MODEL = 'claude-sonnet-4-6'
-const MAX_RETRIES = 3
-const RETRY_BASE_MS = 1000
-
-let _client = null
-function getClient() {
-  if (!_client) {
-    if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set')
-    _client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
-  }
-  return _client
-}
+const DEFAULT_MODEL = 'sonnet'
+const MAX_RETRIES = 2
+const RETRY_BASE_MS = 2000
+const CLI_TIMEOUT_MS = 60_000
 
 // ─── Core call ────────────────────────────────────────────────────────
 
@@ -36,58 +27,77 @@ async function callClaude(messages, {
   maxTokens = 4096,
   temperature = null,
 } = {}) {
-  const client = getClient()
   const start = Date.now()
 
-  // Separate system messages from the array if mixed in
+  // Build a single prompt from messages array
   const systemParts = []
-  const nonSystem = []
+  const conversationParts = []
   for (const m of messages) {
     if (m.role === 'system') systemParts.push(m.content)
-    else nonSystem.push(m)
+    else if (m.role === 'user') conversationParts.push(m.content)
+    else if (m.role === 'assistant') conversationParts.push(`[Previous response]: ${m.content}`)
   }
   if (system) systemParts.unshift(system)
-  const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
 
-  let response
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  const prompt = [
+    ...(systemParts.length ? [`<system>\n${systemParts.join('\n\n')}\n</system>\n`] : []),
+    ...conversationParts,
+  ].join('\n\n')
+
+  // Map model names to CLI model flags
+  const modelMap = {
+    'sonnet': 'sonnet',
+    'claude-sonnet-4-6': 'sonnet',
+    'claude-sonnet-4-20250514': 'sonnet',
+    'haiku': 'haiku',
+    'claude-haiku-4-5-20251001': 'haiku',
+    'opus': 'opus',
+    'claude-opus-4-20250514': 'opus',
+  }
+  const cliModel = modelMap[model] || 'sonnet'
+
+  let content
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      response = await client.messages.create({
-        model,
-        max_tokens: maxTokens,
-        ...(systemPrompt && { system: systemPrompt }),
-        messages: nonSystem,
-        ...(temperature !== null && { temperature }),
+      content = await new Promise((resolve, reject) => {
+        const args = ['--print', '--model', cliModel, '--max-turns', '1', prompt]
+        const child = spawn('claude', args, {
+          timeout: CLI_TIMEOUT_MS,
+          env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'cli' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        child.stdin.end()
+
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', d => { stdout += d })
+        child.stderr.on('data', d => { stderr += d })
+        child.on('close', code => {
+          if (code !== 0) return reject(new Error(`claude CLI exit ${code}: ${stderr.slice(0, 200)}`))
+          if (!stdout.trim()) return reject(new Error('Empty response from claude CLI'))
+          resolve(stdout.trim())
+        })
+        child.on('error', reject)
       })
       break
     } catch (err) {
-      const status = err.status || err.response?.status
-      const retryable = !status || status === 429 || status >= 500
-      if (!retryable || attempt === MAX_RETRIES - 1) throw err
-      const delay = RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 500
-      logger.debug(`Claude retry ${attempt + 1}/${MAX_RETRIES} after ${status || 'error'} (${Math.round(delay)}ms)`, { module })
+      if (attempt === MAX_RETRIES) throw err
+      const delay = RETRY_BASE_MS * Math.pow(2, attempt)
+      logger.debug(`Claude CLI retry ${attempt + 1}/${MAX_RETRIES} (${module})`, { error: err.message })
       await new Promise(r => setTimeout(r, delay))
     }
   }
 
   const durationMs = Date.now() - start
-  const textBlocks = (response.content || []).filter(b => b.type === 'text')
-  if (!textBlocks.length) throw new Error(`Claude returned empty response (module: ${module})`)
-  const content = textBlocks.map(b => b.text).join('\n')
+  logger.debug(`Claude CLI call complete (${module})`, { model: cliModel, durationMs, contentLength: content.length })
 
-  // Track usage in claude_usage table (same table OS Session uses)
-  const inputTokens = response.usage?.input_tokens || 0
-  const outputTokens = response.usage?.output_tokens || 0
+  // Track usage (approximate - CLI doesn't expose token counts)
   db`
     INSERT INTO claude_usage (source, provider, model, input_tokens, output_tokens, week_start)
-    VALUES (${module}, 'anthropic', ${model}, ${inputTokens}, ${outputTokens},
+    VALUES (${module}, 'claude-cli', ${cliModel}, ${Math.ceil(prompt.length / 4)}, ${Math.ceil(content.length / 4)},
             date_trunc('week', now()))
     ON CONFLICT DO NOTHING
   `.catch(() => {})
-
-  if (response.stop_reason === 'max_tokens') {
-    logger.warn(`Claude response truncated (module: ${module})`, { contentLength: content.length })
-  }
 
   return content
 }
@@ -95,12 +105,21 @@ async function callClaude(messages, {
 // ─── JSON helper — parses response, retries once on parse failure ─────
 
 async function callClaudeJSON(messages, opts = {}) {
-  const raw = await callClaude(messages, opts)
+  // Add JSON instruction to improve reliability
+  const augmentedMessages = [...messages]
+  const lastIdx = augmentedMessages.length - 1
+  if (lastIdx >= 0 && augmentedMessages[lastIdx].role === 'user') {
+    augmentedMessages[lastIdx] = {
+      ...augmentedMessages[lastIdx],
+      content: augmentedMessages[lastIdx].content + '\n\nRespond with valid JSON only. No markdown, no explanation.',
+    }
+  }
+
+  const raw = await callClaude(augmentedMessages, opts)
   const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
   try {
     return JSON.parse(cleaned)
   } catch {
-    // Strip any leading/trailing non-JSON prose and retry parse
     const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
     if (jsonMatch) {
       try { return JSON.parse(jsonMatch[0]) } catch {}
