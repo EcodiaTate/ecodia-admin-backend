@@ -1,35 +1,29 @@
-const { spawn } = require('child_process')
 const logger = require('../config/logger')
 const db = require('../config/db')
 
 // ═══════════════════════════════════════════════════════════════════════
-// CLAUDE SERVICE — Uses Claude Code CLI (Max plan)
+// CLAUDE SERVICE — routes through the single OS session subprocess.
 //
-// Single LLM layer for all background/service-level AI calls.
-// Calls `claude --print` which uses the Max subscription directly.
-// No API key needed. No separate billing.
+// History:
+//   * Originally used direct Anthropic API (ANTHROPIC_API_KEY).
+//   * Switched Apr 14 2026 to spawn `claude --print` (Max plan, no API key).
+//   * That caused parallel subprocesses across PM2 workers to race for the
+//     shared OAuth credentials file. Refresh-token rotation invalidated
+//     in-flight tokens → "(processing...)" hangs.
+//   * Now (Apr 14 2026, same day) every background LLM call queues through
+//     osSessionService.sendTask, which serialises them with user chat via
+//     the existing _sendQueue. Exactly one `claude` subprocess lives on
+//     the VPS at any moment. Max plan, no races, no API key.
 //
-// Previous version used direct Anthropic API (ANTHROPIC_API_KEY).
-// Switched Apr 14 2026 to use Max plan via CLI instead.
+// Signature kept identical so callers don't change: callClaude(messages, opts)
+// returns a string; callClaudeJSON returns a parsed object.
 // ═══════════════════════════════════════════════════════════════════════
 
-const DEFAULT_MODEL = 'sonnet'
-const MAX_RETRIES = 2
-const RETRY_BASE_MS = 2000
-const CLI_TIMEOUT_MS = 60_000
-
-// ─── Core call ────────────────────────────────────────────────────────
-
-async function callClaude(messages, {
-  module = 'general',
-  model = DEFAULT_MODEL,
-  system = null,
-  maxTokens = 4096,
-  temperature = null,
-} = {}) {
+async function callClaude(messages, { module: mod = 'general', system = null } = {}) {
   const start = Date.now()
 
-  // Build a single prompt from messages array
+  // Flatten messages into a single prompt. Preserves the old behaviour:
+  // system content goes first, then user/assistant turns in order.
   const systemParts = []
   const conversationParts = []
   for (const m of messages) {
@@ -44,57 +38,20 @@ async function callClaude(messages, {
     ...conversationParts,
   ].join('\n\n')
 
-  // Map model names to CLI model flags
-  const modelMap = {
-    'sonnet': 'sonnet',
-    'claude-sonnet-4-6': 'sonnet',
-    'claude-sonnet-4-20250514': 'sonnet',
-    'haiku': 'haiku',
-    'claude-haiku-4-5-20251001': 'haiku',
-    'opus': 'opus',
-    'claude-opus-4-20250514': 'opus',
-  }
-  const cliModel = modelMap[model] || 'sonnet'
-
-  let content
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      content = await new Promise((resolve, reject) => {
-        const args = ['--print', '--model', cliModel, '--max-turns', '1', prompt]
-        const child = spawn('claude', args, {
-          timeout: CLI_TIMEOUT_MS,
-          env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'cli' },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-        child.stdin.end()
-
-        let stdout = ''
-        let stderr = ''
-        child.stdout.on('data', d => { stdout += d })
-        child.stderr.on('data', d => { stderr += d })
-        child.on('close', code => {
-          if (code !== 0) return reject(new Error(`claude CLI exit ${code}: ${stderr.slice(0, 200)}`))
-          if (!stdout.trim()) return reject(new Error('Empty response from claude CLI'))
-          resolve(stdout.trim())
-        })
-        child.on('error', reject)
-      })
-      break
-    } catch (err) {
-      if (attempt === MAX_RETRIES) throw err
-      const delay = RETRY_BASE_MS * Math.pow(2, attempt)
-      logger.debug(`Claude CLI retry ${attempt + 1}/${MAX_RETRIES} (${module})`, { error: err.message })
-      await new Promise(r => setTimeout(r, delay))
-    }
-  }
+  // Lazy require to avoid circular dependency (osSessionService pulls in
+  // secretSafetyService which may be required before this module is loaded).
+  const osSession = require('./osSessionService')
+  const content = await osSession.sendTask(prompt, { module: mod })
 
   const durationMs = Date.now() - start
-  logger.debug(`Claude CLI call complete (${module})`, { model: cliModel, durationMs, contentLength: content.length })
+  logger.debug(`callClaude complete via OS session (${mod})`, { durationMs, contentLength: content.length })
 
-  // Track usage (approximate - CLI doesn't expose token counts)
+  // Approximate usage tracking. We no longer know the real model — the OS
+  // session picks it. Record a flat "os-session" provider so this stays
+  // informative without lying.
   db`
     INSERT INTO claude_usage (source, provider, model, input_tokens, output_tokens, week_start)
-    VALUES (${module}, 'claude-cli', ${cliModel}, ${Math.ceil(prompt.length / 4)}, ${Math.ceil(content.length / 4)},
+    VALUES (${mod}, 'os-session', 'os-session', ${Math.ceil(prompt.length / 4)}, ${Math.ceil(content.length / 4)},
             date_trunc('week', now()))
     ON CONFLICT DO NOTHING
   `.catch(() => {})
@@ -105,7 +62,6 @@ async function callClaude(messages, {
 // ─── JSON helper — parses response, retries once on parse failure ─────
 
 async function callClaudeJSON(messages, opts = {}) {
-  // Add JSON instruction to improve reliability
   const augmentedMessages = [...messages]
   const lastIdx = augmentedMessages.length - 1
   if (lastIdx >= 0 && augmentedMessages[lastIdx].role === 'user') {
