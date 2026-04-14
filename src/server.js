@@ -234,20 +234,25 @@ server.listen(env.PORT, async () => {
   }
 
   // ── Boot: Workers ─────────────────────────────────────────────────
-  // Workers that have their own PM2 process in ecosystem.config.js are
-  // NOT started here - they'd register duplicate cron jobs.
+  // All LLM-using workers now run inline in ecodia-api. They used to be
+  // separate PM2 processes, but that meant each one spawned its own
+  // `claude` CLI subprocess — multiple processes sharing the single OAuth
+  // credentials file caused refresh-token rotation races that produced
+  // the "(processing...)" chat hangs. Since every background LLM call
+  // now routes through osSessionService.sendTask (single serialised
+  // subprocess), there's no advantage to giving them separate PM2
+  // processes — and the shared-credentials race goes away.
   //
-  // PM2-managed (separate processes, NOT started here):
-  //   gmailPoller, linkedinWorker, financePoller,
-  //   kgEmbeddingWorker, kgConsolidationWorker
-  //
-  // Inline (started here, restart with this process):
-  //   calendarPoller, codebaseIndexWorker, workspacePoller
+  // PM2-managed (network-heavy, no Claude calls): gmailPoller, linkedinWorker
+  // Inline (here): everything else.
 
   const inlineWorkers = [
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
+    { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
+    { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
+    { name: 'financePoller',               path: './workers/financePoller' },
     // Disabled: was running autonomous triage every 2min, burning credits.
     // CEO OS handles all maintenance via scheduler crons now.
     // { name: 'autonomousMaintenanceWorker', path: './workers/autonomousMaintenanceWorker', start: true },

@@ -1407,4 +1407,51 @@ async function abort() {
   return { aborted: true }
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }
+// ─── sendTask — route background AI calls through the OS session ───────────
+//
+// Every non-user-facing Claude call in the codebase used to spawn its own
+// `claude` subprocess via claudeService.callClaude. That meant up to ~15
+// concurrent subprocesses across PM2 workers, all sharing one OAuth credential
+// file. The SDK's auto-refresh races caused refresh-token rotation collisions
+// that invalidated in-flight tokens — the "(processing...)" hangs.
+//
+// sendTask() routes those calls through the same _sendQueue the user's chat
+// uses. Because the queue is serialized, there is at most one `claude`
+// subprocess on the VPS at any moment. User messages (priority:true) preempt
+// tasks; tasks wait their turn. One brain, no races.
+//
+// Signature matches what the old claudeService.callClaude returned: a string.
+// Callers who parse it as JSON keep working. Callers who just wanted a text
+// response keep working. Suppressed output means it doesn't pollute the chat.
+//
+// Timeout: tasks must complete within TASK_TIMEOUT_MS or we bail. The queue
+// itself can't be starved because suppressOutput tasks don't block on user IO.
+const TASK_TIMEOUT_MS = 5 * 60 * 1000  // 5 min — generous for a tool-using turn
+
+async function sendTask(prompt, { module: mod = 'background', timeoutMs = TASK_TIMEOUT_MS } = {}) {
+  // Tag the prompt so the conductor knows this is a background system task,
+  // not user chat. Helps it stay terse and on-topic instead of conversing.
+  const wrapped = `[SYSTEM TASK — ${mod}]\n\n${prompt}\n\n[END SYSTEM TASK — respond with the requested content only, no preamble.]`
+
+  let timer = null
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`sendTask timed out after ${timeoutMs}ms (module=${mod})`)), timeoutMs)
+  })
+
+  try {
+    const result = await Promise.race([
+      sendMessage(wrapped, { suppressOutput: true }),
+      timeout,
+    ])
+    if (timer) clearTimeout(timer)
+    if (!result || typeof result.text !== 'string') {
+      throw new Error('sendTask: OS session returned no text')
+    }
+    return result.text
+  } catch (err) {
+    if (timer) clearTimeout(timer)
+    throw err
+  }
+}
+
+module.exports = { sendMessage, sendTask, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }

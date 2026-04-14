@@ -2,8 +2,10 @@ const logger = require('../config/logger')
 const env = require('../config/env')
 const { recordHeartbeat } = require('./heartbeat')
 
-if (!env.NEO4J_URI || (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY)) {
-  logger.info('KG consolidation worker skipped — NEO4J_URI or ANTHROPIC_API_KEY not set')
+// LLM calls now route through osSessionService.sendTask, so no API key is
+// required at this level — just Neo4j.
+if (!env.NEO4J_URI) {
+  logger.info('KG consolidation worker skipped — NEO4J_URI not set')
   module.exports = {}
 } else {
   const consolidation = require('../services/kgConsolidationService')

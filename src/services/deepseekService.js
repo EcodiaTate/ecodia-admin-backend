@@ -78,11 +78,28 @@ async function callDeepSeek(messages, {
     logger.debug(`KG context injected for ${module} (${kgContext.length} chars)`)
   }
 
-  // ─── 3. EXECUTE: Call Claude ──────────────────────────────────────
-  const { callClaude } = require('./claudeService')
-  const opts = { module, model, temperature }
-  if (maxTokens) opts.maxTokens = maxTokens
-  const content = await callClaude(enrichedMessages, opts)
+  // ─── 3. EXECUTE: Route through the OS session ─────────────────────
+  // Previously spawned its own `claude` CLI via claudeService. With multiple
+  // PM2 workers doing that in parallel they fought over the shared OAuth
+  // credentials file — refresh-token rotation invalidated in-flight tokens
+  // and produced the "(processing...)" hangs. Now every background LLM call
+  // queues through the single OS session subprocess, serialised with user
+  // chat. model/temperature/maxTokens args are accepted for signature
+  // compatibility but ignored — the OS session decides those.
+  const osSession = require('./osSessionService')
+
+  // Flatten the messages array into a single prompt the conductor can read.
+  // System messages become a header, user/assistant turns render as a dialogue.
+  const systemParts = enrichedMessages.filter(m => m.role === 'system').map(m => m.content).filter(Boolean)
+  const dialogue = enrichedMessages
+    .filter(m => m.role !== 'system')
+    .map(m => (m.role === 'assistant' ? `[Previous response]\n${m.content}` : m.content))
+    .join('\n\n')
+  const prompt = systemParts.length
+    ? `${systemParts.join('\n\n')}\n\n---\n\n${dialogue}`
+    : dialogue
+
+  const content = await osSession.sendTask(prompt, { module })
 
   // ─── 4. LOG: Ingest exchange back into KG ─────────────────────────
   if (!skipLogging && kg && env.NEO4J_URI) {
