@@ -53,8 +53,8 @@ const createSessionSchema = z.object({
   triggerRefId: z.string().optional(),
   triggerSource: z.enum(['manual', 'crm_stage', 'kg_insight', 'simula_proposal', 'thymos_incident', 'scheduled', 'cortex', 'self_modification', 'proactive_improvement', 'gmail', 'os-session']).optional(),
   initialPrompt: z.string().min(1),
-  codebaseName: z.string().optional(),
-  workingDir: z.string().optional(),
+  codebaseName: z.string().nullable().optional(),
+  workingDir: z.string().nullable().optional(),
 })
 
 router.post('/sessions', validate(createSessionSchema), async (req, res, next) => {
