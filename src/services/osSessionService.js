@@ -326,6 +326,7 @@ let handoverInProgress = false
 
 // In-memory state
 let activeQuery = null          // the running Query object from the SDK
+let activeQuerySuppressed = false  // true when the current query was started via sendTask / suppressOutput
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
 let _currentProvider = 'claude_max'  // tracks which provider the current session is using
@@ -751,9 +752,10 @@ async function _sendMessageImpl(content, opts = {}) {
   }
 
   try {
-    logger.info('OS Session: calling queryFn...', { promptLength: promptWithMemory.length })
+    logger.info('OS Session: calling queryFn...', { promptLength: promptWithMemory.length, suppressOutput })
     const q = queryFn({ prompt: promptWithMemory, options })
     activeQuery = q
+    activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()
 
     // Stream all messages from the SDK
@@ -953,11 +955,15 @@ async function _sendMessageImpl(content, opts = {}) {
         emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung — switching to ${next.provider}.` })
         return sendMessage(content)
       }
-      // All providers exhausted — report error
+      // All providers exhausted — report error.
+      // Suppressed (background sendTask) paths never broadcast: the caller will
+      // see the thrown error, the user's chat UI stays clean.
       logger.error('OS Session: inactivity timeout, no alternative providers available')
-      emitOutput({ type: 'error', content: 'Session timed out — no response received. All providers may be exhausted.' })
-      emitStatus('error', { error: 'inactivity_timeout' })
-      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      if (!suppressOutput) {
+        emitOutput({ type: 'error', content: 'Session timed out — no response received. All providers may be exhausted.' })
+        emitStatus('error', { error: 'inactivity_timeout' })
+        broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
     }
@@ -982,9 +988,11 @@ async function _sendMessageImpl(content, opts = {}) {
       // Auth was fine (or refresh failed) — this is a real failure, not a success.
       const message = 'Session ended without delivering a response. The CC subprocess may have crashed (check pm2 logs for "claude CLI exit 1") or the model returned nothing.'
       logger.error('OS Session: silent failure not recoverable', { provider: _currentProvider })
-      emitOutput({ type: 'error', content: message })
-      emitStatus('error', { error: 'silent_failure', detail: message })
-      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      if (!suppressOutput) {
+        emitOutput({ type: 'error', content: message })
+        emitStatus('error', { error: 'silent_failure', detail: message })
+        broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
     }
@@ -1092,9 +1100,11 @@ async function _sendMessageImpl(content, opts = {}) {
     // All providers exhausted or non-quota error
     logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, currentProvider: _currentProvider })
 
-    emitOutput({ type: 'error', content: errMsg })
-    emitStatus('error', { error: errMsg })
-    broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+    if (!suppressOutput) {
+      emitOutput({ type: 'error', content: errMsg })
+      emitStatus('error', { error: errMsg })
+      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+    }
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
 
@@ -1116,13 +1126,23 @@ async function _sendMessageImpl(content, opts = {}) {
 // The CC session resumes via session_id so no context is lost.
 async function sendMessage(content, opts = {}) {
   if (opts.priority && activeQuery) {
-    logger.info('Priority message — aborting active query to deliver immediately')
+    // If the task we're about to kill was a suppressed background task
+    // (sendTask), don't broadcast an interrupt to the frontend — the user
+    // was never seeing it, so finalising it as an assistant message would
+    // leak internal work into the chat. This was the source of the
+    // "half-sentences from KG consolidation appear mid-conversation" bug.
+    const wasSuppressed = activeQuerySuppressed
+    logger.info('Priority message — aborting active query to deliver immediately', { wasSuppressed })
     try { activeQuery.close() } catch {}
     activeQuery = null
+    activeQuerySuppressed = false
     // Flush the queue — stale system messages shouldn't fire after a user interrupt
     _sendQueue = Promise.resolve()
-    // Broadcast that the previous stream was interrupted so frontend can finalize it
-    broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true })
+    if (!wasSuppressed) {
+      // Broadcast interrupt only for user-facing streams, so the frontend
+      // can finalise whatever partial content was visible.
+      broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true })
+    }
   }
 
   const promise = _sendQueue.then(() => _sendMessageImpl(content, opts))
