@@ -250,8 +250,12 @@ server.listen(env.PORT, async () => {
     { name: 'calendarPoller',              path: './workers/calendarPoller' },
     { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
     { name: 'workspacePoller',             path: './workers/workspacePoller' },
-    { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
-    { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
+    // Disabled: KG workers were competing for Claude credentials, causing session
+    // drops and race conditions. Replaced with scheduler crons (kg-embedding every
+    // 4h, kg-consolidation every 6h) that fire as prompts to the OS session —
+    // deferrable if busy. See: Apr 14 2026 credential contention incident.
+    // { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
+    // { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
     { name: 'financePoller',               path: './workers/financePoller' },
     // Disabled: was running autonomous triage every 2min, burning credits.
     // CEO OS handles all maintenance via scheduler crons now.
