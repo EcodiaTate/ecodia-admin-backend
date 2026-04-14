@@ -98,6 +98,55 @@ function _writeCredentials(credPath, cred) {
   fs.renameSync(tmpPath, credPath)
 }
 
+// ─── Cross-process credential lock ──────────────────────────────────────────
+//
+// EcodiaOS runs multiple PM2 processes (api, factory, kg-consolidation, etc.)
+// that all spawn the `claude` CLI with the same credentials file. The CLI does
+// its own token refresh ~5 min before expiry. Combined with our 30-min refresh
+// timer, two refreshes can race — and refresh-token rotation invalidates the
+// loser's tokens server-side. That's why "(processing...)" hangs appear in the
+// OS session right after the kg-consolidation cron fires a Claude call.
+//
+// Mitigation: serialize OUR refreshes across processes via an atomic lockfile.
+// `wx` open mode atomically creates the file or fails — we poll until we get it.
+// Stale lock detection (>30s old → assume crashed holder) prevents permanent
+// deadlock if a process dies mid-refresh.
+
+const LOCK_TIMEOUT_MS = 30_000      // assume lock is dead after this
+const LOCK_POLL_MS = 100            // retry interval
+const LOCK_MAX_WAIT_MS = 20_000     // give up acquiring after this
+
+async function _acquireCredLock(credPath) {
+  const lockPath = credPath + '.lock'
+  const start = Date.now()
+  while (Date.now() - start < LOCK_MAX_WAIT_MS) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx')
+      fs.writeSync(fd, String(process.pid))
+      fs.closeSync(fd)
+      return lockPath
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      // Lock exists — check if it's stale (holder may have died)
+      try {
+        const stat = fs.statSync(lockPath)
+        if (Date.now() - stat.mtimeMs > LOCK_TIMEOUT_MS) {
+          logger.warn('Token refresh: stale lock detected — clearing', { lockPath, ageMs: Date.now() - stat.mtimeMs })
+          try { fs.unlinkSync(lockPath) } catch {}
+          continue  // retry acquire
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, LOCK_POLL_MS))
+    }
+  }
+  throw new Error(`Could not acquire credential lock within ${LOCK_MAX_WAIT_MS}ms — another process may be stuck`)
+}
+
+function _releaseCredLock(lockPath) {
+  if (!lockPath) return
+  try { fs.unlinkSync(lockPath) } catch { /* already gone */ }
+}
+
 // ─── Token refresh ──────────────────────────────────────────────────────────
 
 async function _refreshToken(refreshToken, scopes) {
@@ -223,6 +272,44 @@ async function refreshAccount(account, { force = false } = {}) {
     forced: force,
   })
 
+  // Acquire the cross-process credential lock. While we hold it, re-read the
+  // file: if another process refreshed in the meantime (the CLI's own auto-
+  // refresh, another worker, etc.), use ITS new token instead of running our
+  // own refresh — that would invalidate the just-rotated token via the
+  // refresh-token rotation rule and leave both processes broken.
+  let lockPath = null
+  try {
+    lockPath = await _acquireCredLock(credPath)
+  } catch (err) {
+    logger.error('Token refresh: lock acquisition failed', { account, error: err.message })
+    return { error: true, message: err.message }
+  }
+
+  try {
+    const reread = _readCredentials(account)
+    if (reread) {
+      const onDisk = reread.cred?.claudeAiOauth
+      const diskExpiresAt = onDisk?.expiresAt || 0
+      // "Newer" = the on-disk expiresAt advanced by at least a minute since we
+      // first read it. That means somebody else successfully refreshed while we
+      // were waiting on the lock.
+      if (onDisk?.accessToken && diskExpiresAt > expiresAt + 60_000) {
+        const newHoursLeft = Math.round((diskExpiresAt - now) / 3_600_000 * 10) / 10
+        const check = await _validateAccessToken(onDisk.accessToken)
+        if (check.valid) {
+          logger.info('Token refresh: another process already refreshed — using their token', {
+            account, newHoursLeft,
+          })
+          if (!_accountStatus[account]) _accountStatus[account] = {}
+          _accountStatus[account].lastRefresh = now
+          _accountStatus[account].lastError = null
+          _accountStatus[account].consecutiveFailures = 0
+          return { refreshed: true, expiresAt: diskExpiresAt, expiresInHours: newHoursLeft, fromOtherProcess: true }
+        }
+        logger.warn('Token refresh: peer-refreshed token also rejected — falling through to our own refresh', { account })
+      }
+    }
+
   let lastErr = null
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -328,6 +415,9 @@ async function refreshAccount(account, { force = false } = {}) {
   ) + 1
 
   return { error: true, isRevoked: false, message: lastErr?.message }
+  } finally {
+    _releaseCredLock(lockPath)
+  }
 }
 
 // ─── Refresh all configured accounts ────────────────────────────────────────
