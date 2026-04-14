@@ -234,32 +234,24 @@ server.listen(env.PORT, async () => {
   }
 
   // ── Boot: Workers ─────────────────────────────────────────────────
-  // All LLM-using workers now run inline in ecodia-api. They used to be
-  // separate PM2 processes, but that meant each one spawned its own
-  // `claude` CLI subprocess — multiple processes sharing the single OAuth
-  // credentials file caused refresh-token rotation races that produced
-  // the "(processing...)" chat hangs. Since every background LLM call
-  // now routes through osSessionService.sendTask (single serialised
-  // subprocess), there's no advantage to giving them separate PM2
-  // processes — and the shared-credentials race goes away.
+  // DISABLED (2026-04-15): All autonomous workers are off. OS Session is
+  // the ONE brain — it calls worker module functions as tools on-demand
+  // (e.g. run_calendar_poll, run_kg_consolidation) when it decides the
+  // work is needed. Worker source files stay put so OS Session can call
+  // their exported functions directly; nothing loops on its own.
   //
-  // PM2-managed (network-heavy, no Claude calls): gmailPoller, linkedinWorker
-  // Inline (here): everything else.
+  // Logged here only so `workspacePoller` (used on-demand by other code
+  // paths that still require() it) can still be loaded by those callers —
+  // no auto-start happens in either case because `start: true` was never
+  // set on any entry in this list. Kept as a reference surface.
 
   const inlineWorkers = [
-    { name: 'calendarPoller',              path: './workers/calendarPoller' },
-    { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
-    { name: 'workspacePoller',             path: './workers/workspacePoller' },
-    // Disabled: KG workers were competing for Claude credentials, causing session
-    // drops and race conditions. Replaced with scheduler crons (kg-embedding every
-    // 4h, kg-consolidation every 6h) that fire as prompts to the OS session —
-    // deferrable if busy. See: Apr 14 2026 credential contention incident.
+    // { name: 'calendarPoller',              path: './workers/calendarPoller' },
+    // { name: 'codebaseIndexWorker',         path: './workers/codebaseIndexWorker' },
+    // { name: 'workspacePoller',             path: './workers/workspacePoller' },
     // { name: 'kgEmbeddingWorker',           path: './workers/kgEmbeddingWorker' },
     // { name: 'kgConsolidationWorker',       path: './workers/kgConsolidationWorker' },
-    { name: 'financePoller',               path: './workers/financePoller' },
-    // Disabled: was running autonomous triage every 2min, burning credits.
-    // CEO OS handles all maintenance via scheduler crons now.
-    // { name: 'autonomousMaintenanceWorker', path: './workers/autonomousMaintenanceWorker', start: true },
+    // { name: 'financePoller',               path: './workers/financePoller' },
   ]
 
   for (const w of inlineWorkers) {
@@ -274,16 +266,17 @@ server.listen(env.PORT, async () => {
   }
 
   // ── Boot: Scheduler Poller ────────────────────────────────────────
-  // Persistent polling loop for os_scheduled_tasks. The scheduler MCP server
-  // only polls while a Claude Code session is active (stdio process lifetime).
-  // This poller runs 24/7 inside ecodia-api so crons fire even when no session
-  // is active — critical for autonomous operation while Tate is away.
-  try {
-    const schedulerPoller = require('./services/schedulerPollerService')
-    schedulerPoller.start()
-  } catch (err) {
-    logger.warn('Scheduler poller failed to start', { error: err.message })
-  }
+  // DISABLED (2026-04-15): This poller called osSessionService.sendMessage
+  // every 30s, interrupting the SDK mid-stream whenever a frontend user
+  // message was in flight. OS Session must be the ONE brain driving work.
+  // Cron tasks are now triggered on-demand via OS Session tools (e.g.
+  // run_scheduled_task <id>). Re-enable only with a session-busy lock.
+  // try {
+  //   const schedulerPoller = require('./services/schedulerPollerService')
+  //   schedulerPoller.start()
+  // } catch (err) {
+  //   logger.warn('Scheduler poller failed to start', { error: err.message })
+  // }
 
   // ── Boot: Claude Token Refresh ────────────────────────────────────
   // Proactively refreshes OAuth tokens before they expire so the VPS
@@ -297,23 +290,23 @@ server.listen(env.PORT, async () => {
 })
 
 // ── Boot: Auto-wake OS Session ────────────────────────────────────────
-// After restart, wake the OS session so it recovers immediately
-// rather than waiting for the next scheduled task (up to 30 min).
-// Delay 10s to let all services initialize first.
-setTimeout(async () => {
-  try {
-    const osSession = require('./services/osSessionService')
-    logger.info('Auto-waking OS session after restart...')
-    await osSession.sendMessage(
-      'SYSTEM RESTART - You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
-      'You have FULL AUTONOMY. Do NOT wait for Tate. Do NOT ask for approval. Act independently. ' +
-      'Read CLAUDE.md (auto-loaded from cwd). Check kv_store ceo.* keys and ceo_tasks for current priorities. ' +
-      'Pick the highest impact task and DO it. Check schedule_list for healthy crons. ' +
-      'If SMS messages came in while you were down, they are queued - check and respond. ' +
-      'You are the business. Go.'
-    )
-    logger.info('OS session auto-wake complete')
-  } catch (err) {
-    logger.warn('OS session auto-wake failed (may not be configured yet)', { error: err.message })
-  }
-}, 10_000)
+// DISABLED (2026-04-15): This fired an SDK query 10s after every restart,
+// colliding with any frontend message sent during boot. OS Session now
+// wakes on the first real frontend message. Tate's message is the wake.
+// setTimeout(async () => {
+//   try {
+//     const osSession = require('./services/osSessionService')
+//     logger.info('Auto-waking OS session after restart...')
+//     await osSession.sendMessage(
+//       'SYSTEM RESTART - You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
+//       'You have FULL AUTONOMY. Do NOT wait for Tate. Do NOT ask for approval. Act independently. ' +
+//       'Read CLAUDE.md (auto-loaded from cwd). Check kv_store ceo.* keys and ceo_tasks for current priorities. ' +
+//       'Pick the highest impact task and DO it. Check schedule_list for healthy crons. ' +
+//       'If SMS messages came in while you were down, they are queued - check and respond. ' +
+//       'You are the business. Go.'
+//     )
+//     logger.info('OS session auto-wake complete')
+//   } catch (err) {
+//     logger.warn('OS session auto-wake failed (may not be configured yet)', { error: err.message })
+//   }
+// }, 10_000)
