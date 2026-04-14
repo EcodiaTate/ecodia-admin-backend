@@ -601,6 +601,17 @@ async function startSession(session) {
   const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
   delete ccEnv.ANTHROPIC_API_KEY
 
+  // Pre-flight: ensure OAuth tokens are fresh before spawning CLI.
+  // The CLI can refresh tokens itself, but if the token is already expired
+  // and the refresh token is close to expiry, a proactive refresh prevents
+  // "not logged in" failures that waste the entire session.
+  try {
+    const tokenRefresh = require('../services/claudeTokenRefreshService')
+    await tokenRefresh.refreshAllAccounts()
+  } catch (err) {
+    logger.debug('Factory: pre-flight token refresh skipped', { error: err.message })
+  }
+
   // Smart account routing for Factory sessions:
   // If FACTORY_CC_HOME is set, use it as explicit override.
   // Otherwise, use usageEnergyService.getBestProvider() to pick the healthiest account.

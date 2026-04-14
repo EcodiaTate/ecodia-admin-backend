@@ -59,6 +59,11 @@ async function gracefulShutdown(signal) {
     schedulerPoller.stop()
   } catch {}
 
+  try {
+    const tokenRefresh = require('./services/claudeTokenRefreshService')
+    tokenRefresh.stop()
+  } catch {}
+
   // Force-destroy open connections (especially WebSockets) so server.close()
   // doesn't hang waiting for them to end. Without this, PM2 SIGKILLs the
   // process at kill_timeout and sessions that weren't yet marked in DB become orphans.
@@ -269,6 +274,16 @@ server.listen(env.PORT, async () => {
     schedulerPoller.start()
   } catch (err) {
     logger.warn('Scheduler poller failed to start', { error: err.message })
+  }
+
+  // ── Boot: Claude Token Refresh ────────────────────────────────────
+  // Proactively refreshes OAuth tokens before they expire so the VPS
+  // never needs manual `claude /login`. Runs every 30 min.
+  try {
+    const tokenRefresh = require('./services/claudeTokenRefreshService')
+    tokenRefresh.start()
+  } catch (err) {
+    logger.warn('Claude token refresh service failed to start', { error: err.message })
   }
 })
 

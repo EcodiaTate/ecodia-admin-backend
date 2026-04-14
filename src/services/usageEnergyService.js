@@ -222,6 +222,22 @@ async function _doQuotaCheck(account) {
     }
 
     if (resp.status === 401) {
+      // Token expired — trigger proactive refresh instead of silently giving up
+      logger.warn('quota-check: 401 Unauthorized — triggering token refresh', { account })
+      try {
+        const tokenRefresh = require('./claudeTokenRefreshService')
+        const result = await tokenRefresh.refreshAccount(account, { force: true })
+        if (result.refreshed) {
+          logger.info('quota-check: token refreshed after 401 — retrying quota check', { account })
+          // Retry once with fresh token
+          return _doQuotaCheck(account)
+        }
+        if (result.isRevoked) {
+          logger.error('quota-check: REFRESH TOKEN REVOKED — manual login required', { account })
+        }
+      } catch (refreshErr) {
+        logger.warn('quota-check: token refresh failed after 401', { account, error: refreshErr.message })
+      }
       return
     }
 
@@ -437,6 +453,13 @@ async function getEnergy() {
   // Best provider recommendation
   const best = getBestProvider()
 
+  // Token auth health (proactive refresh status)
+  let tokenHealth = null
+  try {
+    const tokenRefresh = require('./claudeTokenRefreshService')
+    tokenHealth = tokenRefresh.getTokenHealth()
+  } catch {}
+
   _cache = {
     // ─── Active account (backwards compat with existing consumers)
     source: active?.source || 'no_data',
@@ -466,6 +489,8 @@ async function getEnergy() {
     isBedrockFallback: best.isBedrockFallback,
     // ─── Self-tracked activity
     turnsThisWeek: selfTracked.turns,
+    // ─── Token auth health
+    tokenHealth,
     // ─── Human-readable summary
     summary: _buildSummary({ acct1, acct2, active, hasRealData, turns: selfTracked.turns, best }),
   }
