@@ -343,25 +343,71 @@ function _isUsageExhausted(text) {
     t.includes('too many requests') || t.includes('quota')
 }
 
-// Detect auth failures that a token refresh might fix
+// Detect auth failures that a token refresh might fix.
+// The Claude CLI is annoying about this — sometimes the message is rich
+// ("Failed to authenticate. API Error: 401 ..."), sometimes it's just
+// "claude CLI exit 1: " with empty stderr. We treat any empty/cryptic
+// CLI exit as *suspect* — the caller will then live-validate the token
+// to confirm before paying for a full refresh round-trip.
 function _isAuthFailure(text) {
   const t = (text || '').toLowerCase()
-  return t.includes('401') || t.includes('unauthorized') || t.includes('not logged in') ||
-    t.includes('invalid token') || t.includes('token expired') || t.includes('authentication') ||
-    t.includes('oauth') && t.includes('error')
+  if (t.includes('401') || t.includes('unauthorized') || t.includes('not logged in') ||
+      t.includes('invalid token') || t.includes('token expired') ||
+      t.includes('invalid authentication') || t.includes('authentication_error') ||
+      t.includes('failed to authenticate') ||
+      (t.includes('oauth') && t.includes('error'))) {
+    return true
+  }
+  return false
 }
 
-// Attempt token refresh for the current provider. Returns true if refresh succeeded.
-async function _tryTokenRefresh() {
+// Heuristic: the SDK / CLI silently failed before producing usable output.
+// Triggers a token validation as a likely root cause — auth is the #1 reason
+// the CLI exits early without explanation on this VPS.
+function _isSuspectSilentFailure({ collectedText, errMsg, hadResultMessage }) {
+  if (errMsg && /claude cli exit \d+\s*:?\s*$/i.test(errMsg)) return true
+  if (errMsg && errMsg.length > 0 && errMsg.length < 5) return true
+  // SDK exited the for-await loop with no result message AND no text — something
+  // ate the response before we could see it. Auth is the prime suspect.
+  if (!hadResultMessage && (!collectedText || collectedText.length === 0)) return true
+  return false
+}
+
+// Attempt token refresh for the current provider. Returns true if refresh
+// produced a working token, false otherwise.
+//
+// `mode` controls how we decide to refresh:
+//   - 'force'     : refresh unconditionally (caller already saw a 401)
+//   - 'validate'  : live-check the current token first; only refresh if API rejects it
+//                   (used for *suspect* failures like empty CLI exits where auth is
+//                   plausible but unconfirmed — avoids wasting a refresh on a healthy
+//                   token when the real bug was something else)
+async function _tryTokenRefresh(mode = 'force') {
   if (_currentProvider === 'bedrock') return false  // Bedrock uses AWS creds, not OAuth
   try {
     const tokenRefresh = require('./claudeTokenRefreshService')
     const account = _currentProvider === 'claude_max_2' ? 'claude_max_2' : 'claude_max'
-    logger.warn('OS Session: auth failure detected — attempting token refresh', { account })
+
+    if (mode === 'validate') {
+      const check = await tokenRefresh.validateAccount(account)
+      if (check.valid) {
+        logger.warn('OS Session: silent CLI failure but token validates — not auth', { account })
+        return false  // not an auth issue; caller should treat as generic error
+      }
+      logger.warn('OS Session: silent CLI failure + token rejected by API — refreshing', {
+        account, status: check.status, reason: check.reason,
+      })
+    } else {
+      logger.warn('OS Session: auth failure detected — forcing token refresh', { account })
+    }
+
     const result = await tokenRefresh.refreshAccount(account, { force: true })
     if (result.refreshed) {
       logger.info('OS Session: token refresh succeeded — retrying', { account })
       return true
+    }
+    if (result.deadOnArrival) {
+      logger.error('OS Session: refresh produced a dead token — refresh_token may be on the way out', { account })
     }
     if (result.isRevoked) {
       logger.error('OS Session: REFRESH TOKEN REVOKED — manual login required', { account })
@@ -682,6 +728,7 @@ async function _sendMessageImpl(content, opts = {}) {
 
   const collectedText = []
   let newCcSessionId = ccSessionId
+  let sawResultMessage = false  // SDK delivered a 'result' terminal message
 
   // Inactivity timeout: if the SDK produces no messages for 90 seconds, abort.
   // This catches hangs from 429s, network issues, or stuck SDK state.
@@ -825,6 +872,7 @@ async function _sendMessageImpl(content, opts = {}) {
 
           // ─── Result — session complete, capture final usage ───
           case 'result': {
+            sawResultMessage = true
             if (msg.usage) {
               // result.usage is cumulative — use only for the threshold/compaction check,
               // not for logging (individual turns already logged in 'assistant' case above)
@@ -914,6 +962,33 @@ async function _sendMessageImpl(content, opts = {}) {
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
     }
 
+    // Silent failure detection — the SDK can exit the for-await loop cleanly
+    // without ever delivering a 'result' message OR any text. Most common cause
+    // on this VPS: claude CLI exits with code 1 due to a 401, taking the SDK's
+    // pipe down with it. The SDK emits an empty/missing terminal frame, our loop
+    // exits, and the user sees "(processing...)" forever.
+    //
+    // Detect that case and (a) try to recover via validate-mode token refresh,
+    // (b) if recovery fails, surface a real error to the frontend.
+    if (!sawResultMessage && collectedText.length === 0 && !opts._silentRetried) {
+      logger.warn('OS Session: SDK loop ended with no result and no text — checking auth', {
+        provider: _currentProvider,
+      })
+      const refreshed = await _tryTokenRefresh('validate')
+      if (refreshed) {
+        ccSessionId = null  // force fresh CC session against new token
+        return sendMessage(content, { ...opts, _silentRetried: true })
+      }
+      // Auth was fine (or refresh failed) — this is a real failure, not a success.
+      const message = 'Session ended without delivering a response. The CC subprocess may have crashed (check pm2 logs for "claude CLI exit 1") or the model returned nothing.'
+      logger.error('OS Session: silent failure not recoverable', { provider: _currentProvider })
+      emitOutput({ type: 'error', content: message })
+      emitStatus('error', { error: 'silent_failure', detail: message })
+      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
+    }
+
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })
@@ -982,14 +1057,22 @@ async function _sendMessageImpl(content, opts = {}) {
       return sendMessage(content, { ...opts, _staleCleaned: true })
     }
 
-    // Auth failure — try token refresh before giving up or switching providers
-    if (!opts._authRefreshed && _isAuthFailure(errMsg)) {
-      const refreshed = await _tryTokenRefresh()
-      if (refreshed) {
-        ccSessionId = null  // fresh session after token refresh
-        return sendMessage(content, { ...opts, _authRefreshed: true })
+    // Auth failure — try token refresh before giving up or switching providers.
+    // Two paths: (a) explicit auth signal in errMsg → force refresh,
+    //            (b) suspect silent CLI exit → live-validate first, refresh only if dead.
+    if (!opts._authRefreshed) {
+      const explicit = _isAuthFailure(errMsg)
+      const suspect = !explicit && _isSuspectSilentFailure({
+        collectedText, errMsg, hadResultMessage: sawResultMessage,
+      })
+      if (explicit || suspect) {
+        const refreshed = await _tryTokenRefresh(explicit ? 'force' : 'validate')
+        if (refreshed) {
+          ccSessionId = null  // fresh session after token refresh
+          return sendMessage(content, { ...opts, _authRefreshed: true })
+        }
+        // Refresh failed — fall through to exhaustion/provider switching logic
       }
-      // Refresh failed — fall through to exhaustion/provider switching logic
     }
 
     const exhausted = _isUsageExhausted(errMsg)
