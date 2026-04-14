@@ -1526,9 +1526,105 @@ async function boot() {
         logger.warn(`[factoryRunner] resumeSession failed for ${data.sessionId}`, { error: err.message })
       }
     },
+
+    [bridge.CHANNELS.BG_DISPATCH]: async (data) => {
+      // Short fire-and-forget LLM jobs. Each spawns its OWN claude subprocess
+      // using the background credentials dir — never touches the chat OAuth
+      // file. Multiple concurrent jobs are fine; they share the dir but the
+      // CLI's own auto-refresh within one dir is the only risk, and since
+      // this dir is dedicated to background work there's nothing for chat
+      // to race with.
+      runBackgroundJob(data).catch(err => {
+        logger.warn('[factoryRunner] background job handler crashed', { jobId: data?.jobId, error: err.message })
+      })
+    },
   })
 
   logger.info('[factoryRunner] Factory runner ready — listening for session requests')
+}
+
+// ─── Background LLM job execution ─────────────────────────────────────
+//
+// Runs a short one-shot prompt through `claude --print`, using the
+// dedicated background credentials dir. This path is explicitly NOT the
+// long-running persistent session machinery — it's fire-and-forget for
+// KG consolidation, gmail triage, goal scoring, etc.
+//
+// Credentials:  CLAUDE_CONFIG_DIR_BG (recommended) or CLAUDE_CONFIG_DIR_2
+//               or $HOME/.claude-bg. Never the chat dir ~/.claude.
+// Prompt is piped via stdin to avoid argv length limits for long prompts.
+
+const os = require('os')
+const path = require('path')
+
+function _getBackgroundConfigDir() {
+  if (env.CLAUDE_CONFIG_DIR_BG) return env.CLAUDE_CONFIG_DIR_BG
+  if (env.CLAUDE_CONFIG_DIR_2) return env.CLAUDE_CONFIG_DIR_2
+  return path.join(os.homedir(), '.claude-bg')
+}
+
+async function runBackgroundJob({ jobId, prompt, module: mod = 'background', timeoutMs }) {
+  if (!jobId || !prompt) {
+    logger.warn('[factoryRunner] background job missing jobId or prompt', { jobId, hasPrompt: !!prompt })
+    return
+  }
+
+  const configDir = _getBackgroundConfigDir()
+  const start = Date.now()
+  const hardTimeout = Math.max(30_000, Math.min(timeoutMs || 0, 10 * 60_000))  // clamp 30s-10min
+
+  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8', CLAUDE_CONFIG_DIR: configDir }
+  delete ccEnv.ANTHROPIC_API_KEY   // force OAuth path — no silent billing to API wallet
+
+  const args = ['--print', '--model', 'sonnet', '--max-turns', '1']
+
+  let proc
+  let stdout = ''
+  let stderr = ''
+  let timedOut = false
+
+  const done = (result) => {
+    try { bridge.publishBackgroundComplete(jobId, result) } catch (err) {
+      logger.warn('[factoryRunner] publishBackgroundComplete failed', { jobId, error: err.message })
+    }
+    const durationMs = Date.now() - start
+    logger.debug(`[factoryRunner] background job complete (${mod})`, { jobId, ok: result.ok, durationMs })
+  }
+
+  try {
+    proc = spawn(CC_CLI, args, { env: ccEnv, stdio: ['pipe', 'pipe', 'pipe'] })
+    proc.stdin.write(prompt)
+    proc.stdin.end()
+
+    proc.stdout.on('data', d => { stdout += d })
+    proc.stderr.on('data', d => { stderr += d })
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { proc.kill('SIGTERM') } catch {}
+    }, hardTimeout)
+
+    proc.on('close', code => {
+      clearTimeout(timer)
+      if (timedOut) {
+        done({ ok: false, error: `background job timed out after ${hardTimeout}ms` })
+        return
+      }
+      if (code !== 0) {
+        const msg = stderr.trim() || `claude CLI exited ${code}`
+        done({ ok: false, error: msg.slice(0, 500) })
+        return
+      }
+      done({ ok: true, text: stdout.trim() })
+    })
+
+    proc.on('error', err => {
+      clearTimeout(timer)
+      done({ ok: false, error: `spawn failed: ${err.message}` })
+    })
+  } catch (err) {
+    done({ ok: false, error: `background job setup failed: ${err.message}` })
+  }
 }
 
 boot().catch(err => {

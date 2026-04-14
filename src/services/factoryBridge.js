@@ -27,6 +27,12 @@ const CHANNELS = {
   SESSION_SEND: 'factory:session:send',
   SESSION_STOP: 'factory:session:stop',
   SESSION_RESUME: 'factory:session:resume',
+  // Background LLM jobs — short fire-and-forget prompts for KG consolidation,
+  // gmail triage, goal scoring, etc. Runs on the factory process using its
+  // OWN credentials dir (CLAUDE_CONFIG_DIR_2) so it can never race ecodia-api
+  // chat for the chat OAuth credentials.
+  BG_DISPATCH: 'factory:background:dispatch',
+  BG_COMPLETE: 'factory:background:complete',
 }
 
 // ─── Publisher (used by both processes) ─────────────────────────────
@@ -57,6 +63,68 @@ function publishStopSession(sessionId) {
 
 function publishResumeSession(sessionId, message) {
   return publish(CHANNELS.SESSION_RESUME, { sessionId, message })
+}
+
+// ─── Background LLM job dispatch (api → factory, then factory → api) ──
+//
+// API side calls runBackgroundJob() to fire a short prompt at the factory.
+// Factory executes it on its own subprocess with its own credentials dir
+// (CLAUDE_CONFIG_DIR_2) and publishes the result on BG_COMPLETE keyed by
+// the jobId we generated here. We await that completion in an in-memory
+// promise map.
+//
+// This is the ONLY path non-chat LLM calls should take now. All old direct
+// `spawn('claude', ...)` paths (claudeService, deepseekService) route here.
+
+const crypto = require('crypto')
+const _pendingBgJobs = new Map()  // jobId → { resolve, reject, timer }
+let _bgCompleteSubscribed = false
+
+function _ensureBgCompleteSubscription() {
+  if (_bgCompleteSubscribed) return
+  _bgCompleteSubscribed = true
+  subscribe(CHANNELS.BG_COMPLETE, (payload) => {
+    const entry = _pendingBgJobs.get(payload.jobId)
+    if (!entry) return  // unknown — may have already timed out
+    _pendingBgJobs.delete(payload.jobId)
+    clearTimeout(entry.timer)
+    if (payload.ok) entry.resolve(payload.text || '')
+    else entry.reject(new Error(payload.error || 'background job failed'))
+  })
+}
+
+/**
+ * Dispatch a short LLM prompt to the factory and await the result.
+ * @param {string} prompt — single flat prompt string
+ * @param {object} opts
+ * @param {string} opts.module — tag for logging/usage tracking (default 'background')
+ * @param {number} opts.timeoutMs — default 5 min
+ * @returns {Promise<string>} the model's text response
+ */
+function runBackgroundJob(prompt, { module: mod = 'background', timeoutMs = 5 * 60 * 1000 } = {}) {
+  _ensureBgCompleteSubscription()
+  const jobId = crypto.randomUUID()
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _pendingBgJobs.delete(jobId)
+      reject(new Error(`background job ${jobId} (${mod}) timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    _pendingBgJobs.set(jobId, { resolve, reject, timer })
+
+    const published = publish(CHANNELS.BG_DISPATCH, { jobId, prompt, module: mod, timeoutMs })
+    if (!published) {
+      clearTimeout(timer)
+      _pendingBgJobs.delete(jobId)
+      reject(new Error('background job dispatch failed — no Redis connection'))
+    }
+  })
+}
+
+// Factory-side companion: publish the result of a completed background job
+function publishBackgroundComplete(jobId, { ok, text, error } = {}) {
+  return publish(CHANNELS.BG_COMPLETE, { jobId, ok: !!ok, text: text || '', error: error || null })
 }
 
 // ─── Factory-side: publish completions, status, WS relay ────────────
@@ -233,6 +301,8 @@ module.exports = {
   publishSessionComplete,
   publishSessionStatus,
   publishWsBroadcast,
+  runBackgroundJob,
+  publishBackgroundComplete,
   subscribe,
   subscribeMany,
   setRunnerHeartbeat,
