@@ -112,4 +112,22 @@ router.post('/linkedin-cookies', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// GET /api/settings/claude-tokens — token health status for both accounts
+router.get('/claude-tokens', async (req, res, next) => {
+  try {
+    const tokenRefresh = require('../services/claudeTokenRefreshService')
+    const health = tokenRefresh.getTokenHealth()
+    res.json(health)
+  } catch (err) { next(err) }
+})
+
+// POST /api/settings/claude-tokens/refresh — force refresh all tokens now
+router.post('/claude-tokens/refresh', async (req, res, next) => {
+  try {
+    const tokenRefresh = require('../services/claudeTokenRefreshService')
+    const results = await tokenRefresh.refreshAllAccounts({ force: true })
+    res.json(results)
+  } catch (err) { next(err) }
+})
+
 module.exports = router

@@ -343,6 +343,36 @@ function _isUsageExhausted(text) {
     t.includes('too many requests') || t.includes('quota')
 }
 
+// Detect auth failures that a token refresh might fix
+function _isAuthFailure(text) {
+  const t = (text || '').toLowerCase()
+  return t.includes('401') || t.includes('unauthorized') || t.includes('not logged in') ||
+    t.includes('invalid token') || t.includes('token expired') || t.includes('authentication') ||
+    t.includes('oauth') && t.includes('error')
+}
+
+// Attempt token refresh for the current provider. Returns true if refresh succeeded.
+async function _tryTokenRefresh() {
+  if (_currentProvider === 'bedrock') return false  // Bedrock uses AWS creds, not OAuth
+  try {
+    const tokenRefresh = require('./claudeTokenRefreshService')
+    const account = _currentProvider === 'claude_max_2' ? 'claude_max_2' : 'claude_max'
+    logger.warn('OS Session: auth failure detected — attempting token refresh', { account })
+    const result = await tokenRefresh.refreshAccount(account, { force: true })
+    if (result.refreshed) {
+      logger.info('OS Session: token refresh succeeded — retrying', { account })
+      return true
+    }
+    if (result.isRevoked) {
+      logger.error('OS Session: REFRESH TOKEN REVOKED — manual login required', { account })
+    }
+    return false
+  } catch (err) {
+    logger.warn('OS Session: token refresh attempt failed', { error: err.message })
+    return false
+  }
+}
+
 // After an exhaustion event on the current provider, mark it rejected and pick the next best.
 // Returns { provider, reason, isBedrockFallback } or null if no alternative.
 function _switchAfterExhaustion() {
@@ -950,6 +980,16 @@ async function _sendMessageImpl(content, opts = {}) {
         await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
       }
       return sendMessage(content, { ...opts, _staleCleaned: true })
+    }
+
+    // Auth failure — try token refresh before giving up or switching providers
+    if (!opts._authRefreshed && _isAuthFailure(errMsg)) {
+      const refreshed = await _tryTokenRefresh()
+      if (refreshed) {
+        ccSessionId = null  // fresh session after token refresh
+        return sendMessage(content, { ...opts, _authRefreshed: true })
+      }
+      // Refresh failed — fall through to exhaustion/provider switching logic
     }
 
     const exhausted = _isUsageExhausted(errMsg)
