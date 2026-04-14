@@ -78,18 +78,15 @@ async function callDeepSeek(messages, {
     logger.debug(`KG context injected for ${module} (${kgContext.length} chars)`)
   }
 
-  // ─── 3. EXECUTE: Route through the OS session ─────────────────────
-  // Previously spawned its own `claude` CLI via claudeService. With multiple
-  // PM2 workers doing that in parallel they fought over the shared OAuth
-  // credentials file — refresh-token rotation invalidated in-flight tokens
-  // and produced the "(processing...)" hangs. Now every background LLM call
-  // queues through the single OS session subprocess, serialised with user
-  // chat. model/temperature/maxTokens args are accepted for signature
-  // compatibility but ignored — the OS session decides those.
-  const osSession = require('./osSessionService')
+  // ─── 3. EXECUTE: Dispatch to ecodia-factory over Redis ────────────
+  // Chat stays in ecodia-api with its own credentials dir (~/.claude).
+  // Background LLM work runs on ecodia-factory with a dedicated credentials
+  // dir (~/.claude-bg). Two dirs = zero chance of OAuth refresh-token
+  // rotation races killing user chat. model/temperature/maxTokens args
+  // accepted for signature compatibility but not used by the factory CLI
+  // path (fixed to sonnet, max-turns 1).
+  const factoryBridge = require('./factoryBridge')
 
-  // Flatten the messages array into a single prompt the conductor can read.
-  // System messages become a header, user/assistant turns render as a dialogue.
   const systemParts = enrichedMessages.filter(m => m.role === 'system').map(m => m.content).filter(Boolean)
   const dialogue = enrichedMessages
     .filter(m => m.role !== 'system')
@@ -99,7 +96,7 @@ async function callDeepSeek(messages, {
     ? `${systemParts.join('\n\n')}\n\n---\n\n${dialogue}`
     : dialogue
 
-  const content = await osSession.sendTask(prompt, { module })
+  const content = await factoryBridge.runBackgroundJob(prompt, { module })
 
   // ─── 4. LOG: Ingest exchange back into KG ─────────────────────────
   if (!skipLogging && kg && env.NEO4J_URI) {

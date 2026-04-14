@@ -350,7 +350,7 @@ function _isUsageExhausted(text) {
 // "claude CLI exit 1: " with empty stderr. We treat any empty/cryptic
 // CLI exit as *suspect* — the caller will then live-validate the token
 // to confirm before paying for a full refresh round-trip.
-function _isAuthFailure(text) {
+function _DEAD_isAuthFailure(text) {
   const t = (text || '').toLowerCase()
   if (t.includes('401') || t.includes('unauthorized') || t.includes('not logged in') ||
       t.includes('invalid token') || t.includes('token expired') ||
@@ -365,7 +365,7 @@ function _isAuthFailure(text) {
 // Heuristic: the SDK / CLI silently failed before producing usable output.
 // Triggers a token validation as a likely root cause — auth is the #1 reason
 // the CLI exits early without explanation on this VPS.
-function _isSuspectSilentFailure({ collectedText, errMsg, hadResultMessage }) {
+function _DEAD_isSuspectSilentFailure({ collectedText, errMsg, hadResultMessage }) {
   if (errMsg && /claude cli exit \d+\s*:?\s*$/i.test(errMsg)) return true
   if (errMsg && errMsg.length > 0 && errMsg.length < 5) return true
   // SDK exited the for-await loop with no result message AND no text — something
@@ -383,7 +383,7 @@ function _isSuspectSilentFailure({ collectedText, errMsg, hadResultMessage }) {
 //                   (used for *suspect* failures like empty CLI exits where auth is
 //                   plausible but unconfirmed — avoids wasting a refresh on a healthy
 //                   token when the real bug was something else)
-async function _tryTokenRefresh(mode = 'force') {
+async function _DEAD_tryTokenRefresh(mode = 'force') {
   if (_currentProvider === 'bedrock') return false  // Bedrock uses AWS creds, not OAuth
   try {
     const tokenRefresh = require('./claudeTokenRefreshService')
@@ -968,29 +968,17 @@ async function _sendMessageImpl(content, opts = {}) {
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
     }
 
-    // Silent failure detection — the SDK can exit the for-await loop cleanly
-    // without ever delivering a 'result' message OR any text. Most common cause
-    // on this VPS: claude CLI exits with code 1 due to a 401, taking the SDK's
-    // pipe down with it. The SDK emits an empty/missing terminal frame, our loop
-    // exits, and the user sees "(processing...)" forever.
-    //
-    // Detect that case and (a) try to recover via validate-mode token refresh,
-    // (b) if recovery fails, surface a real error to the frontend.
-    if (!sawResultMessage && collectedText.length === 0 && !opts._silentRetried) {
-      logger.warn('OS Session: SDK loop ended with no result and no text — checking auth', {
-        provider: _currentProvider,
-      })
-      const refreshed = await _tryTokenRefresh('validate')
-      if (refreshed) {
-        ccSessionId = null  // force fresh CC session against new token
-        return sendMessage(content, { ...opts, _silentRetried: true })
-      }
-      // Auth was fine (or refresh failed) — this is a real failure, not a success.
-      const message = 'Session ended without delivering a response. The CC subprocess may have crashed (check pm2 logs for "claude CLI exit 1") or the model returned nothing.'
-      logger.error('OS Session: silent failure not recoverable', { provider: _currentProvider })
+    // If the SDK for-await loop ended with no result and no text, surface an
+    // explicit error instead of silently writing "complete". We used to try
+    // token-refresh self-heal here; that's gone. The chat lane has dedicated
+    // credentials so auth won't die mid-query in normal operation, and if
+    // it DOES die the right response is "show the user" not "retry silently".
+    if (!sawResultMessage && collectedText.length === 0) {
+      const message = 'Session ended without delivering a response. Check pm2 logs for "claude CLI exit".'
+      logger.error('OS Session: empty SDK stream', { provider: _currentProvider })
       if (!suppressOutput) {
         emitOutput({ type: 'error', content: message })
-        emitStatus('error', { error: 'silent_failure', detail: message })
+        emitStatus('error', { error: 'empty_stream' })
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
@@ -1037,74 +1025,35 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     activeQuery = null
 
-    // Sentinel from the result handler — flags already set, just retry
-    if (err._accountRetry) {
-      return sendMessage(err.message, opts)
-    }
+    const errMsg = err.message || String(err)
 
-    // Stale session ID sentinel — cc_cli_session_id cleared, retry fresh
-    if (err._staleRetry) {
-      return sendMessage(err.message, { ...opts, _staleCleaned: true })
-    }
-
-    const errMsg = err.message || ''
-
-    // Stale resume ID (e.g. after PM2 restart — CC CLI no longer has the session).
-    // Clear the stored session ID and retry as a fresh session, once.
+    // Stale resume ID after PM2 restart — CC CLI no longer has the session.
+    // Clear our stored ID and retry fresh exactly ONCE. This is cheap, safe,
+    // and the only automatic retry we still do. All other failure modes
+    // (auth, network, model errors) surface immediately and visibly.
     if (!opts._staleCleaned && (
       errMsg.includes('No conversation found') ||
-      errMsg.includes('session') && errMsg.includes('not found') ||
+      (errMsg.includes('session') && errMsg.includes('not found')) ||
       errMsg.includes('Invalid session')
     )) {
-      logger.warn('OS Session: stale resume ID detected, starting fresh', { staleCcSessionId: ccSessionId })
+      logger.warn('OS Session: stale resume ID — starting fresh', { staleCcSessionId: ccSessionId })
       ccSessionId = null
-      // Clear the stale cc_cli_session_id in DB so next lookup doesn't try to resume it
       if (session?.id) {
         await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
       }
       return sendMessage(content, { ...opts, _staleCleaned: true })
     }
 
-    // Auth failure — try token refresh before giving up or switching providers.
-    // Two paths: (a) explicit auth signal in errMsg → force refresh,
-    //            (b) suspect silent CLI exit → live-validate first, refresh only if dead.
-    if (!opts._authRefreshed) {
-      const explicit = _isAuthFailure(errMsg)
-      const suspect = !explicit && _isSuspectSilentFailure({
-        collectedText, errMsg, hadResultMessage: sawResultMessage,
-      })
-      if (explicit || suspect) {
-        const refreshed = await _tryTokenRefresh(explicit ? 'force' : 'validate')
-        if (refreshed) {
-          ccSessionId = null  // fresh session after token refresh
-          return sendMessage(content, { ...opts, _authRefreshed: true })
-        }
-        // Refresh failed — fall through to exhaustion/provider switching logic
-      }
-    }
+    // Everything else: log, surface to frontend, persist error state, return.
+    // No silent retries, no auth refresh mid-query (token refresh service
+    // handles that proactively on its own timer), no provider swap ping-pong.
+    // If the user sees an error they can decide what to do; half our past
+    // bugs came from this code trying to self-heal in opaque ways.
+    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack })
 
-    const exhausted = _isUsageExhausted(errMsg)
-    logger.warn('OS Session catch block', { errMsg: errMsg.slice(0, 200), exhausted, currentProvider: _currentProvider })
-
-    // On usage exhaustion — smart fallback to next best provider
-    if (exhausted) {
-      const next = _switchAfterExhaustion()
-      if (next) {
-        ccSessionId = null
-        logger.warn(`OS Session ${_currentProvider} exhausted — switching to ${next.provider}`, { reason: next.reason })
-        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} limit hit — switching to ${next.provider}.` })
-        return sendMessage(content)
-      }
-    }
-
-    // All providers exhausted or non-quota error
-    logger.error('OS Session SDK error', { error: errMsg, stack: err.stack, currentProvider: _currentProvider })
-
-    if (!suppressOutput) {
-      emitOutput({ type: 'error', content: errMsg })
-      emitStatus('error', { error: errMsg })
-      broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
-    }
+    emitOutput({ type: 'error', content: errMsg })
+    emitStatus('error', { error: errMsg })
+    broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
 
@@ -1112,7 +1061,7 @@ async function _sendMessageImpl(content, opts = {}) {
       sessionId: dbSessionId,
       ccCliSessionId: ccSessionId,
       code: 1,
-      text: `Error: ${err.message}`,
+      text: `Error: ${errMsg}`,
     }
   }
 }
@@ -1427,51 +1376,10 @@ async function abort() {
   return { aborted: true }
 }
 
-// ─── sendTask — route background AI calls through the OS session ───────────
-//
-// Every non-user-facing Claude call in the codebase used to spawn its own
-// `claude` subprocess via claudeService.callClaude. That meant up to ~15
-// concurrent subprocesses across PM2 workers, all sharing one OAuth credential
-// file. The SDK's auto-refresh races caused refresh-token rotation collisions
-// that invalidated in-flight tokens — the "(processing...)" hangs.
-//
-// sendTask() routes those calls through the same _sendQueue the user's chat
-// uses. Because the queue is serialized, there is at most one `claude`
-// subprocess on the VPS at any moment. User messages (priority:true) preempt
-// tasks; tasks wait their turn. One brain, no races.
-//
-// Signature matches what the old claudeService.callClaude returned: a string.
-// Callers who parse it as JSON keep working. Callers who just wanted a text
-// response keep working. Suppressed output means it doesn't pollute the chat.
-//
-// Timeout: tasks must complete within TASK_TIMEOUT_MS or we bail. The queue
-// itself can't be starved because suppressOutput tasks don't block on user IO.
-const TASK_TIMEOUT_MS = 5 * 60 * 1000  // 5 min — generous for a tool-using turn
+// Background AI calls no longer route through this service. They go to
+// factoryBridge.runBackgroundJob instead, which dispatches to ecodia-factory
+// over Redis. The factory process uses a dedicated credentials dir so it
+// can never race chat for OAuth. See services/claudeService.js and
+// services/deepseekService.js for the call sites.
 
-async function sendTask(prompt, { module: mod = 'background', timeoutMs = TASK_TIMEOUT_MS } = {}) {
-  // Tag the prompt so the conductor knows this is a background system task,
-  // not user chat. Helps it stay terse and on-topic instead of conversing.
-  const wrapped = `[SYSTEM TASK — ${mod}]\n\n${prompt}\n\n[END SYSTEM TASK — respond with the requested content only, no preamble.]`
-
-  let timer = null
-  const timeout = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`sendTask timed out after ${timeoutMs}ms (module=${mod})`)), timeoutMs)
-  })
-
-  try {
-    const result = await Promise.race([
-      sendMessage(wrapped, { suppressOutput: true }),
-      timeout,
-    ])
-    if (timer) clearTimeout(timer)
-    if (!result || typeof result.text !== 'string') {
-      throw new Error('sendTask: OS session returned no text')
-    }
-    return result.text
-  } catch (err) {
-    if (timer) clearTimeout(timer)
-    throw err
-  }
-}
-
-module.exports = { sendMessage, sendTask, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }
