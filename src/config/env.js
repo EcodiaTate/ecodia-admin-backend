@@ -209,6 +209,10 @@ const envSchema = z.object({
   // OS session auto-falls back to this when account 1 exhausts. Factory sessions use it by default.
   CLAUDE_CONFIG_DIR_1: z.string().default(''),  // explicit account 1 dir (leave empty to use default ~/.claude)
   CLAUDE_CONFIG_DIR_2: z.string().default(''),  // account 2 dir — enables auto-failover
+  // Long-lived OAuth tokens from `claude setup-token` (1 year, don't rotate — preferred over CLAUDE_CONFIG_DIR).
+  // When set, the SDK uses these directly and ignores CLAUDE_CONFIG_DIR / .credentials.json files.
+  CLAUDE_CODE_OAUTH_TOKEN_TATE: z.string().default(''),  // tate@ecodia.au
+  CLAUDE_CODE_OAUTH_TOKEN_CODE: z.string().default(''),  // code@ecodia.au
   // Explicit Factory override — takes priority over CLAUDE_CONFIG_DIR_2 for Factory sessions only
   FACTORY_CC_HOME: z.string().default(''),
   // Bedrock fallback — used when BOTH Claude Max accounts are exhausted.

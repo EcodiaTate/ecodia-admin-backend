@@ -40,10 +40,13 @@ async function haikuRespond(systemPrompt, userMessage) {
     // No thinking mode - speed is priority
   }
 
-  // Use the same account as OS session (or account 2 if available for voice)
+  // Voice uses the "code" account so it doesn't compete with OS session.
   const sessionEnv = { ...process.env }
-  if (env.CLAUDE_CONFIG_DIR_2) {
-    // Use account 2 for voice so it doesn't compete with Opus on account 1
+  delete sessionEnv.ANTHROPIC_API_KEY
+  if (env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+    sessionEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+    delete sessionEnv.CLAUDE_CONFIG_DIR
+  } else if (env.CLAUDE_CONFIG_DIR_2) {
     sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
   }
   options.env = sessionEnv

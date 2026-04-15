@@ -622,24 +622,34 @@ async function startSession(session) {
     try {
       const usageEnergy = require('../services/usageEnergyService')
       const best = usageEnergy.getBestProvider()
-      if (best.isBedrockFallback) {
-        // Bedrock fallback for Factory
-        if (env.AWS_ACCESS_KEY_ID) ccEnv.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID
-        if (env.AWS_SECRET_ACCESS_KEY) ccEnv.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY
-        if (env.AWS_REGION) ccEnv.AWS_REGION = env.AWS_REGION
-        ccEnv.CLAUDE_CODE_USE_BEDROCK = '1'
-        logger.info('Factory session using Bedrock fallback', { reason: best.reason })
-      } else if (best.provider === 'claude_max_2' && env.CLAUDE_CONFIG_DIR_2) {
-        ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
-        logger.info('Factory session using account 2', { reason: best.reason })
-      } else if (env.CLAUDE_CONFIG_DIR_1) {
-        ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
-        logger.info('Factory session using account 1', { reason: best.reason })
+      if (best.provider === 'claude_max_2') {
+        if (env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+          ccEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+          delete ccEnv.CLAUDE_CONFIG_DIR
+          logger.info('Factory session using account 2 (OAuth token)', { reason: best.reason })
+        } else if (env.CLAUDE_CONFIG_DIR_2) {
+          ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+          logger.info('Factory session using account 2 (config dir)', { reason: best.reason })
+        }
+      } else {
+        if (env.CLAUDE_CODE_OAUTH_TOKEN_TATE) {
+          ccEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_TATE
+          delete ccEnv.CLAUDE_CONFIG_DIR
+          logger.info('Factory session using account 1 (OAuth token)', { reason: best.reason })
+        } else if (env.CLAUDE_CONFIG_DIR_1) {
+          ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
+          logger.info('Factory session using account 1 (config dir)', { reason: best.reason })
+        }
       }
     } catch (err) {
-      // Fallback to CLAUDE_CONFIG_DIR_2 if energy service unavailable
-      if (env.CLAUDE_CONFIG_DIR_2) ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
-      logger.debug('Factory: energy service unavailable, using CLAUDE_CONFIG_DIR_2 fallback', { error: err.message })
+      // Fallback to account 2 if energy service unavailable
+      if (env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+        ccEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+        delete ccEnv.CLAUDE_CONFIG_DIR
+      } else if (env.CLAUDE_CONFIG_DIR_2) {
+        ccEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+      }
+      logger.debug('Factory: energy service unavailable, using account 2 fallback', { error: err.message })
     }
   }
 
@@ -1569,12 +1579,20 @@ async function runBackgroundJob({ jobId, prompt, module: mod = 'background', tim
     return
   }
 
-  const configDir = _getBackgroundConfigDir()
   const start = Date.now()
   const hardTimeout = Math.max(30_000, Math.min(timeoutMs || 0, 10 * 60_000))  // clamp 30s-10min
 
-  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8', CLAUDE_CONFIG_DIR: configDir }
+  const ccEnv = { ...process.env, LANG: 'en_US.UTF-8' }
   delete ccEnv.ANTHROPIC_API_KEY   // force OAuth path — no silent billing to API wallet
+  // Prefer long-lived OAuth token for background jobs (the "code" account —
+  // separate from chat's "tate" to avoid contention). Falls back to legacy
+  // CLAUDE_CONFIG_DIR_BG if no token set.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+    ccEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+    delete ccEnv.CLAUDE_CONFIG_DIR
+  } else {
+    ccEnv.CLAUDE_CONFIG_DIR = _getBackgroundConfigDir()
+  }
 
   const args = ['--print', '--model', 'sonnet', '--max-turns', '1']
 

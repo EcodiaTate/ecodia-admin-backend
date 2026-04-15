@@ -222,14 +222,26 @@ async function _doQuotaCheck(account) {
     }
 
     if (resp.status === 401) {
-      // Token expired — trigger proactive refresh instead of silently giving up
+      // Long-lived OAuth tokens (from `claude setup-token`) are NOT valid
+      // against raw /v1/messages — they 401 here but still work fine through
+      // the SDK. Treat 401 as "can't read quota headers" (headers are null),
+      // NOT as "token dead". Do not trigger refresh — that clobbers the
+      // long-lived token with rotating-token garbage.
+      const usingLongLived = !!(
+        process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE ||
+        process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+      )
+      if (usingLongLived) {
+        logger.debug('quota-check: 401 with long-lived token — expected, skipping refresh', { account })
+        return
+      }
+      // Legacy rotating-token path: try refresh once.
       logger.warn('quota-check: 401 Unauthorized — triggering token refresh', { account })
       try {
         const tokenRefresh = require('./claudeTokenRefreshService')
         const result = await tokenRefresh.refreshAccount(account, { force: true })
         if (result.refreshed) {
           logger.info('quota-check: token refreshed after 401 — retrying quota check', { account })
-          // Retry once with fresh token
           return _doQuotaCheck(account)
         }
         if (result.isRevoked) {

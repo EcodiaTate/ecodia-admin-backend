@@ -681,11 +681,16 @@ async function _sendMessageImpl(content, opts = {}) {
     }
     const sessionEnv = { ...process.env }
     // CRITICAL: strip ANTHROPIC_API_KEY on OAuth paths. If present, the CLI/SDK
-    // silently prefers it over the OAuth credentials in CLAUDE_CONFIG_DIR and
-    // bills the API wallet instead of Claude Max. Confirmed in memory
-    // project_os_session_mcp_fix_apr2026: "Never set ANTHROPIC_API_KEY".
+    // silently prefers it over OAuth and bills the API wallet instead of Claude Max.
     delete sessionEnv.ANTHROPIC_API_KEY
-    sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+    // Prefer long-lived CLAUDE_CODE_OAUTH_TOKEN_CODE (from `claude setup-token`).
+    // Falls back to CLAUDE_CONFIG_DIR_2-based credentials for legacy compat.
+    if (env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+      sessionEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+      delete sessionEnv.CLAUDE_CONFIG_DIR
+    } else if (env.CLAUDE_CONFIG_DIR_2) {
+      sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_2
+    }
     options.env = sessionEnv
     if (prevProvider !== 'claude_max_2') {
       delete options.resume
@@ -697,9 +702,14 @@ async function _sendMessageImpl(content, opts = {}) {
       ccSessionId = null
     }
     const sessionEnv = { ...process.env }
-    // Same ANTHROPIC_API_KEY strip — see claude_max_2 branch above for rationale.
     delete sessionEnv.ANTHROPIC_API_KEY
-    if (env.CLAUDE_CONFIG_DIR_1) sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
+    // Prefer long-lived CLAUDE_CODE_OAUTH_TOKEN_TATE (from `claude setup-token`).
+    if (env.CLAUDE_CODE_OAUTH_TOKEN_TATE) {
+      sessionEnv.CLAUDE_CODE_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN_TATE
+      delete sessionEnv.CLAUDE_CONFIG_DIR
+    } else if (env.CLAUDE_CONFIG_DIR_1) {
+      sessionEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR_1
+    }
     options.env = sessionEnv
     if (prevProvider && prevProvider !== 'claude_max') {
       delete options.resume
