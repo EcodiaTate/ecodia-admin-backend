@@ -40,9 +40,9 @@ async function saveHandoffState({ current_work, active_plan, tate_last_direction
   }
 
   await db`
-    INSERT INTO kv_store (key, value, updated_at)
-    VALUES (${KV_KEY}, ${JSON.stringify(value)}, now())
-    ON CONFLICT (key) DO UPDATE SET value = ${JSON.stringify(value)}, updated_at = now()
+    INSERT INTO kv_store (key, value)
+    VALUES (${KV_KEY}, ${JSON.stringify(value)})
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
   `
   return value
 }
