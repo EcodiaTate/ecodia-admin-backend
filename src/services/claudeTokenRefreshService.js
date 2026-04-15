@@ -501,6 +501,19 @@ async function _runCheckCycle() {
 function start() {
   if (_checkTimer) return  // already running
 
+  // If long-lived OAuth tokens are in use (from `claude setup-token`), the
+  // refresh service is a no-op — these tokens are valid for ~1 year and
+  // don't rotate. Running refresh anyway causes race conditions where the
+  // rotating-token refresh path writes garbage over the long-lived token.
+  const hasLongLivedTokens = !!(
+    process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE ||
+    process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+  )
+  if (hasLongLivedTokens) {
+    logger.info('Claude token refresh service disabled — long-lived OAuth tokens detected')
+    return
+  }
+
   logger.info('Claude token refresh service starting', {
     intervalMinutes: CHECK_INTERVAL_MS / 60_000,
     bufferHours: REFRESH_BUFFER_MS / 3_600_000,
