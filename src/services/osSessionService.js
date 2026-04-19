@@ -894,6 +894,56 @@ async function _sendMessageImpl(content, opts = {}) {
   let newCcSessionId = ccSessionId
   let sawResultMessage = false  // SDK delivered a 'result' terminal message
 
+  // ─── Per-tool watchdog ─────────────────────────────────────────────────
+  // An MCP server can crash mid-tool-call (stdio pipe breaks, process dies,
+  // remote API hangs). When that happens the SDK sits waiting for a
+  // tool_result that will never arrive — the inactivity timer doesn't fire
+  // because the SDK is still receiving its own internal heartbeats.
+  //
+  // Track every tool_use id we see in assistant messages; clear on matching
+  // tool_result. If a tool sits outstanding past PER_TOOL_TIMEOUT_MS, treat
+  // it as a hung MCP and abort the whole query — the outer retry / account-
+  // switch logic then takes over.
+  const PER_TOOL_TIMEOUT_MS = 60 * 1000
+  const _toolStartedAt = new Map()    // tool_use_id -> Date.now()
+  let _toolWatchdog = null
+  let _toolWatchdogAborted = false
+  const _scheduleToolWatchdog = () => {
+    if (_toolWatchdog) clearTimeout(_toolWatchdog)
+    // Find the oldest outstanding tool. If it's older than the timeout,
+    // fire immediately; otherwise schedule for the remaining time.
+    if (_toolStartedAt.size === 0) return
+    const now = Date.now()
+    let oldest = Infinity
+    let oldestId = null
+    for (const [id, startedAt] of _toolStartedAt) {
+      if (startedAt < oldest) { oldest = startedAt; oldestId = id }
+    }
+    const age = now - oldest
+    const remaining = Math.max(0, PER_TOOL_TIMEOUT_MS - age)
+    _toolWatchdog = setTimeout(() => {
+      const ageSec = Math.round((Date.now() - oldest) / 1000)
+      logger.error('OS Session: tool watchdog fired — tool outstanding past timeout, aborting query', {
+        tool_use_id: oldestId, ageSec, outstanding: _toolStartedAt.size,
+      })
+      _toolWatchdogAborted = true
+      if (activeQuery) {
+        try { activeQuery.close() } catch {}
+        activeQuery = null
+      }
+    }, remaining)
+  }
+  const _markToolStarted = (id) => {
+    if (!id) return
+    _toolStartedAt.set(id, Date.now())
+    _scheduleToolWatchdog()
+  }
+  const _markToolCompleted = (id) => {
+    if (!id) return
+    _toolStartedAt.delete(id)
+    _scheduleToolWatchdog()
+  }
+
   // Inactivity timeout: if the SDK produces no messages for 90 seconds, abort.
   // This catches hangs from 429s, network issues, or stuck SDK state.
   // 90s is generous enough for slow tool calls but catches silent hangs quickly.
@@ -979,6 +1029,8 @@ async function _sendMessageImpl(content, opts = {}) {
             if (!Array.isArray(content)) break
             for (const block of content) {
               if (block.type === 'tool_result') {
+                // Clear the watchdog for this tool_use_id — it completed.
+                _markToolCompleted(block.tool_use_id)
                 // Extract readable result text (truncate large blobs)
                 let resultText = ''
                 if (typeof block.content === 'string') {
@@ -1023,9 +1075,14 @@ async function _sendMessageImpl(content, opts = {}) {
               if (!suppressOutput) emitOutput({ type: 'assistant_text', content: safeText })
             }
 
+            // Track tool_use starts for the per-tool watchdog, regardless
+            // of suppressOutput — we still want to protect against MCP hangs
+            // on background turns.
+            const toolUses = blocks.filter(b => b.type === 'tool_use')
+            for (const t of toolUses) _markToolStarted(t.id)
+
             if (!suppressOutput) {
               // Also broadcast tool_use blocks so frontend knows about tool calls
-              const toolUses = blocks.filter(b => b.type === 'tool_use')
               if (toolUses.length > 0) {
                 emitOutput({
                   type: 'tool_use',
@@ -1136,39 +1193,37 @@ async function _sendMessageImpl(content, opts = {}) {
       }
     }
 
-    // Session complete — clear inactivity timer and refresh real usage %
+    // Session complete — clear timers and refresh real usage %
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
+    if (_toolWatchdog) clearTimeout(_toolWatchdog)
     activeQuery = null
 
-    // If the loop ended due to inactivity timeout (not a normal completion),
-    // treat it as a hang and try switching accounts. Direct-call _sendMessageImpl
-    // (NOT sendMessage) — we're already inside the serialized queue, so going
-    // through the queue again would deadlock. Depth-guarded to prevent the
-    // recursion bomb: if the fallback also hangs, we surface an error instead
-    // of re-retrying forever and blowing the stack.
-    if (_inactivityAborted) {
+    // If the loop ended due to inactivity timeout or a hung tool call,
+    // treat it as a hang and try switching accounts. Direct-call
+    // _sendMessageImpl (NOT sendMessage) — we're already inside the
+    // serialized queue, so going through the queue again would deadlock.
+    // Depth-guarded to prevent the recursion bomb.
+    if (_inactivityAborted || _toolWatchdogAborted) {
+      const hangReason = _toolWatchdogAborted ? 'tool_watchdog' : 'inactivity_timeout'
       const next = _switchAfterExhaustion()
       if (next && retryDepth < MAX_RETRY_DEPTH) {
         ccSessionId = null
-        logger.warn(`OS Session: inactivity timeout — switching from ${_currentProvider} to ${next.provider}`, { retryDepth })
-        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung — switching to ${next.provider}.` })
+        logger.warn(`OS Session: ${hangReason} — switching from ${_currentProvider} to ${next.provider}`, { retryDepth })
+        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung (${hangReason}) — switching to ${next.provider}.` })
         return _sendMessageImpl(content, { ...opts, _retryDepth: retryDepth + 1 })
       }
       if (next && retryDepth >= MAX_RETRY_DEPTH) {
-        logger.error('OS Session: inactivity timeout at max retry depth — giving up', { retryDepth, provider: _currentProvider })
+        logger.error(`OS Session: ${hangReason} at max retry depth — giving up`, { retryDepth, provider: _currentProvider })
       }
-      // All providers exhausted — report error.
-      // Suppressed (background sendTask) paths never broadcast: the caller will
-      // see the thrown error, the user's chat UI stays clean.
-      logger.error('OS Session: inactivity timeout, no alternative providers available')
+      logger.error(`OS Session: ${hangReason}, no alternative providers available`)
       if (!suppressOutput) {
-        emitOutput({ type: 'error', content: 'Session timed out — no response received. All providers may be exhausted.' })
-        emitStatus('error', { error: 'inactivity_timeout' })
+        emitOutput({ type: 'error', content: `Session hung (${hangReason}). All providers may be exhausted.` })
+        emitStatus('error', { error: hangReason })
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
-      _recordTurnOutcome(false, 'inactivity_timeout')
-      return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
+      _recordTurnOutcome(false, hangReason)
+      return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${hangReason}` }
     }
 
     // If the SDK for-await loop ended with no result and no text, surface an
@@ -1267,6 +1322,7 @@ async function _sendMessageImpl(content, opts = {}) {
 
   } catch (err) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
+    if (_toolWatchdog) clearTimeout(_toolWatchdog)
     activeQuery = null
 
     // ─── _accountRetry sentinel (thrown from result handler at line ~932) ───
