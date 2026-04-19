@@ -266,17 +266,29 @@ server.listen(env.PORT, async () => {
   }
 
   // ── Boot: Scheduler Poller ────────────────────────────────────────
-  // DISABLED (2026-04-15): This poller called osSessionService.sendMessage
-  // every 30s, interrupting the SDK mid-stream whenever a frontend user
-  // message was in flight. OS Session must be the ONE brain driving work.
-  // Cron tasks are now triggered on-demand via OS Session tools (e.g.
-  // run_scheduled_task <id>). Re-enable only with a session-busy lock.
-  // try {
-  //   const schedulerPoller = require('./services/schedulerPollerService')
-  //   schedulerPoller.start()
-  // } catch (err) {
-  //   logger.warn('Scheduler poller failed to start', { error: err.message })
-  // }
+  // Re-enabled 2026-04-20 with:
+  //   - session-busy gate (checks /api/os-session/status before firing)
+  //   - energy-adjusted cadence (poll interval / scheduleMultiplier)
+  //   - critical-energy deferral (non-essential tasks pushed out 1h)
+  // The original disable reason (mid-stream interruption) is now covered
+  // by the busy gate in schedulerPollerService.isSessionBusy().
+  try {
+    const schedulerPoller = require('./services/schedulerPollerService')
+    schedulerPoller.start()
+  } catch (err) {
+    logger.warn('Scheduler poller failed to start', { error: err.message })
+  }
+
+  // ── Boot: OS Heartbeat ────────────────────────────────────────────
+  // Wakes the OS Session periodically with an open-ended "check in" prompt
+  // when Tate isn't messaging. Makes the OS genuinely autonomous during the
+  // 3-month Africa trip instead of silent until prompted.
+  try {
+    const osHeartbeat = require('./services/osHeartbeatService')
+    osHeartbeat.start()
+  } catch (err) {
+    logger.warn('OS Heartbeat failed to start', { error: err.message })
+  }
 
   // ── Boot: Claude Token Refresh ────────────────────────────────────
   // Proactively refreshes OAuth tokens before they expire so the VPS
