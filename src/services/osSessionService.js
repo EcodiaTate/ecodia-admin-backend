@@ -352,12 +352,33 @@ function _recordTurnOutcome(ok, errorMsg) {
 }
 
 // Detect usage exhaustion / rate limit errors from any error string
+// Detect REAL exhaustion, not casual mentions. The old implementation matched
+// bare "quota" / "weekly" / "resets " substrings which tripped on almost any
+// assistant-generated text mentioning those words (e.g. "let me check the
+// weekly report" or "quota analysis"). That false-positived into Bedrock
+// fallback on healthy accounts.
+//
+// Strict matcher: require either an explicit HTTP status (429), an official
+// Anthropic error code, or a full exhaustion phrase. Single-word matches
+// like "quota" alone are NOT sufficient.
 function _isUsageExhausted(text) {
   const t = (text || '').toLowerCase()
-  return t.includes('429') || t.includes('rate limit') || t.includes('overloaded') ||
-    t.includes('capacity') || t.includes('out of extra usage') || t.includes('out of usage') ||
-    t.includes('weekly') || t.includes('resets ') || t.includes('not logged in') ||
-    t.includes('too many requests') || t.includes('quota')
+  // HTTP 429 always = exhaustion
+  if (/\b429\b/.test(t)) return true
+  // Official Anthropic error codes in their exact shape
+  if (t.includes('rate_limit_error') || t.includes('rate limit exceeded') ||
+      t.includes('too many requests')) return true
+  // Claude Max-specific exhaustion phrases (full sentences, not single words)
+  if (t.includes('out of extra usage') ||
+      t.includes('out of usage') ||
+      t.includes('weekly limit reached') ||
+      t.includes('usage limit reached') ||
+      t.includes('weekly quota exceeded') ||
+      t.includes('monthly quota exceeded')) return true
+  // SDK-surfaced overload from Anthropic's capacity layer
+  if ((t.includes('overloaded') && t.includes('anthropic')) ||
+      t.includes('overloaded_error')) return true
+  return false
 }
 
 // Detect auth failures that a token refresh might fix.
@@ -710,13 +731,32 @@ async function _sendMessageImpl(content, opts = {}) {
   const prevProvider = _currentProvider
 
   if (best.isBedrockFallback) {
-    // Bedrock fallback — use ANTHROPIC_API_KEY with Bedrock model
-    // Alert Tate (dedup'd — one per day) so he knows we're burning AWS $.
+    // Bedrock fallback — use ANTHROPIC_API_KEY with Bedrock model.
+    // Alert ONLY if a Max account was genuinely near cap — otherwise this is
+    // a false fallback (e.g. `_isUsageExhausted` mis-matched on stray text,
+    // or the quota-check hasn't run yet and both accounts look unknown).
+    // Gate: at least one Max account must have weeklyUtilization >= 0.85,
+    // OR be explicitly rejected by the API. Without that signal, Bedrock
+    // fallback is likely spurious and we log-only instead of emailing.
     if (prevProvider !== 'bedrock') {
-      try {
-        const alerting = require('./osAlertingService')
-        alerting.alertBedrockFallback(best.reason).catch(() => {})
-      } catch {}
+      let energySnap = null
+      try { energySnap = await usageEnergy.getEnergy() } catch {}
+      const acct1 = energySnap?.accounts?.claude_max
+      const acct2 = energySnap?.accounts?.claude_max_2
+      const trulyExhausted = (acct1?.pctUsed >= 0.85) || (acct2?.pctUsed >= 0.85) ||
+        acct1?.rateLimitStatus === 'rejected' || acct2?.rateLimitStatus === 'rejected'
+      if (trulyExhausted) {
+        try {
+          const alerting = require('./osAlertingService')
+          alerting.alertBedrockFallback(best.reason).catch(() => {})
+        } catch {}
+      } else {
+        logger.warn('Bedrock fallback triggered but no account is near-exhausted — likely spurious, NOT alerting', {
+          reason: best.reason,
+          acct1PctUsed: acct1?.pctUsed,
+          acct2PctUsed: acct2?.pctUsed,
+        })
+      }
     }
     _currentProvider = 'bedrock'
     ccSessionId = null  // can't resume across providers
@@ -1051,6 +1091,7 @@ async function _sendMessageImpl(content, opts = {}) {
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      _recordTurnOutcome(false, 'inactivity_timeout')
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: 'Error: inactivity timeout' }
     }
 
@@ -1068,6 +1109,7 @@ async function _sendMessageImpl(content, opts = {}) {
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      _recordTurnOutcome(false, 'empty_sdk_stream')
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
     }
 
@@ -1130,6 +1172,7 @@ async function _sendMessageImpl(content, opts = {}) {
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      _recordTurnOutcome(false, 'max_retry_depth')
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
     }
 
