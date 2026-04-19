@@ -776,13 +776,24 @@ async function _sendMessageImpl(content, opts = {}) {
         logger.debug('OS Session SDK message', { type: msg.type, subtype: msg.subtype })
 
         switch (msg.type) {
-          // ─── System init — capture session_id ────────────────
+          // ─── System init — capture session_id + log actual model ─
           case 'system': {
-            if (msg.subtype === 'init' && msg.session_id) {
-              newCcSessionId = msg.session_id
-              if (newCcSessionId !== ccSessionId) {
-                ccSessionId = newCcSessionId
-                await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
+            if (msg.subtype === 'init') {
+              // SDK reports the real model it locked in (including SDK default
+              // when OS_SESSION_MODEL was unset). This is the ground truth.
+              logger.info('OS Session SDK init', {
+                model: msg.model || '(unknown)',
+                requestedModel: options.model || '(default)',
+                provider: _currentProvider,
+                session_id: msg.session_id,
+                tools: Array.isArray(msg.tools) ? msg.tools.length : null,
+              })
+              if (msg.session_id) {
+                newCcSessionId = msg.session_id
+                if (newCcSessionId !== ccSessionId) {
+                  ccSessionId = newCcSessionId
+                  await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
+                }
               }
             }
             break

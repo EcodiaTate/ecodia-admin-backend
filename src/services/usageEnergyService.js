@@ -54,8 +54,12 @@ const _accounts = {
   claude_max_2: _makeAccountState(),
 }
 
-// Which provider is currently active (set by osSessionService)
-let _activeProvider = 'claude_max'
+// Which provider is currently active (set by osSessionService).
+// Default to the code token (acct2) when tate@ is paused — avoids `active === null`
+// on the first energy snapshot before setProvider() runs.
+let _activeProvider = process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE && !process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE
+  ? 'claude_max_2'
+  : 'claude_max'
 
 // Cache the full energy snapshot (60s TTL)
 let _cache = null
@@ -455,8 +459,11 @@ async function getEnergy() {
   if (_cache && (now - _cacheAt) < CACHE_TTL_MS) return _cache
 
   // Trigger background quota-checks for stale accounts
+  const hasAcct2 = !!(process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE || process.env.CLAUDE_CONFIG_DIR_2)
+  const skipAcct1 = !!process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE && !process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE && !process.env.CLAUDE_CONFIG_DIR_1
   for (const [acct, state] of Object.entries(_accounts)) {
-    if (acct === 'claude_max_2' && !process.env.CLAUDE_CONFIG_DIR_2) continue
+    if (acct === 'claude_max_2' && !hasAcct2) continue
+    if (acct === 'claude_max' && skipAcct1) continue
     const headerAge = state.headersUpdatedAt ? (now - state.headersUpdatedAt) : Infinity
     if (headerAge > HEADER_STALE_MS) {
       refreshQuotaCheck(acct).catch(() => {})
@@ -464,8 +471,8 @@ async function getEnergy() {
   }
 
   // Build snapshots for both accounts
-  const acct1 = _getAccountSnapshot('claude_max')
-  const acct2 = process.env.CLAUDE_CONFIG_DIR_2 ? _getAccountSnapshot('claude_max_2') : null
+  const acct1 = skipAcct1 ? null : _getAccountSnapshot('claude_max')
+  const acct2 = hasAcct2 ? _getAccountSnapshot('claude_max_2') : null
 
   // Active account's snapshot is the primary one (backwards compat)
   const active = _activeProvider === 'claude_max_2' ? acct2 : acct1
