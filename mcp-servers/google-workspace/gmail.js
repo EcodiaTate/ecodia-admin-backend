@@ -27,6 +27,15 @@ function getHeader(headers, name) {
   return headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || ''
 }
 
+// RFC 2047 encoded-word encoding for non-ASCII header values (RFC 2822 §2.2).
+// Gmail (and all RFC-compliant clients) require header values to be ASCII-only;
+// multi-byte characters must be wrapped as =?UTF-8?B?<base64>?= or they get
+// treated as Latin-1 and rendered as mojibake.
+function encodeHeaderValue(str) {
+  if (!str || !/[^\x00-\x7F]/.test(str)) return str
+  return `=?UTF-8?B?${Buffer.from(str, 'utf-8').toString('base64')}?=`
+}
+
 export function registerGmailTools(server) {
 
   server.tool('gmail_list_messages',
@@ -80,7 +89,7 @@ export function registerGmailTools(server) {
     async ({ to, subject, body, cc, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       const from = inbox || primaryAccount
-      const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
+      const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${encodeHeaderValue(subject)}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
       const raw = Buffer.from(headers).toString('base64url')
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
       return { content: [{ type: 'text', text: `Sent. Message ID: ${res.data.id}` }] }
@@ -93,7 +102,7 @@ export function registerGmailTools(server) {
     async ({ threadId, messageId, to, body, subject, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       const from = inbox || primaryAccount
-      const headers = [`From: ${from}`, `To: ${to}`, `Subject: ${subject || 'Re:'}`, messageId ? `In-Reply-To: ${messageId}` : '', messageId ? `References: ${messageId}` : '', 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
+      const headers = [`From: ${from}`, `To: ${to}`, `Subject: ${encodeHeaderValue(subject || 'Re:')}`, messageId ? `In-Reply-To: ${messageId}` : '', messageId ? `References: ${messageId}` : '', 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
       const raw = Buffer.from(headers).toString('base64url')
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw, threadId } })
       return { content: [{ type: 'text', text: `Reply sent. Message ID: ${res.data.id}` }] }
@@ -128,7 +137,7 @@ export function registerGmailTools(server) {
     async ({ to, subject, body, cc, threadId, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       const from = inbox || primaryAccount
-      const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
+      const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${encodeHeaderValue(subject)}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
       const raw = Buffer.from(headers).toString('base64url')
       const requestBody = { message: { raw } }
       if (threadId) requestBody.message.threadId = threadId
