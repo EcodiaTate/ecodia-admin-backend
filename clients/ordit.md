@@ -88,3 +88,28 @@ Fix: Add a guard: `if (!process.env.AWS_COGNITO_USER_POOL_ID) { logger.warn('Cog
 - Circular dependency pattern: if Module A imports Module B and you need B's service in A, extract to shared module
 - Graceful degradation is mandatory — every integration must handle unconfigured state
 - Double-execution pattern: controller creating Cognito user + service also trying = duplicate. Trace full call chain.
+
+---
+
+## 2026-04-19 — Cognito 5-bug fix delivered (Factory session a38d8025)
+
+Factory re-dispatched after the Apr 19 273-file CRLF rejection. Tight scope this time worked.
+
+**Diff:** `src/users/users.service.ts` only. +91 / -14. LF endings preserved.
+
+**Bugs fixed:**
+1. `findByCognitoSub` now returns user (was returning undefined).
+2. `resetPassword` syncs to Cognito via `AdminSetUserPasswordCommand` after local DB update, behind `cognitoEnabled` flag and try/catch.
+3. `handleUserDeletedEvent` calls `AdminDeleteUserCommand`, handles `UserNotFoundException` specifically.
+4. `createUser` rolls back the Cognito user via `AdminDeleteUserCommand` if Prisma fails (uses captured `cognitoUserId`).
+5. `cognitoEnabled` boolean computed in constructor from `AWS_COGNITO_USER_POOL_ID + AWS_COGNITO_CLIENT_ID + AWS_REGION`. Every Cognito code path checks it; warns on init if not configured.
+
+**Refactor:** extracted `getCognitoClient()` private method to avoid duplicating credential setup.
+
+**Validation:** Factory's typecheck reported errors but all are pre-existing in unrelated files (jest/supertest/@nestjs/testing types missing, Multer namespace, pdfmake types). None in `users.service.ts`.
+
+**Pre-existing `console.log(error);` in createUser catch block left untouched** — not in the 5-bug list and explicit instruction was "do not reformat". Worth flagging to Eugene.
+
+**Branch:** `ecodia/cognito-integration` (uncommitted local changes, tracking `origin/uat`).
+
+**Status:** ready for Tate to review and push. Not pushing without his OK.
