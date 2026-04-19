@@ -201,19 +201,31 @@ async function _doQuotaCheck(account) {
 
     const model = process.env.OS_SESSION_MODEL || 'claude-opus-4-5-20250514'
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${oauthToken}`,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'quota' }],
-      }),
-    })
+    // 10s hard timeout — without this, an Anthropic endpoint partition hangs
+    // the quota-check forever, which in turn makes refreshQuotaCheck() return
+    // the hanging promise to every subsequent caller (quotaCheckInFlight guard).
+    // Result: provider routing blind to quota state until process restart.
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10_000)
+    let resp
+    try {
+      resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${oauthToken}`,
+          'Content-Type': 'application/json',
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'quota' }],
+        }),
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
 
     // Extract headers regardless of status — 429s still carry utilization headers
     updateFromHeaders(resp.headers, account)
