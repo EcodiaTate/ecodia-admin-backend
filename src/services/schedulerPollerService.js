@@ -10,13 +10,15 @@
 
 const db = require('../config/db')
 const logger = require('../config/logger')
+const usageEnergy = require('./usageEnergyService')
 
 const POLL_INTERVAL_MS = 30_000
 const TZ_OFFSET_HOURS = 10 // AEST (UTC+10, no DST)
 const API_PORT = process.env.PORT || 3001
 
-let _interval = null
+let _timeout = null
 let _running = false
+let _stopped = false
 
 // ── Schedule parsing (mirrors mcp-servers/scheduler/index.js) ──
 
@@ -126,6 +128,35 @@ async function pollOnce() {
       return
     }
 
+    // Energy-aware gating: at critical level, only fire tasks flagged as critical
+    // (or high-priority). Below critical, run everything. We keep this permissive
+    // for low/conserve because the scheduleMultiplier already spaces out polls.
+    let energyLevel = 'healthy'
+    try {
+      const energy = await usageEnergy.getEnergy()
+      energyLevel = energy?.level || 'healthy'
+    } catch {}
+
+    if (energyLevel === 'critical') {
+      // Critical: defer all non-essential crons by 1h. Only run tasks whose
+      // metadata marks them critical (backup jobs, health checks).
+      const essentialTasks = due.filter(t => t.priority === 'critical' || t.name?.includes('critical'))
+      if (essentialTasks.length === 0) {
+        logger.info('Scheduler: critical energy, deferring all non-essential tasks', { deferred: due.length })
+        for (const t of due) {
+          if (t.type === 'cron') {
+            const deferred = new Date(Date.now() + 60 * 60 * 1000)
+            await db`UPDATE os_scheduled_tasks SET next_run_at = ${deferred} WHERE id = ${t.id}`
+              .catch(() => {})
+          }
+        }
+        return
+      }
+      logger.info('Scheduler: critical energy, firing only essential tasks', { essential: essentialTasks.length, deferred: due.length - essentialTasks.length })
+      await fireTask(essentialTasks[0])
+      return
+    }
+
     // Fire one task per cycle, reschedule the rest to avoid flooding
     await fireTask(due[0])
 
@@ -146,20 +177,43 @@ async function pollOnce() {
   }
 }
 
+// Self-scheduling loop — uses energy-adjusted intervals instead of a fixed
+// setInterval. When energy is low we stretch the poll cadence via
+// scheduleMultiplier (0.75 conserve => 40s, 0.5 low => 60s, 0.25 critical => 120s).
+// This way the poller itself burns less quota when quota is scarce.
+async function _scheduleNextPoll() {
+  if (_stopped) return
+  let multiplier = 1.0
+  try {
+    const energy = await usageEnergy.getEnergy()
+    multiplier = energy?.scheduleMultiplier || 1.0
+  } catch {}
+  const delay = Math.round(POLL_INTERVAL_MS / multiplier)  // lower multiplier = longer delay
+  _timeout = setTimeout(async () => {
+    try { await pollOnce() } catch (err) { logger.warn('Scheduler: pollOnce crashed', { error: err.message }) }
+    _scheduleNextPoll()
+  }, delay)
+  if (typeof _timeout.unref === 'function') _timeout.unref()
+}
+
 // ── Public API ──
 
 function start() {
-  if (_interval) return
-  _interval = setInterval(pollOnce, POLL_INTERVAL_MS)
-  // Catch overdue tasks quickly on startup
-  setTimeout(pollOnce, 5_000)
-  logger.info('Scheduler poller started (every 30s)')
+  if (_timeout) return
+  _stopped = false
+  // First poll in 5s to catch overdue tasks quickly on boot.
+  _timeout = setTimeout(async () => {
+    try { await pollOnce() } catch (err) { logger.warn('Scheduler: initial pollOnce crashed', { error: err.message }) }
+    _scheduleNextPoll()
+  }, 5_000)
+  logger.info('Scheduler poller started (energy-adjusted cadence)')
 }
 
 function stop() {
-  if (_interval) {
-    clearInterval(_interval)
-    _interval = null
+  _stopped = true
+  if (_timeout) {
+    clearTimeout(_timeout)
+    _timeout = null
     logger.info('Scheduler poller stopped')
   }
 }

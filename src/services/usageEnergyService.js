@@ -336,8 +336,22 @@ function _accountHealth(account) {
     return { score: -50, reason: 'tate_subscription_paused' }
   }
 
-  // Rejected = completely unusable
+  // Rejected = completely unusable UNLESS the reset time has passed.
+  // Without this, once we mark an account rejected we stay on Bedrock forever.
+  // When weeklyResetsAt is in the past, clear rejection and treat as unknown
+  // (next quota-check will re-probe and update with real headers).
   if (state.rateLimitStatus === 'rejected') {
+    const nowSec = Date.now() / 1000
+    const resetPassed = state.weeklyResetsAt && state.weeklyResetsAt < nowSec
+    if (resetPassed) {
+      logger.info('Account rejection auto-cleared: reset time passed', { account, weeklyResetsAt: state.weeklyResetsAt })
+      state.rateLimitStatus = 'allowed'
+      state.rateLimitType = null
+      state.weeklyUtilization = null  // force re-probe
+      // Fire a fresh quota-check in the background (don't await — decision needs a value now)
+      refreshQuotaCheck(account).catch(() => {})
+      return { score: 30, reason: 'reset_just_passed_reprobing' }
+    }
     return { score: -10, reason: `rejected (${state.rateLimitType || 'unknown'})` }
   }
 
