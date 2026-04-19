@@ -290,6 +290,17 @@ server.listen(env.PORT, async () => {
     logger.warn('OS Heartbeat failed to start', { error: err.message })
   }
 
+  // ── Boot: TLS Cert Monitor ────────────────────────────────────────
+  // Hourly check of the production cert's remaining validity. Alerts via
+  // email at 14 days (warn), bypasses cooldown at 3 days (urgent). Catches
+  // certbot autorenew failures before the cert silently expires mid-trip.
+  try {
+    const certMonitor = require('./services/certMonitorService')
+    certMonitor.start()
+  } catch (err) {
+    logger.warn('TLS cert monitor failed to start', { error: err.message })
+  }
+
   // ── Boot: Claude Token Refresh ────────────────────────────────────
   // Proactively refreshes OAuth tokens before they expire so the VPS
   // never needs manual `claude /login`. Runs every 30 min.
