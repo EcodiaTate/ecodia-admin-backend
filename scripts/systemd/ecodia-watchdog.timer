@@ -1,0 +1,11 @@
+[Unit]
+Description=EcodiaOS API watchdog timer -- fires every 60 seconds
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=1
+Unit=ecodia-watchdog.service
+
+[Install]
+WantedBy=timers.target
