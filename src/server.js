@@ -299,6 +299,37 @@ server.listen(env.PORT, async () => {
   } catch (err) {
     logger.warn('Claude token refresh service failed to start', { error: err.message })
   }
+
+  // ── Boot: Process Restart Alert + Alive Beacon ────────────────────
+  // Emails Tate when ecodia-api restarts. Uses kv_store to record the
+  // previous "I'm alive" beacon timestamp so we can compute prior uptime.
+  // Short uptime (<10m) usually means a crash loop — worth knowing.
+  try {
+    const alerting = require('./services/osAlertingService')
+    const row = await db`SELECT value FROM kv_store WHERE key = 'osalive_last'`.catch(() => [])
+    const prevAlive = row.length ? parseInt(row[0].value) : null
+    const uptimeMs = prevAlive ? Date.now() - prevAlive : 0
+    if (prevAlive && uptimeMs > 30_000) {
+      // Only fire if previous beacon was >30s ago — skips first-ever boot
+      // and instant pm2 restarts that would otherwise spam on deploy.
+      alerting.alertProcessRestart(uptimeMs).catch(() => {})
+    }
+    // Alive beacon — ticks every 60s. A restart alert will compute prior
+    // uptime as (now - beacon), giving a tight bound on silent-death time.
+    const tickAlive = async () => {
+      try {
+        await db`
+          INSERT INTO kv_store (key, value) VALUES ('osalive_last', ${String(Date.now())})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        `
+      } catch {}
+    }
+    tickAlive()
+    const aliveTimer = setInterval(tickAlive, 60_000)
+    if (typeof aliveTimer.unref === 'function') aliveTimer.unref()
+  } catch (err) {
+    logger.warn('Process restart alert setup failed', { error: err.message })
+  }
 })
 
 // ── Boot: Auto-wake OS Session ────────────────────────────────────────

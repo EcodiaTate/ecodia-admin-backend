@@ -101,10 +101,20 @@ function updateFromHeaders(headers, account = null) {
     const overageStatus = get('anthropic-ratelimit-unified-overage-status')
 
     if (weeklyUtil !== null && weeklyUtil !== undefined) {
-      state.weeklyUtilization = Number(weeklyUtil)
+      const newUtil = Number(weeklyUtil)
+      const prevUtil = state.weeklyUtilization
+      state.weeklyUtilization = newUtil
       state.headersUpdatedAt  = Date.now()
       _cache = null
       _cacheAt = 0
+      // Fire quota-high alert on upward crossing of 0.90. Dedup is handled
+      // in osAlertingService (12h cooldown) so flapping can't spam.
+      if ((prevUtil === null || prevUtil < 0.90) && newUtil >= 0.90) {
+        try {
+          const alerting = require('./osAlertingService')
+          alerting.alertQuotaHigh(acct, newUtil, state.weeklyResetsAt).catch(() => {})
+        } catch {}
+      }
     }
     if (weeklyReset !== null && weeklyReset !== undefined) {
       state.weeklyResetsAt = Number(weeklyReset)
