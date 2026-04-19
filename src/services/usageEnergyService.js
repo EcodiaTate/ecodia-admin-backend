@@ -281,8 +281,12 @@ async function refreshQuotaCheck(account = null) {
 // Refresh BOTH accounts — used on startup and periodically
 async function refreshAllAccounts() {
   const promises = []
-  promises.push(refreshQuotaCheck('claude_max').catch(() => {}))
-  if (process.env.CLAUDE_CONFIG_DIR_2) {
+  // Skip acct1 (tate) entirely when its subscription is paused and we're on the code token.
+  const skipAcct1 = !!process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE && !process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE
+  if (!skipAcct1) {
+    promises.push(refreshQuotaCheck('claude_max').catch(() => {}))
+  }
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE || process.env.CLAUDE_CONFIG_DIR_2) {
     promises.push(refreshQuotaCheck('claude_max_2').catch(() => {}))
   }
   await Promise.allSettled(promises)
@@ -304,9 +308,17 @@ function _accountHealth(account) {
   const state = _accounts[account]
   if (!state) return { score: -100, reason: 'no_state' }
 
-  // Check if the config dir exists for this account
+  // Account is "present" if either a long-lived token OR a legacy config dir exists.
+  const hasLongLivedToken = account === 'claude_max_2'
+    ? !!process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+    : !!process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE
   const configDir = _getConfigDir(account)
-  if (!configDir) return { score: -100, reason: 'no_config_dir' }
+  if (!hasLongLivedToken && !configDir) return { score: -100, reason: 'no_token_or_config_dir' }
+
+  // Tate's Claude Max subscription is paused — never route to acct1 when code token is live.
+  if (account === 'claude_max' && process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+    return { score: -50, reason: 'tate_subscription_paused' }
+  }
 
   // Rejected = completely unusable
   if (state.rateLimitStatus === 'rejected') {
@@ -355,7 +367,7 @@ function _accountHealth(account) {
 // ─── Pick the best provider ─────────────────────────────────────────────────
 // Returns { provider, reason, isBedrockFallback } for the caller to use.
 function getBestProvider() {
-  const hasAccount2 = !!process.env.CLAUDE_CONFIG_DIR_2
+  const hasAccount2 = !!(process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE || process.env.CLAUDE_CONFIG_DIR_2)
   const hasBedrock  = !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
 
   const health1 = _accountHealth('claude_max')
