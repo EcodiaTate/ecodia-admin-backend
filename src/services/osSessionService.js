@@ -335,6 +335,22 @@ let _currentProvider = 'claude_max'  // tracks which provider the current sessio
 // each other's queries. Each sendMessage waits for the previous one to finish.
 let _sendQueue = Promise.resolve()
 
+// Consecutive-failure tracking. Alert Tate at 3 in a row (systemic, not transient).
+let _consecutiveFailures = 0
+function _recordTurnOutcome(ok, errorMsg) {
+  if (ok) {
+    _consecutiveFailures = 0
+    return
+  }
+  _consecutiveFailures += 1
+  if (_consecutiveFailures === 3) {
+    try {
+      const alerting = require('./osAlertingService')
+      alerting.alertConsecutiveFailures(_consecutiveFailures, errorMsg).catch(() => {})
+    } catch {}
+  }
+}
+
 // Detect usage exhaustion / rate limit errors from any error string
 function _isUsageExhausted(text) {
   const t = (text || '').toLowerCase()
@@ -695,6 +711,13 @@ async function _sendMessageImpl(content, opts = {}) {
 
   if (best.isBedrockFallback) {
     // Bedrock fallback — use ANTHROPIC_API_KEY with Bedrock model
+    // Alert Tate (dedup'd — one per day) so he knows we're burning AWS $.
+    if (prevProvider !== 'bedrock') {
+      try {
+        const alerting = require('./osAlertingService')
+        alerting.alertBedrockFallback(best.reason).catch(() => {})
+      } catch {}
+    }
     _currentProvider = 'bedrock'
     ccSessionId = null  // can't resume across providers
     const sessionEnv = { ...process.env }
@@ -1049,6 +1072,7 @@ async function _sendMessageImpl(content, opts = {}) {
     }
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
+    _recordTurnOutcome(true)
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
@@ -1147,6 +1171,7 @@ async function _sendMessageImpl(content, opts = {}) {
     broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+    _recordTurnOutcome(false, errMsg)
 
     return {
       sessionId: dbSessionId,
