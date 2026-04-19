@@ -66,6 +66,16 @@ async function _gatherHeartbeatContext() {
       WHERE status = 'running'
         AND started_at > ${new Date(now - 6 * 60 * 60 * 1000)}
     `,
+    // Factory sessions parked at 'awaiting_review' — the OS is supposed to
+    // approve/reject these via review_factory_session. If one sits here
+    // for >2h the handoff from factoryBridge didn't land. Pick them up.
+    db`
+      SELECT COUNT(*)::int AS n,
+             MIN(started_at) AS oldest
+      FROM cc_sessions
+      WHERE pipeline_stage = 'awaiting_review'
+        AND started_at < ${new Date(now - 2 * 60 * 60 * 1000)}
+    `,
     // Last heartbeat tick — how long since last proactive wake
     db`
       SELECT MAX(created_at) AS last_heartbeat
@@ -94,9 +104,10 @@ async function _gatherHeartbeatContext() {
   const queueRow      = pick(2)?.[0] ?? null
   const overdueCrons  = pick(3)?.[0]?.n ?? null
   const runningFactory = pick(4)?.[0]?.n ?? null
-  const lastHeartbeat = pick(5)?.[0]?.last_heartbeat ?? null
-  const lastUser      = pick(6)?.[0]?.last_user ?? null
-  const breadcrumb    = pick(7)?.[0]?.value ?? null
+  const staleReviewRow = pick(5)?.[0] ?? null
+  const lastHeartbeat = pick(6)?.[0]?.last_heartbeat ?? null
+  const lastUser      = pick(7)?.[0]?.last_user ?? null
+  const breadcrumb    = pick(8)?.[0]?.value ?? null
 
   return {
     urgentEmails,
@@ -105,6 +116,10 @@ async function _gatherHeartbeatContext() {
     urgentActions: queueRow?.urgent ?? null,
     overdueCrons,
     runningFactory,
+    staleFactoryReviews: staleReviewRow?.n ?? null,
+    staleReviewOldestAgoH: staleReviewRow?.oldest
+      ? (now - new Date(staleReviewRow.oldest).getTime()) / 3_600_000
+      : null,
     lastHeartbeatAgoH: lastHeartbeat ? ((now - new Date(lastHeartbeat).getTime()) / 3_600_000) : null,
     lastUserAgoH:      lastUser      ? ((now - new Date(lastUser).getTime())      / 3_600_000) : null,
     breadcrumb: (breadcrumb && typeof breadcrumb === 'object' && breadcrumb.ts) ? breadcrumb : null,
@@ -198,12 +213,14 @@ function _heartbeatPrompt(ctx) {
     `  • Action queue pending:              ${_fmtNum(ctx.pendingActions)} (${_fmtNum(ctx.urgentActions)} urgent/high)`,
     `  • Overdue scheduled tasks (>1h):     ${_fmtNum(ctx.overdueCrons)}`,
     `  • Factory sessions still running:    ${_fmtNum(ctx.runningFactory)}`,
+    `  • Factory reviews awaiting decision: ${_fmtNum(ctx.staleFactoryReviews)}${ctx.staleReviewOldestAgoH ? ` (oldest ${ctx.staleReviewOldestAgoH.toFixed(1)}h)` : ''}`,
     '',
     'Decision framework:',
     '  1. If "where you left off" shows mid-task work, CONTINUE that work before starting anything new.',
-    '  2. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
-    '  3. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
-    '  4. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
+    '  2. If Factory reviews are waiting, review + approve/reject them FIRST — they block deploy flow and Tate can\'t resolve them from Africa.',
+    '  3. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
+    '  4. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
+    '  5. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
     '',
     'You are the CEO. Act.',
   )
@@ -247,7 +264,8 @@ async function _tick() {
     //    just to have the model say "nothing pressing". When things are
     //    quiet let them stay quiet.
     const totalSignal = (ctx.urgentEmails || 0) + (ctx.pendingActions || 0) +
-                        (ctx.overdueCrons || 0) + (ctx.runningFactory || 0)
+                        (ctx.overdueCrons || 0) + (ctx.runningFactory || 0) +
+                        (ctx.staleFactoryReviews || 0)
     const recentUserH = ctx.lastUserAgoH ?? Infinity
     if (totalSignal === 0 && recentUserH < 1) {
       logger.info('Heartbeat: no signal + recent user activity, skipping quota burn', { recentUserH })
@@ -259,7 +277,13 @@ async function _tick() {
     logger.info('Heartbeat: firing OS wake', {
       energyLevel: energy?.level,
       provider: energy?.currentProvider,
-      signal: { urgentEmails: ctx.urgentEmails, pendingActions: ctx.pendingActions, overdueCrons: ctx.overdueCrons, runningFactory: ctx.runningFactory },
+      signal: {
+        urgentEmails: ctx.urgentEmails,
+        pendingActions: ctx.pendingActions,
+        overdueCrons: ctx.overdueCrons,
+        runningFactory: ctx.runningFactory,
+        staleFactoryReviews: ctx.staleFactoryReviews,
+      },
     })
     _lastHeartbeatAt = Date.now()
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/message`, {
