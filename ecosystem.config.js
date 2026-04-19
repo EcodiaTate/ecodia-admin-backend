@@ -1,7 +1,7 @@
 const COMMON = {
   cwd: '/home/tate/ecodiaos',
   watch: false,
-  max_restarts: 20,
+  max_restarts: 200, // bumped from 20 after Apr 15-19 outage: PM2 gave up on api after Anthropic credential pause caused crash storm. External watchdog (scripts/api-watchdog.sh) is the real safety net but raise this so PM2 doesn't bail prematurely.
   min_uptime: '10s',
   restart_delay: 2000,
   exp_backoff_restart_delay: 100,
