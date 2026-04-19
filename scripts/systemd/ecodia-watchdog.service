@@ -1,0 +1,26 @@
+# ============================================================
+# INSTALL INSTRUCTIONS (run as root or with sudo):
+#
+#   sudo cp /home/tate/ecodiaos/scripts/systemd/ecodia-watchdog.service /etc/systemd/system/
+#   sudo cp /home/tate/ecodiaos/scripts/systemd/ecodia-watchdog.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ecodia-watchdog.timer
+#
+# Verify:
+#   systemctl status ecodia-watchdog.timer
+#   journalctl -u ecodia-watchdog.service -f
+#   cat /home/tate/ecodiaos/logs/watchdog.log
+# ============================================================
+
+[Unit]
+Description=EcodiaOS API watchdog -- restarts ecodia-api when unresponsive
+After=network.target
+
+[Service]
+Type=oneshot
+User=tate
+ExecStart=/home/tate/ecodiaos/scripts/api-watchdog.sh
+StandardOutput=journal
+StandardError=journal
+# exit 1 (alert path) is an expected outcome, not a unit failure
+SuccessExitStatus=0 1
