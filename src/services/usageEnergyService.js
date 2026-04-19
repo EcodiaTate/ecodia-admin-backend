@@ -210,7 +210,11 @@ async function _doQuotaCheck(account) {
       return
     }
 
-    const model = process.env.OS_SESSION_MODEL || 'claude-opus-4-5-20250514'
+    // Quota-check is a throwaway 1-token probe — any valid model ID works.
+    // Picking a cheap current one so a retired default can't silently 400
+    // the probe and blind the provider router. OS_SESSION_MODEL env var
+    // wins if set.
+    const model = process.env.OS_SESSION_MODEL || 'claude-haiku-4-5-20251001'
 
     // 10s hard timeout — without this, an Anthropic endpoint partition hangs
     // the quota-check forever, which in turn makes refreshQuotaCheck() return

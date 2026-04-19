@@ -1234,14 +1234,22 @@ async function _sendMessageImpl(content, opts = {}) {
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${hangReason}` }
     }
 
-    // If the SDK for-await loop ended with no result and no text, surface an
-    // explicit error instead of silently writing "complete". We used to try
-    // token-refresh self-heal here; that's gone. The chat lane has dedicated
-    // credentials so auth won't die mid-query in normal operation, and if
-    // it DOES die the right response is "show the user" not "retry silently".
+    // If the SDK for-await loop ended with no result and no text, retry ONCE
+    // on a fresh session_id. Most "empty stream" cases are stale ccSessionId
+    // where the CC CLI no longer has the session on disk — same-provider
+    // retry with null resume fixes it. If it still empty-streams on the
+    // retry, that's a real CLI / auth issue; surface it.
     if (!sawResultMessage && collectedText.length === 0) {
+      if (retryDepth < MAX_RETRY_DEPTH && ccSessionId) {
+        logger.warn('OS Session: empty SDK stream — retrying with fresh session_id', { retryDepth, provider: _currentProvider })
+        ccSessionId = null
+        if (session?.id) {
+          await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
+        }
+        return _sendMessageImpl(content, { ...opts, _retryDepth: retryDepth + 1 })
+      }
       const message = 'Session ended without delivering a response. Check pm2 logs for "claude CLI exit".'
-      logger.error('OS Session: empty SDK stream', { provider: _currentProvider })
+      logger.error('OS Session: empty SDK stream (post-retry or no resume id)', { provider: _currentProvider, retryDepth })
       if (!suppressOutput) {
         emitOutput({ type: 'error', content: message })
         emitStatus('error', { error: 'empty_stream' })
