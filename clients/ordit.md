@@ -164,3 +164,53 @@ Factory re-dispatched after the Apr 19 273-file CRLF rejection. Tight scope this
 
 - **Eugene:** review PR on today's call. Run migration on UAT when ready.
 - **Ecodia:** follow up with Eugene post-call on AWS creds so we can run real-env smoke tests and close out.
+
+## 2026-04-19 — Cognito branches consolidated
+
+**Old branches deleted (local + origin):** `ecodia/cognito-integration`, `ecodia/cognito-integration-phase2`, `feature/cognito-b2c-integration`.
+
+**New single branch:** `feat/cognito-be-integration` (matches Ordit's existing `feat/...` naming convention).
+**HEAD after consolidation:** `783db0e` — one clean commit, no Co-Authored-By trailer, all Phase 1 + Phase 2 work squashed.
+**PR URL:** https://bitbucket.org/fireauditors1/be/pull-requests/new?source=feat/cognito-be-integration&dest=uat&t=1
+
+Consolidation was Tate's call — cleaner for Eugene's review, no multi-branch confusion.
+
+## 2026-04-19 — Cognito bugfix pass (Phase 2.1)
+
+Second deep review pass on the consolidated branch surfaced **three real logic / data-flow bugs** that slipped through the initial review. All were around edge cases in the AWS Cognito integration — none of them tripped in the happy path, but all would bite in production under specific conditions.
+
+### The three bugs
+
+**Bug A — Silent auth bypass on Cognito challenge response** (`src/auth/cognito.service.ts`, `adminInitiateAuth`)
+
+When Cognito returns a ChallengeName (e.g. `FORCE_CHANGE_PASSWORD`, `NEW_PASSWORD_REQUIRED`, `SMS_MFA`, `SOFTWARE_TOKEN_MFA`, `MFA_SETUP`, `SELECT_MFA_TYPE`), `response.AuthenticationResult` is `undefined` and `response.ChallengeName` is set. The original code did `result?.IdToken ?? ''` and returned empty strings without throwing. The caller (`validateUser`) only checked whether the call threw — so a user with a pending challenge would be treated as successfully authenticated and issued our JWT without ever providing valid credentials.
+
+**Impact:** Severity high, probability low in the happy path because we always call `adminSetPassword(..., Permanent=true)` immediately after `adminCreateUser`, which means the FORCE_CHANGE_PASSWORD challenge never fires for users we create. But: (a) any MFA configuration would trigger the bug, (b) users created out-of-band (AWS console, imports) could hit it, (c) defence-in-depth — never trust that the happy path always holds.
+
+**Fix:** Throw `UnauthorizedException` when `response.AuthenticationResult` is missing OR `response.ChallengeName` is set. `validateUser` catches and returns null — correct failed-login behaviour.
+
+**Bug B — Orphaned Cognito user when `adminSetPassword` fails** (`src/users/users.service.ts`, `createUser`)
+
+In both the `+cog-` shim block and the `useCognito` block: `adminCreateUser` succeeds → `adminSetPassword` throws → outer try/catch throws BadRequestException to the client. But the Cognito user is already created with a temp password and nobody rolls it back. Retry creates a second Cognito user for the same email.
+
+**Fix:** Wrap `adminSetPassword` in its own try/catch. On failure, call `adminDeleteUser(cognitoUsername)` (also wrapped to log rollback failures without masking the original error), then re-throw.
+
+**Bug C — Orphaned Cognito user on post-create transaction failures** (`src/users/users.service.ts`, `createUser`)
+
+The rollback try/catch in the transaction callback only wrapped `prisma.user.create`. If `prisma.user.create` succeeded but a subsequent operation inside the transaction failed — `prisma.buildingsOnUsers.create` (tenant or owner paths), or the transaction auto-rolled back on 20s timeout, or anything in the branch/OSM invitation handling — Prisma rolls back the DB user, but the Cognito user persists. Again: retry creates a duplicate Cognito record.
+
+**Fix:** Widened the try/catch umbrella so the rollback fires on ANY post-`adminCreateUser` failure that propagates out of the transaction callback. The pre-existing inner swallow-catches (around tenant details, around invitation/branches) were deliberately left in place — those are pre-existing behaviour we don't own.
+
+### Final branch state
+
+**Branch:** `feat/cognito-be-integration`
+**Commits on top of `origin/uat`:** 2
+- `783db0e` — consolidated Phase 1 + Phase 2 (authSource, CognitoService, routing, DTOs, +cog- shim, tests)
+- `<sha TBD when Factory approved>` — Phase 2.1 bugfix pass (3 bugs above)
+
+**+cog- shim:** still in place, still deprecated, still logging the warning.
+**Touched on bugfix pass:** `src/auth/cognito.service.ts` + `src/users/users.service.ts` only. `auth.service.ts` and DTOs untouched — the new throw in `adminInitiateAuth` bubbles naturally through `validateUser`'s existing catch.
+
+### Why these got missed on the first pass
+
+The first review traced the happy paths end-to-end and checked for correctness there. The bugs all live in edge cases (Cognito challenge state, mid-transaction failure, service-call failure between two external operations). **Lesson: for security-critical code, a second review pass focused specifically on "what happens when external service / subsequent operation fails after the critical-path write" is mandatory.** That framing would have caught all three on the first pass.
