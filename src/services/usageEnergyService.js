@@ -46,6 +46,7 @@ function _makeAccountState() {
     isUsingOverage: false,
     headersUpdatedAt: null,      // Date.now() when headers were last captured
     quotaCheckInFlight: null,    // promise if a quota-check is running
+    rejectionClearedAt: 0,       // Date.now() when we last auto-cleared 'rejected' — debounces re-marking
   }
 }
 
@@ -358,6 +359,7 @@ function _accountHealth(account) {
       state.rateLimitStatus = 'allowed'
       state.rateLimitType = null
       state.weeklyUtilization = null  // force re-probe
+      state.rejectionClearedAt = Date.now()  // debounce markAccountRejected for 5 min
       // Fire a fresh quota-check in the background (don't await — decision needs a value now)
       refreshQuotaCheck(account).catch(() => {})
       return { score: 30, reason: 'reset_just_passed_reprobing' }
@@ -664,6 +666,15 @@ function invalidateCache() {
 function markAccountRejected(account, rateLimitType = 'unknown') {
   const state = _accounts[account]
   if (!state) return
+  // Debounce: if we auto-cleared rejection in the last 5 min (reset just passed),
+  // don't immediately flip back. Otherwise the account bounces
+  // rejected -> reprobing -> rejected -> reprobing forever during a flaky reset
+  // window, and each bounce can trigger a session switch + alert.
+  const clearedAgoMs = Date.now() - (state.rejectionClearedAt || 0)
+  if (clearedAgoMs < 5 * 60 * 1000) {
+    logger.info('markAccountRejected suppressed by post-clear debounce', { account, clearedAgoMs })
+    return
+  }
   state.rateLimitStatus = 'rejected'
   state.rateLimitType = rateLimitType
   if (state.weeklyUtilization === null) state.weeklyUtilization = 1.0
