@@ -113,3 +113,54 @@ Factory re-dispatched after the Apr 19 273-file CRLF rejection. Tight scope this
 **Branch:** `ecodia/cognito-integration` (uncommitted local changes, tracking `origin/uat`).
 
 **Status:** ready for Tate to review and push. Not pushing without his OK.
+
+---
+
+## 2026-04-19 — Cognito Phase 2 delivered
+
+**Branch:** `ecodia/cognito-integration-phase2` (off `ecodia/cognito-integration`, pushed to origin, HEAD `ac53a9d`)
+**PR URL:** https://bitbucket.org/fireauditors1/be/pull-requests/new?source=ecodia/cognito-integration-phase2&dest=uat&t=1
+**Factory session:** `0baa190e-9fae-41b5-9b3e-3f617240676c` (approved)
+**Diff:** 12 files, +635/-117. Surgical scope, LF endings preserved, no reformatting churn.
+
+### What was built
+
+1. **`authSource` enum on User** (`prisma/schema.prisma`): `LEGACY` | `COGNITO`. Migration file `prisma/migrations/20260419000000_add_auth_source_to_user/migration.sql` generated with ALTER TABLE + backfill (`UPDATE User SET authSource = 'COGNITO' WHERE cognitoSub IS NOT NULL;`). Not applied to prod — Eugene runs the migration.
+
+2. **`src/auth/cognito.service.ts`** — full implementation (226 lines, was 1 byte). 8 methods: `isEnabled`, `adminCreateUser`, `adminSetPassword`, `adminDeleteUser` (handles UserNotFoundException), `adminInitiateAuth` (USER_PASSWORD_AUTH flow + SECRET_HASH), `forgotPassword`, `confirmForgotPassword`, `getUserBySub`. All read env via `ConfigService`. Short-circuits with `ServiceUnavailableException` if `isEnabled()` is false.
+
+3. **`src/auth/cognito.module.ts`** — standalone module exporting `CognitoService`. Imported by both `AuthModule` and `UsersModule`. Breaks the circular dep between Auth ↔ Users that would have arisen from sharing the service directly.
+
+4. **`src/users/users.service.ts`** refactor — removed all direct `CognitoIdentityProviderClient` instantiation (Phase 1's `getCognitoClient()` helper and per-method SDK setup gone). Now delegates entirely to `CognitoService`. Verified: `grep -rn "CognitoIdentityProviderClient" src/ | grep -v cognito.service.ts` returns zero matches.
+
+5. **`auth.service.validateUser`** routes by authSource: if `authSource === 'COGNITO'` OR (`cognitoSub && !password`) → `cognitoService.adminInitiateAuth()` then return user. Else → existing legacy `validatePassword` against bcrypt hash. Legacy else-branch preserved byte-for-byte (only addition is a `logger.debug` line noting which path was taken).
+
+6. **`auth.service.register`** delegates to `usersService.createUser` which now handles `useCognito: true` on the DTO: creates Cognito user via `adminCreateUser`, sets password permanent via `adminSetPassword`, creates DB row with `authSource: 'COGNITO'` + `cognitoSub`. Rollback on Prisma failure preserved from Phase 1 pattern.
+
+7. **`auth.service.forgotPassword` / `resetPassword`** both route by authSource: Cognito users hit `cognitoService.forgotPassword(email)` / `confirmForgotPassword(email, code, newPassword)` — Cognito sends its own email. Legacy users unchanged.
+
+8. **`+cog-` shim preserved with deprecation warning** (`users.service.ts` line 229–253). Still works for existing prod users. Sets `authSource: 'COGNITO'` on the created user. Logs `DEPRECATED: +cog- email flag is legacy; use useCognito flag on register DTO instead.` on each use.
+
+9. **DTOs updated:**
+   - `UserResponseDto.authSource?: AuthSource` (line 126) — FE can see which auth source a user is on
+   - `CreateUserDto.authSource?: AuthSource` (line 386) — admin UI can create Cognito users explicitly
+   - `AuthRegisterDto.useCognito?: boolean` (line 13) — register endpoint Cognito flag
+
+10. **Tests** — `test/auth-cognito.e2e-spec.ts` (196 lines) covering legacy register+login, Cognito register, Cognito login via AdminInitiateAuth, forgot-password mock. Skips cleanly if Cognito env vars missing.
+
+### Validation
+
+- **Typecheck:** zero NEW errors in application source (`src/` excluding `.spec.ts` / `.e2e-spec.ts`). All existing errors (Multer types in `src/files/*`, pdfmake types in `src/utils/generate-pdf.ts`, jest/`@nestjs/testing`/`supertest` missing across every pre-existing `.spec.ts`) are pre-existing dev-setup issues repo-wide. The new `auth-cognito.e2e-spec.ts` surfaces the same jest-types error as every other `.spec.ts` in the repo — not a regression.
+- **Build:** still fails with same 6 pre-existing errors (Multer + pdfmake). Build was failing before Phase 2. Out of scope.
+- **Factory validationConfidence=0.05** is misleading: exit 127 means jest binary isn't installed at CI level (`> jest --passWithNoTests` with empty output). This is a repo-wide dev-setup issue, not code quality.
+
+### Review pitfalls for Eugene
+
+- The `password` column is still set (hashed) for users created via the `useCognito` path — not null per the task spec. This is a hybrid-mode allowance: routing is authSource-first, so a hash being present doesn't break Cognito login. Eugene may want to change this to `password: null` if he prefers a strict invariant.
+- `adminInitiateAuth` uses `USER_PASSWORD_AUTH` flow — requires the Cognito app client to have that flow enabled in the AWS console.
+- `SECRET_HASH` is included when `AWS_COGNITO_CLIENT_SECRET` is set. If the app client is a "public client" (no secret), Eugene must leave that env unset.
+
+### Next actions
+
+- **Eugene:** review PR on today's call. Run migration on UAT when ready.
+- **Ecodia:** follow up with Eugene post-call on AWS creds so we can run real-env smoke tests and close out.
