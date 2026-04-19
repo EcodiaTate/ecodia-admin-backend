@@ -723,11 +723,19 @@ function findPart(payload, mimeType) {
   return null
 }
 
+// RFC 2047 encoded-word encoding for non-ASCII header values (RFC 2822 §2.2).
+// Without this, raw UTF-8 bytes in the Subject header are misread as Latin-1
+// by receiving clients, producing mojibake (e.g. Ã¢Â€Â" instead of —).
+function encodeHeaderValue(str) {
+  if (!str || !/[^\x00-\x7F]/.test(str)) return str
+  return `=?UTF-8?B?${Buffer.from(str, 'utf-8').toString('base64')}?=`
+}
+
 function createRawEmail({ to, from, subject, body, inReplyTo }) {
   const lines = [
     `To: ${to}`,
     `From: ${from}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodeHeaderValue(subject)}`,
     'Content-Type: text/plain; charset=utf-8',
   ]
   if (inReplyTo) {
