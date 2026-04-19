@@ -700,6 +700,34 @@ async function _sendMessageImpl(content, opts = {}) {
     logger.warn('Failed to read handoff state', { error: err.message })
   }
 
+  // Load last-turn breadcrumb for fresh sessions (no ccSessionId -> no SDK
+  // resume available). This is the cheap, always-on continuity signal:
+  // auto-written at the end of every user turn, ~1.5KB max, bounded and
+  // structured. Only stitched when we're starting fresh — if SDK resume is
+  // active the model already has full prior context and injecting this
+  // would double-up.
+  let breadcrumbBlock = null
+  if (!ccSessionId) {
+    try {
+      const rows = await db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`
+      const b = rows?.[0]?.value
+      if (b && typeof b === 'object' && b.ts) {
+        const ageMin = Math.round((Date.now() - b.ts) / 60000)
+        // Only surface if reasonably recent (12h). Stale breadcrumbs create
+        // more confusion than continuity.
+        if (ageMin < 12 * 60) {
+          breadcrumbBlock = [
+            `Last turn ended ${ageMin} min ago on provider ${b.provider || 'unknown'}.`,
+            b.user_tail ? `Tate last said: ${b.user_tail}` : '',
+            b.assistant_tail ? `You last replied: ${b.assistant_tail}` : '',
+          ].filter(Boolean).join('\n')
+        }
+      }
+    } catch (err) {
+      logger.debug('Breadcrumb read failed (non-fatal)', { error: err.message })
+    }
+  }
+
   const options = {
     cwd,
     permissionMode: 'bypassPermissions',
@@ -886,15 +914,25 @@ async function _sendMessageImpl(content, opts = {}) {
     }, INACTIVITY_TIMEOUT_MS)
   }
 
-  // Stitch restart-recovery block into the USER message (not the system
-  // prompt) so the SDK's prompt cache stays stable across turns. The block
-  // is small and tagged so the model treats it as context, not the actual
-  // user intent. Only stitched on the first turn after a restart where
-  // handoff state exists.
+  // Stitch continuity blocks into the USER message (not the system prompt)
+  // so the SDK's prompt cache stays stable across turns. Blocks are small,
+  // tagged so the model treats them as context (not user intent), and only
+  // included when they carry real signal (fresh session / recent handoff).
   let finalPrompt = promptWithMemory
+  const continuityParts = []
   if (recoveryBlock) {
-    finalPrompt = `<restart_recovery>\n${recoveryBlock}\n</restart_recovery>\n\n${promptWithMemory}`
-    logger.info('OS Session: stitching restart recovery block into user message', { recoveryLen: recoveryBlock.length })
+    continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
+  }
+  if (breadcrumbBlock) {
+    continuityParts.push(`<last_turn_breadcrumb>\n${breadcrumbBlock}\n</last_turn_breadcrumb>`)
+  }
+  if (continuityParts.length > 0) {
+    finalPrompt = `${continuityParts.join('\n\n')}\n\n${promptWithMemory}`
+    logger.info('OS Session: stitching continuity blocks into user message', {
+      restart_recovery: !!recoveryBlock,
+      breadcrumb: !!breadcrumbBlock,
+      totalBlocksLen: continuityParts.join('\n\n').length,
+    })
   }
 
   try {
@@ -1153,6 +1191,45 @@ async function _sendMessageImpl(content, opts = {}) {
 
     await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'complete' })
     _recordTurnOutcome(true)
+
+    // ─── Auto session breadcrumb ─────────────────────────────────────────
+    // Write a compact "where I left off" snapshot after real user turns.
+    // Lets a fresh session (PM2 restart, provider switch, auto-handover)
+    // pick up continuity without re-ingesting the whole transcript.
+    //
+    // Bounded ~1.5KB (two 600-char tails) so it can't bloat context. We
+    // deliberately skip:
+    //   - suppressed turns (sendTask / background handover generation)
+    //   - heartbeat turns (they'd overwrite real user context with
+    //     "nothing pressing" self-replies and destroy continuity)
+    //   - scheduled-cron turns (same reasoning)
+    // The last genuine user→assistant exchange is what's worth recovering.
+    const isHeartbeatTurn = content.startsWith('[HEARTBEAT]')
+    const isScheduledTurn = content.startsWith('[SCHEDULED:')
+    if (!suppressOutput && !isHeartbeatTurn && !isScheduledTurn) {
+      try {
+        const lastAssistant = collectedText.join('\n\n')
+        const TAIL_CHARS = 600
+        const userTail = content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : content
+        const asstTail = lastAssistant.length > TAIL_CHARS ? '…' + lastAssistant.slice(-TAIL_CHARS) : lastAssistant
+        await db`
+          INSERT INTO kv_store (key, value)
+          VALUES ('session.last_breadcrumb', ${{
+            ts: Date.now(),
+            session_id: dbSessionId,
+            cc_session_id: ccSessionId,
+            provider: _currentProvider,
+            user_tail: userTail,
+            assistant_tail: asstTail,
+            tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+          }})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        `.catch(err => logger.debug('breadcrumb write failed (non-fatal)', { error: err.message }))
+      } catch (err) {
+        logger.debug('breadcrumb capture failed (non-fatal)', { error: err.message })
+      }
+    }
+
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
