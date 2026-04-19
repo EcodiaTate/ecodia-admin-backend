@@ -4,7 +4,11 @@ const crypto = require('crypto')
 const logger = require('../config/logger')
 const env = require('../config/env')
 
-// In-memory ticket store — tickets are single-use and expire after 30s
+// In-memory ticket store — tickets are single-use and expire after 90s.
+// Bumped from 30s because African wifi reconnects can take 10-20s and were
+// causing false logouts (frontend had to re-auth when ticket expired mid-
+// handshake). 90s is still short enough that stolen tickets are low-risk.
+const WS_TICKET_TTL_MS = 90_000
 const wsTickets = new Map()
 
 // All active WS connections
@@ -23,7 +27,7 @@ function initWS(app, server) {
     const { userId, createdAt } = wsTickets.get(ticket)
     wsTickets.delete(ticket) // single-use
 
-    if (Date.now() - createdAt > 30_000) {
+    if (Date.now() - createdAt > WS_TICKET_TTL_MS) {
       ws.close(4001, 'Ticket expired')
       return
     }
@@ -65,8 +69,8 @@ function initWS(app, server) {
 function createTicket(userId) {
   const ticket = crypto.randomBytes(32).toString('hex')
   wsTickets.set(ticket, { userId, createdAt: Date.now() })
-  // Cleanup after 30s regardless
-  setTimeout(() => wsTickets.delete(ticket), 30_000)
+  // Cleanup after TTL regardless (single-use means this is just janitorial)
+  setTimeout(() => wsTickets.delete(ticket), WS_TICKET_TTL_MS)
   return ticket
 }
 
