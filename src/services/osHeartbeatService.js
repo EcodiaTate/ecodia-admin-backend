@@ -80,6 +80,8 @@ async function _gatherHeartbeatContext() {
         AND content NOT LIKE '[USER] [HEARTBEAT]%'
         AND content NOT LIKE '[USER] [SCHEDULED:%'
     `,
+    // Last-turn breadcrumb — auto-written continuity snapshot
+    db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`,
   ])
 
   const pick = (idx, fallback = null) => {
@@ -94,6 +96,7 @@ async function _gatherHeartbeatContext() {
   const runningFactory = pick(4)?.[0]?.n ?? null
   const lastHeartbeat = pick(5)?.[0]?.last_heartbeat ?? null
   const lastUser      = pick(6)?.[0]?.last_user ?? null
+  const breadcrumb    = pick(7)?.[0]?.value ?? null
 
   return {
     urgentEmails,
@@ -104,6 +107,7 @@ async function _gatherHeartbeatContext() {
     runningFactory,
     lastHeartbeatAgoH: lastHeartbeat ? ((now - new Date(lastHeartbeat).getTime()) / 3_600_000) : null,
     lastUserAgoH:      lastUser      ? ((now - new Date(lastUser).getTime())      / 3_600_000) : null,
+    breadcrumb: (breadcrumb && typeof breadcrumb === 'object' && breadcrumb.ts) ? breadcrumb : null,
     timestamp: new Date(now).toISOString(),
     timestampLocal: new Date(now).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
   }
@@ -165,6 +169,29 @@ function _heartbeatPrompt(ctx) {
     `Last user message: ${_fmtHours(ctx.lastUserAgoH)}`,
     `Last heartbeat:    ${_fmtHours(ctx.lastHeartbeatAgoH)}`,
     '',
+  ]
+
+  // Where-I-left-off breadcrumb. Only included when it carries NEW info:
+  //   - reasonably fresh (<12h old), AND
+  //   - newer than the last heartbeat (so we're not re-injecting the same
+  //     ~300 tokens of context the model already saw on a prior heartbeat).
+  // This is the efficiency guardrail — every heartbeat that re-stitches
+  // the same breadcrumb is pure waste.
+  if (ctx.breadcrumb) {
+    const b = ctx.breadcrumb
+    const ageMs = Date.now() - b.ts
+    const ageMin = Math.round(ageMs / 60000)
+    const lastHbMs = ctx.lastHeartbeatAgoH != null ? ctx.lastHeartbeatAgoH * 3_600_000 : Infinity
+    const breadcrumbIsNewerThanLastHb = ageMs < lastHbMs
+    if (ageMin < 12 * 60 && breadcrumbIsNewerThanLastHb) {
+      lines.push(`Where you left off (${ageMin} min ago):`)
+      if (b.user_tail)       lines.push(`  Tate last said: ${b.user_tail}`)
+      if (b.assistant_tail)  lines.push(`  You last replied: ${b.assistant_tail}`)
+      lines.push('')
+    }
+  }
+
+  lines.push(
     'Current signal:',
     `  • Urgent/high emails pending triage: ${_fmtNum(ctx.urgentEmails)}`,
     `  • All untriaged emails:              ${_fmtNum(ctx.pendingEmails)}`,
@@ -173,12 +200,13 @@ function _heartbeatPrompt(ctx) {
     `  • Factory sessions still running:    ${_fmtNum(ctx.runningFactory)}`,
     '',
     'Decision framework:',
-    '  1. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
-    '  2. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
-    '  3. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
+    '  1. If "where you left off" shows mid-task work, CONTINUE that work before starting anything new.',
+    '  2. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
+    '  3. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
+    '  4. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
     '',
     'You are the CEO. Act.',
-  ]
+  )
   return lines.join('\n')
 }
 
