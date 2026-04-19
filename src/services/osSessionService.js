@@ -824,7 +824,7 @@ async function _sendMessageImpl(content, opts = {}) {
     // CC Agent SDK supports Bedrock via CLAUDE_CODE_USE_BEDROCK=1
     sessionEnv.CLAUDE_CODE_USE_BEDROCK = '1'
     options.env = sessionEnv
-    options.model = env.BEDROCK_MODEL || 'us.anthropic.claude-opus-4-5-20250929'
+    options.model = env.BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-20251001'
     delete options.resume
     emitOutput({ type: 'system', content: `⚡ Both Claude Max accounts exhausted — falling back to Bedrock (${options.model}).` })
   } else if (best.provider === 'claude_max_2') {
@@ -1205,19 +1205,27 @@ async function _sendMessageImpl(content, opts = {}) {
     // Depth-guarded to prevent the recursion bomb.
     if (_inactivityAborted || _toolWatchdogAborted) {
       const hangReason = _toolWatchdogAborted ? 'tool_watchdog' : 'inactivity_timeout'
-      const next = _switchAfterExhaustion()
-      if (next && retryDepth < MAX_RETRY_DEPTH) {
-        ccSessionId = null
-        logger.warn(`OS Session: ${hangReason} — switching from ${_currentProvider} to ${next.provider}`, { retryDepth })
-        emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung (${hangReason}) — switching to ${next.provider}.` })
+
+      // IMPORTANT distinction: a hang is NOT the same as a rate-limit.
+      // A hung MCP tool or a silent SDK means the current PROVIDER is fine;
+      // something downstream is stuck. Previously we called
+      // _switchAfterExhaustion() here, which marked the provider rejected
+      // and flipped us to Bedrock — that's how a neo4j outage could end up
+      // burning AWS $ on a 35%-quota Max account.
+      //
+      // New policy: a hang retries on the SAME provider (fresh session_id)
+      // up to MAX_RETRY_DEPTH. Only a real rate-limit / exhaustion signal
+      // (caught by _isUsageExhausted in the result handler) triggers a
+      // provider switch.
+      if (retryDepth < MAX_RETRY_DEPTH) {
+        ccSessionId = null  // can't resume a dead session; start fresh
+        logger.warn(`OS Session: ${hangReason} — retrying on same provider ${_currentProvider}`, { retryDepth })
+        emitOutput({ type: 'system', content: `⚡ Retrying (${hangReason})…` })
         return _sendMessageImpl(content, { ...opts, _retryDepth: retryDepth + 1 })
       }
-      if (next && retryDepth >= MAX_RETRY_DEPTH) {
-        logger.error(`OS Session: ${hangReason} at max retry depth — giving up`, { retryDepth, provider: _currentProvider })
-      }
-      logger.error(`OS Session: ${hangReason}, no alternative providers available`)
+      logger.error(`OS Session: ${hangReason} at max retry depth — surfacing error`, { retryDepth, provider: _currentProvider })
       if (!suppressOutput) {
-        emitOutput({ type: 'error', content: `Session hung (${hangReason}). All providers may be exhausted.` })
+        emitOutput({ type: 'error', content: `Session hung (${hangReason}) after ${MAX_RETRY_DEPTH} retries. Check MCP servers.` })
         emitStatus('error', { error: hangReason })
         broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
       }
