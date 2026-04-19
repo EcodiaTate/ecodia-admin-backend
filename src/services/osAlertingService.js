@@ -31,11 +31,18 @@ const COOLDOWNS = {
   daily_digest:        20 * 60 * 60 * 1000,  // once per ~day
 }
 
+// kv_store.value is JSONB. Store a JSON object {ts: <ms>} so we're
+// unambiguously structured on both sides. Previous code stored
+// String(Date.now()) and relied on postgres.js coercing it to a JSONB
+// string literal — fragile across driver updates and parseInt quirks.
 async function _getCooldownMs(alertType) {
   try {
     const row = await db`SELECT value FROM kv_store WHERE key = ${`alert_last:${alertType}`}`
     if (!row.length) return Infinity
-    const lastAt = parseInt(row[0].value)
+    const v = row[0].value
+    const lastAt = (v && typeof v === 'object' && Number.isFinite(v.ts))
+      ? v.ts
+      : Number(typeof v === 'string' ? v : NaN)
     if (!Number.isFinite(lastAt)) return Infinity
     return Date.now() - lastAt
   } catch {
@@ -45,9 +52,12 @@ async function _getCooldownMs(alertType) {
 
 async function _markFired(alertType) {
   try {
+    // postgres.js auto-encodes JS objects for JSONB columns.
+    const payload = { ts: Date.now(), type: alertType }
     await db`
-      INSERT INTO kv_store (key, value) VALUES (${`alert_last:${alertType}`}, ${String(Date.now())})
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+      INSERT INTO kv_store (key, value)
+      VALUES (${`alert_last:${alertType}`}, ${payload})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
     `
   } catch (err) {
     logger.warn('alerting: failed to record cooldown', { alertType, error: err.message })

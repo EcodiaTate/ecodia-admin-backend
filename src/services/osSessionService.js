@@ -507,11 +507,27 @@ async function createOSSession() {
   return row
 }
 
-// Retry DB writes up to 3x with 200/400/800ms backoff. The postgres.js
-// connection pool recycles at max_lifetime=30min; if a turn spans a recycle,
-// a bare UPDATE can fail on the closed connection even though the pool will
-// open a fresh one on the NEXT call. Three short retries cover the recycle
-// window without making real DB outages invisible.
+// Retry DB writes up to 3x with 200/400/800ms backoff, but ONLY for
+// transient (connection-class) failures. The postgres.js pool recycles
+// at max_lifetime=30min; a turn that spans a recycle can fail on the
+// closed connection even though the pool will open a fresh one next call.
+// Unique-violations / syntax errors / permission denied are NOT transient
+// and retrying them wastes 1.4s before the permanent failure surfaces.
+function _isTransientDbError(err) {
+  if (!err) return false
+  const code = err.code || ''
+  // Node-level network errors
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETRESET', 'ENOTFOUND', 'EPIPE'].includes(code)) return true
+  // postgres.js surfaces its own codes for these
+  if (['CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED', 'NOT_TAGGED_CALL'].includes(code)) return true
+  // Postgres SQLSTATE classes for connection failures (class 08)
+  if (typeof code === 'string' && code.startsWith('08')) return true
+  // Message fallback — postgres.js sometimes surfaces errors without a code
+  const msg = (err.message || '').toLowerCase()
+  if (msg.includes('connection') && (msg.includes('closed') || msg.includes('terminated') || msg.includes('reset'))) return true
+  return false
+}
+
 async function _dbRetry(label, fn) {
   const delays = [200, 400, 800]
   let lastErr
@@ -520,8 +536,14 @@ async function _dbRetry(label, fn) {
       return await fn()
     } catch (err) {
       lastErr = err
+      // Fast-fail on non-transient errors (unique violation, syntax, permission)
+      // — retry can never succeed, only delays the inevitable.
+      if (!_isTransientDbError(err)) {
+        logger.warn(`DB write failed (non-transient, not retrying)`, { label, code: err.code, error: err.message })
+        throw err
+      }
       if (i < delays.length) {
-        logger.warn(`DB write retry ${i + 1}/${delays.length}`, { label, error: err.message })
+        logger.warn(`DB write retry ${i + 1}/${delays.length}`, { label, code: err.code, error: err.message })
         await new Promise(r => setTimeout(r, delays[i]))
       }
     }

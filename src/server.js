@@ -307,20 +307,48 @@ server.listen(env.PORT, async () => {
   try {
     const alerting = require('./services/osAlertingService')
     const row = await db`SELECT value FROM kv_store WHERE key = 'osalive_last'`.catch(() => [])
-    const prevAlive = row.length ? parseInt(row[0].value) : null
-    const uptimeMs = prevAlive ? Date.now() - prevAlive : 0
-    if (prevAlive && uptimeMs > 30_000) {
-      // Only fire if previous beacon was >30s ago — skips first-ever boot
-      // and instant pm2 restarts that would otherwise spam on deploy.
+    const rawPrev = row.length ? row[0].value : null
+    const prevAlive = (rawPrev && typeof rawPrev === 'object' && Number.isFinite(rawPrev.ts))
+      ? rawPrev.ts
+      : Number(typeof rawPrev === 'string' ? rawPrev : NaN)
+    const validPrev = Number.isFinite(prevAlive) ? prevAlive : null
+    const uptimeMs = validPrev ? Date.now() - validPrev : 0
+
+    // Deploy-sentinel: if a .deploy-sentinel file exists and is <5 min old,
+    // this restart is intentional (deploy script wrote it). Skip the alert
+    // and clear the sentinel so the next unexpected restart fires normally.
+    let deployMarker = false
+    try {
+      const fs = require('fs')
+      const path = require('path')
+      const sentinelPath = path.join(process.cwd(), '.deploy-sentinel')
+      if (fs.existsSync(sentinelPath)) {
+        const stat = fs.statSync(sentinelPath)
+        const ageMs = Date.now() - stat.mtimeMs
+        if (ageMs < 5 * 60 * 1000) {
+          deployMarker = true
+          logger.info('Deploy sentinel found — skipping restart alert', { ageMs })
+        }
+        try { fs.unlinkSync(sentinelPath) } catch {}
+      }
+    } catch (err) {
+      logger.debug('Deploy sentinel check failed', { error: err.message })
+    }
+
+    if (!deployMarker && validPrev && uptimeMs > 30_000) {
+      // Previous beacon >30s ago and no deploy in progress — unplanned restart.
       alerting.alertProcessRestart(uptimeMs).catch(() => {})
     }
+
     // Alive beacon — ticks every 60s. A restart alert will compute prior
     // uptime as (now - beacon), giving a tight bound on silent-death time.
+    // JSONB payload so the schema (value JSONB) is honored explicitly.
     const tickAlive = async () => {
       try {
         await db`
-          INSERT INTO kv_store (key, value) VALUES ('osalive_last', ${String(Date.now())})
-          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+          INSERT INTO kv_store (key, value)
+          VALUES ('osalive_last', ${{ ts: Date.now() }})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
         `
       } catch {}
     }
