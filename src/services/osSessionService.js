@@ -470,12 +470,39 @@ async function createOSSession() {
   return row
 }
 
+// Retry DB writes up to 3x with 200/400/800ms backoff. The postgres.js
+// connection pool recycles at max_lifetime=30min; if a turn spans a recycle,
+// a bare UPDATE can fail on the closed connection even though the pool will
+// open a fresh one on the NEXT call. Three short retries cover the recycle
+// window without making real DB outages invisible.
+async function _dbRetry(label, fn) {
+  const delays = [200, 400, 800]
+  let lastErr
+  for (let i = 0; i <= delays.length; i++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (i < delays.length) {
+        logger.warn(`DB write retry ${i + 1}/${delays.length}`, { label, error: err.message })
+        await new Promise(r => setTimeout(r, delays[i]))
+      }
+    }
+  }
+  logger.error(`DB write permanently failed after retries`, { label, error: lastErr?.message })
+  throw lastErr
+}
+
 async function updateOSSession(sessionId, updates) {
   const { ccCliSessionId, status } = updates
   if (ccCliSessionId) {
-    await db`UPDATE cc_sessions SET cc_cli_session_id = ${ccCliSessionId}, status = ${status || 'complete'} WHERE id = ${sessionId}`
+    await _dbRetry('updateOSSession.ccSessionId', () =>
+      db`UPDATE cc_sessions SET cc_cli_session_id = ${ccCliSessionId}, status = ${status || 'complete'} WHERE id = ${sessionId}`
+    )
   } else if (status) {
-    await db`UPDATE cc_sessions SET status = ${status} WHERE id = ${sessionId}`
+    await _dbRetry('updateOSSession.status', () =>
+      db`UPDATE cc_sessions SET status = ${status} WHERE id = ${sessionId}`
+    )
   }
 }
 
@@ -511,8 +538,16 @@ function extractTextFromContent(content) {
 // opts.suppressOutput = true: suppress WebSocket broadcast (used for internal handover brief generation)
 
 // Internal implementation — callers use sendMessage() which serializes through _sendQueue
+//
+// opts._retryDepth — bounded recursion guard. Incremented on every automatic
+// retry path (stale session, account switch, inactivity timeout). Hard cap
+// of MAX_RETRY_DEPTH prevents the stack-overflow recursion bomb we used to
+// have when a hang on the fallback provider triggered another fallback.
+const MAX_RETRY_DEPTH = 2
+
 async function _sendMessageImpl(content, opts = {}) {
   const { suppressOutput = false } = opts
+  const retryDepth = opts._retryDepth || 0
   const queryFn = await getQuery()
 
   // Kill any active query — SDK query() is one-shot, so each message needs a new call.
@@ -967,14 +1002,21 @@ async function _sendMessageImpl(content, opts = {}) {
     activeQuery = null
 
     // If the loop ended due to inactivity timeout (not a normal completion),
-    // treat it as a hang and try switching accounts
+    // treat it as a hang and try switching accounts. Direct-call _sendMessageImpl
+    // (NOT sendMessage) — we're already inside the serialized queue, so going
+    // through the queue again would deadlock. Depth-guarded to prevent the
+    // recursion bomb: if the fallback also hangs, we surface an error instead
+    // of re-retrying forever and blowing the stack.
     if (_inactivityAborted) {
       const next = _switchAfterExhaustion()
-      if (next) {
+      if (next && retryDepth < MAX_RETRY_DEPTH) {
         ccSessionId = null
-        logger.warn(`OS Session: inactivity timeout — switching from ${_currentProvider} to ${next.provider}`)
+        logger.warn(`OS Session: inactivity timeout — switching from ${_currentProvider} to ${next.provider}`, { retryDepth })
         emitOutput({ type: 'system', content: `⚡ ${_currentProvider} appears hung — switching to ${next.provider}.` })
-        return sendMessage(content)
+        return _sendMessageImpl(content, { ...opts, _retryDepth: retryDepth + 1 })
+      }
+      if (next && retryDepth >= MAX_RETRY_DEPTH) {
+        logger.error('OS Session: inactivity timeout at max retry depth — giving up', { retryDepth, provider: _currentProvider })
       }
       // All providers exhausted — report error.
       // Suppressed (background sendTask) paths never broadcast: the caller will
@@ -1046,13 +1088,41 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     activeQuery = null
 
+    // ─── _accountRetry sentinel (thrown from result handler at line ~932) ───
+    // The result-message handler throws this when it detects usage exhaustion
+    // and has already switched provider. Retry the turn on the new provider.
+    // Direct-call _sendMessageImpl (NOT sendMessage) — we're inside the queue.
+    // Depth-guarded so a repeated-exhaustion cascade can't recurse forever.
+    if (err && err._accountRetry) {
+      if (retryDepth < MAX_RETRY_DEPTH) {
+        logger.info('OS Session: retrying turn on new provider after exhaustion', { retryDepth, newProvider: _currentProvider })
+        return _sendMessageImpl(err.message || content, { ...opts, _retryDepth: retryDepth + 1 })
+      }
+      logger.error('OS Session: account retry at max depth — surfacing error', { retryDepth })
+      const message = 'All providers exhausted (max retry depth reached).'
+      if (!suppressOutput) {
+        emitOutput({ type: 'error', content: message })
+        emitStatus('error', { error: 'max_retry_depth' })
+        broadcast('os-session:complete', { sessionId: dbSessionId, code: 1 })
+      }
+      await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
+      return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
+    }
+
+    // ─── _staleRetry sentinel (thrown from result handler when SDK reports
+    // session-not-found in the result itself — happens after PM2 restart). ───
+    if (err && err._staleRetry && !opts._staleCleaned) {
+      logger.warn('OS Session: stale resume ID from result — starting fresh')
+      return _sendMessageImpl(err.message || content, { ...opts, _staleCleaned: true, _retryDepth: retryDepth + 1 })
+    }
+
     const errMsg = err.message || String(err)
 
     // Stale resume ID after PM2 restart — CC CLI no longer has the session.
     // Clear our stored ID and retry fresh exactly ONCE. This is cheap, safe,
     // and the only automatic retry we still do. All other failure modes
     // (auth, network, model errors) surface immediately and visibly.
-    if (!opts._staleCleaned && (
+    if (!opts._staleCleaned && retryDepth < MAX_RETRY_DEPTH && (
       errMsg.includes('No conversation found') ||
       (errMsg.includes('session') && errMsg.includes('not found')) ||
       errMsg.includes('Invalid session')
@@ -1062,7 +1132,7 @@ async function _sendMessageImpl(content, opts = {}) {
       if (session?.id) {
         await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
       }
-      return sendMessage(content, { ...opts, _staleCleaned: true })
+      return _sendMessageImpl(content, { ...opts, _staleCleaned: true, _retryDepth: retryDepth + 1 })
     }
 
     // Everything else: log, surface to frontend, persist error state, return.
