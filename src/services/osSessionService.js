@@ -682,17 +682,22 @@ async function _sendMessageImpl(content, opts = {}) {
 
   // Build the custom system prompt (cached per-cwd). This replaces the SDK's
   // default ~5-6k-token scaffolding entirely — see buildCustomSystemPrompt docs.
-  let customSystemPrompt = buildCustomSystemPrompt(cwd)
+  //
+  // IMPORTANT: keep this STABLE across turns. The SDK's prompt cache keys on
+  // the system prompt — a single byte of churn busts the cache and we re-pay
+  // the full system-prompt cost every turn. Any per-turn addendum (like the
+  // restart recovery block below) goes into the USER message instead, where
+  // it's expected to vary.
+  const customSystemPrompt = buildCustomSystemPrompt(cwd)
 
-  // Prepend restart recovery state if a recent handoff snapshot exists
+  // Load restart recovery block; we'll stitch it into the user message
+  // further down instead of prepending to system prompt (was a cache-buster).
+  let recoveryBlock = null
   try {
     const { readHandoffState } = require('./sessionHandoff')
-    const recoveryBlock = await readHandoffState()
-    if (recoveryBlock) {
-      customSystemPrompt = recoveryBlock + '\n\n---\n\n' + customSystemPrompt
-    }
+    recoveryBlock = await readHandoffState()
   } catch (err) {
-    logger.warn('Failed to prepend handoff state', { error: err.message })
+    logger.warn('Failed to read handoff state', { error: err.message })
   }
 
   const options = {
@@ -881,9 +886,20 @@ async function _sendMessageImpl(content, opts = {}) {
     }, INACTIVITY_TIMEOUT_MS)
   }
 
+  // Stitch restart-recovery block into the USER message (not the system
+  // prompt) so the SDK's prompt cache stays stable across turns. The block
+  // is small and tagged so the model treats it as context, not the actual
+  // user intent. Only stitched on the first turn after a restart where
+  // handoff state exists.
+  let finalPrompt = promptWithMemory
+  if (recoveryBlock) {
+    finalPrompt = `<restart_recovery>\n${recoveryBlock}\n</restart_recovery>\n\n${promptWithMemory}`
+    logger.info('OS Session: stitching restart recovery block into user message', { recoveryLen: recoveryBlock.length })
+  }
+
   try {
-    logger.info('OS Session: calling queryFn...', { promptLength: promptWithMemory.length, suppressOutput })
-    const q = queryFn({ prompt: promptWithMemory, options })
+    logger.info('OS Session: calling queryFn...', { promptLength: finalPrompt.length, suppressOutput, recovery: !!recoveryBlock })
+    const q = queryFn({ prompt: finalPrompt, options })
     activeQuery = q
     activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()

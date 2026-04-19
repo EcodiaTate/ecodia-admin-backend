@@ -22,6 +22,93 @@ const logger = require('../config/logger')
 const usageEnergy = require('./usageEnergyService')
 const db = require('../config/db')
 
+// ─── Grounded context gathering ─────────────────────────────────────────────
+// Pulls concrete signals the OS can act on instead of a pure open prompt.
+// Each query is wrapped so one failure never blocks the heartbeat — we return
+// whatever succeeded and the prompt notes the rest as "(unavailable)".
+async function _gatherHeartbeatContext() {
+  const now = Date.now()
+  const fourHoursAgo = new Date(now - 4 * 60 * 60 * 1000)
+  const twoHoursAgo  = new Date(now - 2 * 60 * 60 * 1000)
+
+  const results = await Promise.allSettled([
+    // Pending / urgent emails (triage not complete, recent)
+    db`
+      SELECT COUNT(*)::int AS n
+      FROM email_threads
+      WHERE triage_status IN ('pending', 'pending_retry')
+        AND triage_priority IN ('urgent', 'high')
+    `,
+    // All unread / untriaged emails
+    db`
+      SELECT COUNT(*)::int AS n
+      FROM email_threads
+      WHERE triage_status = 'pending'
+    `,
+    // Actions awaiting approval in the queue
+    db`
+      SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE priority IN ('high','urgent'))::int AS urgent
+      FROM action_queue
+      WHERE status = 'pending'
+    `,
+    // Scheduled tasks that failed or are overdue
+    db`
+      SELECT COUNT(*)::int AS n
+      FROM os_scheduled_tasks
+      WHERE status = 'active'
+        AND next_run_at IS NOT NULL
+        AND next_run_at < ${new Date(now - 60 * 60 * 1000)}
+    `,
+    // Factory sessions still running (spawned but not completed)
+    db`
+      SELECT COUNT(*)::int AS n
+      FROM cc_sessions
+      WHERE status = 'running'
+        AND started_at > ${new Date(now - 6 * 60 * 60 * 1000)}
+    `,
+    // Last heartbeat tick — how long since last proactive wake
+    db`
+      SELECT MAX(created_at) AS last_heartbeat
+      FROM cc_session_logs
+      WHERE content LIKE '[USER] [HEARTBEAT]%'
+    `,
+    // Last user (non-heartbeat) message
+    db`
+      SELECT MAX(created_at) AS last_user
+      FROM cc_session_logs
+      WHERE content LIKE '[USER]%'
+        AND content NOT LIKE '[USER] [HEARTBEAT]%'
+        AND content NOT LIKE '[USER] [SCHEDULED:%'
+    `,
+  ])
+
+  const pick = (idx, fallback = null) => {
+    const r = results[idx]
+    return r.status === 'fulfilled' ? r.value : fallback
+  }
+
+  const urgentEmails  = pick(0)?.[0]?.n ?? null
+  const pendingEmails = pick(1)?.[0]?.n ?? null
+  const queueRow      = pick(2)?.[0] ?? null
+  const overdueCrons  = pick(3)?.[0]?.n ?? null
+  const runningFactory = pick(4)?.[0]?.n ?? null
+  const lastHeartbeat = pick(5)?.[0]?.last_heartbeat ?? null
+  const lastUser      = pick(6)?.[0]?.last_user ?? null
+
+  return {
+    urgentEmails,
+    pendingEmails,
+    pendingActions: queueRow?.n ?? null,
+    urgentActions: queueRow?.urgent ?? null,
+    overdueCrons,
+    runningFactory,
+    lastHeartbeatAgoH: lastHeartbeat ? ((now - new Date(lastHeartbeat).getTime()) / 3_600_000) : null,
+    lastUserAgoH:      lastUser      ? ((now - new Date(lastUser).getTime())      / 3_600_000) : null,
+    timestamp: new Date(now).toISOString(),
+    timestampLocal: new Date(now).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
+  }
+}
+
 const API_PORT = process.env.PORT || 3001
 
 // Base interval — 30 minutes on healthy energy.
@@ -65,18 +152,34 @@ async function lastUserMessageAgoMs() {
   }
 }
 
-function _heartbeatPrompt() {
-  // Open-ended nudge. The model reads its own CLAUDE.md and decides.
-  // We intentionally don't micromanage — this is a CEO, not a script.
-  return [
-    '[HEARTBEAT] Autonomous check-in. Tate did not send this — the heartbeat timer fired.',
+function _fmtNum(v)  { return v == null ? 'unavailable' : String(v) }
+function _fmtHours(v) { return v == null ? 'unavailable' : `${v.toFixed(1)}h ago` }
+
+// Build a grounded heartbeat prompt. Data beats asking "what changed?" blind —
+// if we pass the OS concrete counters it acts on signal, not hallucination.
+function _heartbeatPrompt(ctx) {
+  const lines = [
+    '[HEARTBEAT] Autonomous check-in — the timer fired, Tate did not send this.',
     '',
-    'What changed since you were last active? Anything needing attention: new emails, overdue tasks, crons that failed, factory sessions awaiting input, financial anomalies, calendar conflicts?',
+    `Local time: ${ctx.timestampLocal}`,
+    `Last user message: ${_fmtHours(ctx.lastUserAgoH)}`,
+    `Last heartbeat:    ${_fmtHours(ctx.lastHeartbeatAgoH)}`,
     '',
-    'If nothing needs action right now, reply with a one-line "nothing pressing" and end. Do NOT invent work. Conserving energy is valid.',
+    'Current signal:',
+    `  • Urgent/high emails pending triage: ${_fmtNum(ctx.urgentEmails)}`,
+    `  • All untriaged emails:              ${_fmtNum(ctx.pendingEmails)}`,
+    `  • Action queue pending:              ${_fmtNum(ctx.pendingActions)} (${_fmtNum(ctx.urgentActions)} urgent/high)`,
+    `  • Overdue scheduled tasks (>1h):     ${_fmtNum(ctx.overdueCrons)}`,
+    `  • Factory sessions still running:    ${_fmtNum(ctx.runningFactory)}`,
     '',
-    'If something does need action, do it — no approval needed, full autonomy.',
-  ].join('\n')
+    'Decision framework:',
+    '  1. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
+    '  2. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
+    '  3. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
+    '',
+    'You are the CEO. Act.',
+  ]
+  return lines.join('\n')
 }
 
 async function _tick() {
@@ -107,14 +210,34 @@ async function _tick() {
       return
     }
 
-    // 4. Fire the heartbeat. Use suppressOutput=false so the frontend sees it too
+    // 4. Gather grounded context BEFORE firing — concrete counters, not
+    //    open-ended "what changed?". Costs 7 fast parallel DB queries.
+    const ctx = await _gatherHeartbeatContext()
+
+    // 5. Smart skip: if every actionable counter is zero AND user messaged
+    //    within the last hour, the heartbeat is noise. Don't burn a turn
+    //    just to have the model say "nothing pressing". When things are
+    //    quiet let them stay quiet.
+    const totalSignal = (ctx.urgentEmails || 0) + (ctx.pendingActions || 0) +
+                        (ctx.overdueCrons || 0) + (ctx.runningFactory || 0)
+    const recentUserH = ctx.lastUserAgoH ?? Infinity
+    if (totalSignal === 0 && recentUserH < 1) {
+      logger.info('Heartbeat: no signal + recent user activity, skipping quota burn', { recentUserH })
+      return
+    }
+
+    // 6. Fire the heartbeat. Use suppressOutput=false so the frontend sees it too
     //    (lets Tate verify the system is alive when he checks in from Africa).
-    logger.info('Heartbeat: firing OS wake', { energyLevel: energy?.level, provider: energy?.currentProvider })
+    logger.info('Heartbeat: firing OS wake', {
+      energyLevel: energy?.level,
+      provider: energy?.currentProvider,
+      signal: { urgentEmails: ctx.urgentEmails, pendingActions: ctx.pendingActions, overdueCrons: ctx.overdueCrons, runningFactory: ctx.runningFactory },
+    })
     _lastHeartbeatAt = Date.now()
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: _heartbeatPrompt() }),
+      body: JSON.stringify({ message: _heartbeatPrompt(ctx) }),
       signal: AbortSignal.timeout(30 * 60 * 1000),  // 30 min cap per heartbeat
     })
     const body = await res.json().catch(() => ({}))
