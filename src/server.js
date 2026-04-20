@@ -372,6 +372,15 @@ server.listen(env.PORT, async () => {
   } catch (err) {
     logger.warn('Process restart alert setup failed', { error: err.message })
   }
+
+  // ── Boot: Session Auto-Wake ───────────────────────────────────────
+  // If a recent handoff state exists, fires a wake message after 15s so the
+  // OS resumes interrupted work automatically — no need to wait for Tate.
+  try {
+    require('./services/sessionAutoWake').triggerAutoWakeIfNeeded()
+  } catch (err) {
+    logger.warn('Session auto-wake setup failed (non-fatal)', { error: err.message })
+  }
 })
 
 // ── Boot: Conditional Auto-wake OS Session ───────────────────────────
