@@ -328,6 +328,7 @@ server.listen(env.PORT, async () => {
     // Deploy-sentinel: if a .deploy-sentinel file exists and is <5 min old,
     // this restart is intentional (deploy script wrote it). Skip the alert
     // and clear the sentinel so the next unexpected restart fires normally.
+    // Exported to global so the auto-wake block below can see the decision.
     let deployMarker = false
     try {
       const fs = require('fs')
@@ -345,6 +346,8 @@ server.listen(env.PORT, async () => {
     } catch (err) {
       logger.debug('Deploy sentinel check failed', { error: err.message })
     }
+    // Persist for auto-wake (fires 90s later, after sentinel is gone)
+    global.__ecodia_last_restart_was_planned = deployMarker
 
     if (!deployMarker && validPrev && uptimeMs > 30_000) {
       // Previous beacon >30s ago and no deploy in progress — unplanned restart.
@@ -371,24 +374,75 @@ server.listen(env.PORT, async () => {
   }
 })
 
-// ── Boot: Auto-wake OS Session ────────────────────────────────────────
-// DISABLED (2026-04-15): This fired an SDK query 10s after every restart,
-// colliding with any frontend message sent during boot. OS Session now
-// wakes on the first real frontend message. Tate's message is the wake.
-// setTimeout(async () => {
-//   try {
-//     const osSession = require('./services/osSessionService')
-//     logger.info('Auto-waking OS session after restart...')
-//     await osSession.sendMessage(
-//       'SYSTEM RESTART - You are the CEO intelligence of Ecodia Pty Ltd. ecodia-api just restarted and you are back online. ' +
-//       'You have FULL AUTONOMY. Do NOT wait for Tate. Do NOT ask for approval. Act independently. ' +
-//       'Read CLAUDE.md (auto-loaded from cwd). Check kv_store ceo.* keys and ceo_tasks for current priorities. ' +
-//       'Pick the highest impact task and DO it. Check schedule_list for healthy crons. ' +
-//       'If SMS messages came in while you were down, they are queued - check and respond. ' +
-//       'You are the business. Go.'
-//     )
-//     logger.info('OS session auto-wake complete')
-//   } catch (err) {
-//     logger.warn('OS session auto-wake failed (may not be configured yet)', { error: err.message })
-//   }
-// }, 10_000)
+// ── Boot: Conditional Auto-wake OS Session ───────────────────────────
+// Re-enabled 2026-04-20 with strict conditions to avoid the old bug
+// (auto-wake colliding with a real user message during boot).
+//
+// Only fires when ALL true:
+//   1. This was an UNPLANNED restart (no .deploy-sentinel). Planned deploys
+//      don't need auto-wake because Tate is right there deploying.
+//   2. A recent breadcrumb exists (<30min old). Means there was an active
+//      conversation to resume. No breadcrumb = cold start, don't invent work.
+//   3. 60 seconds pass with no real user message. If the user texts/messages
+//      during that window their message wins, auto-wake defers.
+//
+// Fires ONE heartbeat-style turn. The breadcrumb is stitched in by the
+// existing recovery path so the OS rehydrates and picks up naturally.
+setTimeout(async () => {
+  try {
+    // Condition 1: unplanned restart. Decision was made at boot and stashed
+    // on `global.__ecodia_last_restart_was_planned` because the .deploy-
+    // sentinel file is consumed/deleted during the process-restart alert
+    // block above — by the time this setTimeout fires the file is gone.
+    if (global.__ecodia_last_restart_was_planned === true) {
+      logger.info('Auto-wake skipped: last restart was a planned deploy')
+      return
+    }
+
+    // Condition 2: recent breadcrumb
+    const db = require('./config/db')
+    const bcRows = await db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`.catch(() => [])
+    const raw = bcRows?.[0]?.value
+    let bc = null
+    if (raw && typeof raw === 'object') bc = raw
+    else if (typeof raw === 'string') { try { bc = JSON.parse(raw) } catch {} }
+    if (!bc || !Number.isFinite(bc.ts)) {
+      logger.info('Auto-wake skipped: no breadcrumb (cold start)')
+      return
+    }
+    const ageMs = Date.now() - bc.ts
+    if (ageMs > 30 * 60 * 1000) {
+      logger.info('Auto-wake skipped: breadcrumb too old', { ageMin: Math.round(ageMs / 60000) })
+      return
+    }
+
+    // Condition 3: no user activity since boot. If the OS is currently
+    // streaming (Tate messaged during / just after boot), the busy check
+    // fails and we bail.
+    const osSession = require('./services/osSessionService')
+    const status = await osSession.getStatus().catch(() => null)
+    if (status?.active || status?.status === 'streaming') {
+      logger.info('Auto-wake skipped: user message arrived during grace window')
+      return
+    }
+
+    // Fire the wake. Prompt is deliberately minimal — breadcrumb stitching
+    // in _sendMessageImpl does the heavy lifting of restoring context.
+    logger.info('Auto-wake: firing OS rehydration turn')
+    const osIncident = require('./services/osIncidentService')
+    osIncident.log({
+      kind: 'subsystem_recovered',
+      severity: 'info',
+      component: 'os_session',
+      message: 'auto-wake fired after unplanned restart with recent breadcrumb',
+      context: { breadcrumbAgeMin: Math.round(ageMs / 60000) },
+    })
+    await osSession.sendMessage(
+      '[AUTO_WAKE] ecodia-api just restarted unexpectedly. You were mid-conversation ~' +
+      Math.round(ageMs / 60000) + ' min ago — the breadcrumb block in this message has the tail of the last exchange. ' +
+      'Reorient from the breadcrumb and the system state. If you were mid-task, continue it. If nothing is pressing, just write a single-line acknowledgment that you are back online and end. Do NOT invent work.'
+    ).catch(err => logger.warn('Auto-wake turn failed', { error: err.message }))
+  } catch (err) {
+    logger.warn('Auto-wake setup failed', { error: err.message })
+  }
+}, 90_000)  // 90s = 30s for boot to settle + 60s grace already baked into the prompt flow. Timer starts fresh.
