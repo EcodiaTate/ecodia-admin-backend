@@ -169,4 +169,51 @@ async function pollTransactions() {
   logger.info('Xero poll complete')
 }
 
-module.exports = { getValidAccessToken, exchangeCode, pollTransactions }
+async function getInvoices({ status, limit = 50 } = {}) {
+  const token = await getValidAccessToken()
+  const params = [`pageSize=${Math.min(limit, 200)}`, 'order=Date DESC']
+  if (status) params.push(`where=Status=="${status}"`)
+
+  const response = await axios.get(
+    `${XERO_API_BASE}/Invoices?${params.join('&')}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'xero-tenant-id': env.XERO_TENANT_ID,
+        Accept: 'application/json',
+      },
+    }
+  )
+  return response.data.Invoices || []
+}
+
+async function getContacts({ limit = 50 } = {}) {
+  const token = await getValidAccessToken()
+  const response = await axios.get(
+    `${XERO_API_BASE}/Contacts?pageSize=${Math.min(limit, 200)}&order=Name ASC`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'xero-tenant-id': env.XERO_TENANT_ID,
+        Accept: 'application/json',
+      },
+    }
+  )
+  return response.data.Contacts || []
+}
+
+async function categorizeTransaction(txId, { account_code, category } = {}) {
+  const [transaction] = await db`
+    UPDATE transactions
+    SET
+      xero_category = ${account_code},
+      ${category ? db`category = ${category},` : db``}
+      status = 'categorized',
+      updated_at = now()
+    WHERE id = ${txId}
+    RETURNING *
+  `
+  return transaction || null
+}
+
+module.exports = { getValidAccessToken, exchangeCode, pollTransactions, getInvoices, getContacts, categorizeTransaction }
