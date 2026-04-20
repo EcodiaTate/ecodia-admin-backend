@@ -1358,6 +1358,32 @@ async function _sendMessageImpl(content, opts = {}) {
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
       _recordTurnOutcome(false, 'empty_sdk_stream')
+      // Preserve user intent so auto-wake can rehydrate into "you were asked X but the stream died".
+      // Without this, an empty_sdk_stream silently vaporises the user's last message and next restart
+      // wakes with stale context pointing at whatever exchange succeeded before the failure.
+      if (!suppressOutput && !content.startsWith('[HEARTBEAT]') && !content.startsWith('[SCHEDULED:')) {
+        try {
+          const TAIL_CHARS = 600
+          const userTail = content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : content
+          const breadcrumbPayload = JSON.stringify({
+            ts: Date.now(),
+            session_id: dbSessionId,
+            cc_session_id: ccSessionId,
+            provider: _currentProvider,
+            user_tail: userTail,
+            assistant_tail: `[empty_sdk_stream — turn failed to produce a response]`,
+            tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+            failed: true,
+          })
+          await db`
+            INSERT INTO kv_store (key, value)
+            VALUES ('session.last_breadcrumb', ${breadcrumbPayload})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+          `
+        } catch (bcErr) {
+          logger.warn('failure-path breadcrumb write failed', { error: bcErr.message })
+        }
+      }
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
     }
 
@@ -1397,13 +1423,27 @@ async function _sendMessageImpl(content, opts = {}) {
           assistant_tail: asstTail,
           tokens: sessionTokenUsage.input + sessionTokenUsage.output,
         })
-        await db`
-          INSERT INTO kv_store (key, value)
-          VALUES ('session.last_breadcrumb', ${breadcrumbPayload})
-          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-        `.catch(err => logger.debug('breadcrumb write failed (non-fatal)', { error: err.message }))
+        try {
+          await db`
+            INSERT INTO kv_store (key, value)
+            VALUES ('session.last_breadcrumb', ${breadcrumbPayload})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+          `
+        } catch (dbErr) {
+          logger.warn('breadcrumb write failed — next restart will lose context', { error: dbErr.message })
+          try {
+            const osIncident = require('./osIncidentService')
+            osIncident.log({
+              kind: 'context_reset',
+              severity: 'warn',
+              component: 'os_session',
+              message: 'breadcrumb write failed — context will not survive restart',
+              context: { error: dbErr.message, sessionId: dbSessionId },
+            })
+          } catch {}
+        }
       } catch (err) {
-        logger.debug('breadcrumb capture failed (non-fatal)', { error: err.message })
+        logger.warn('breadcrumb capture failed', { error: err.message })
       }
     }
 
@@ -1466,6 +1506,29 @@ async function _sendMessageImpl(content, opts = {}) {
       }
       await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'error' })
       _recordTurnOutcome(false, 'max_retry_depth')
+      if (!suppressOutput && !content.startsWith('[HEARTBEAT]') && !content.startsWith('[SCHEDULED:')) {
+        try {
+          const TAIL_CHARS = 600
+          const userTail = content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : content
+          const breadcrumbPayload = JSON.stringify({
+            ts: Date.now(),
+            session_id: dbSessionId,
+            cc_session_id: ccSessionId,
+            provider: _currentProvider,
+            user_tail: userTail,
+            assistant_tail: `[max_retry_depth — all providers exhausted]`,
+            tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+            failed: true,
+          })
+          await db`
+            INSERT INTO kv_store (key, value)
+            VALUES ('session.last_breadcrumb', ${breadcrumbPayload})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+          `
+        } catch (bcErr) {
+          logger.warn('failure-path breadcrumb write failed', { error: bcErr.message })
+        }
+      }
       return { sessionId: dbSessionId, ccCliSessionId: ccSessionId, code: 1, text: `Error: ${message}` }
     }
 

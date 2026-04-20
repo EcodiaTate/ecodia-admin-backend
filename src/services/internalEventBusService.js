@@ -36,9 +36,19 @@ async function initRedis() {
   if (!env.REDIS_URL) return
 
   try {
+    // Publisher reuses the shared singleton so we're not doubling connection count.
+    // Subscriber needs its own client — ioredis holds sub clients in blocking mode
+    // so they can't run regular commands. Give it the same resilient retry config
+    // as the singleton so a brief network blip doesn't permanently stop events.
     const Redis = require('ioredis')
-    redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 })
-    redisSub = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 })
+    const { getRedisClient } = require('../config/redis')
+    redis = getRedisClient()
+    redisSub = new Redis(env.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      retryStrategy: (times) => Math.min(times * 200, 5000),
+      reconnectOnError: () => true,
+    })
 
     redisSub.subscribe(REDIS_CHANNEL, (err) => {
       if (err) {

@@ -23,17 +23,11 @@ const { broadcast } = require('../websocket/wsManager')
 // feed back into triage, closing the learning loop.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Lazy Redis — shared with symbridge
-let redis = null
+// Reuse the shared Redis singleton so we don't stack independent connection pools.
 function getRedis() {
-  if (redis) return redis
   try {
-    const env = require('../config/env')
-    if (!env.REDIS_URL) return null
-    const Redis = require('ioredis')
-    redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: true })
-    redis.connect().catch(() => { redis = null })
-    return redis
+    const { getRedisClient } = require('../config/redis')
+    return getRedisClient()
   } catch { return null }
 }
 
