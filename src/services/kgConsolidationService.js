@@ -70,6 +70,16 @@ async function deduplicateNodes({ dryRun = false } = {}) {
 
   const merged = []
 
+  // Breadcrumb: record dedup ran even if zero merges happened. Without this,
+  // consolidated_at only moves when a merge succeeds — making a perfectly-
+  // healthy graph with no dupes look identical to a broken pipeline.
+  try {
+    await runQuery(`
+      MERGE (m:DedupRun {singleton: true})
+      SET m.last_run_at = datetime(), m.run_count = coalesce(m.run_count, 0) + 1
+    `)
+  } catch {}
+
   // Strategy 1: Exact name match after normalization — partitioned by label to avoid O(n²) cross-join.
   // First get all labels that have >1 node, then dedup within each label.
   const labelCounts = await runQuery(`
@@ -286,6 +296,14 @@ async function synthesizePatterns({ dryRun = false, maxClusters = 5 } = {}) {
   if (!env.ANTHROPIC_API_KEY && !env.DEEPSEEK_API_KEY) return []
 
   const synthesized = []
+
+  // Breadcrumb: record abstraction ran even if zero patterns synthesized.
+  try {
+    await runQuery(`
+      MERGE (m:AbstractRun {singleton: true})
+      SET m.last_run_at = datetime(), m.run_count = coalesce(m.run_count, 0) + 1
+    `)
+  } catch {}
 
   // Find hub nodes with many similar-typed outgoing relationships
   const hubs = await runQuery(`
@@ -1945,6 +1963,28 @@ async function runConsolidationDirector({ dryRun = false } = {}) {
     phasesRun: workPlan.length,
     phases: workPlan.map(p => p.phase),
   })
+
+  // Watermark: record that a consolidation pipeline completed. This is
+  // independent of whether any individual node was merged/abstracted — it
+  // proves the Director ran end-to-end. Without this, you can't tell a
+  // running pipeline from a broken one.
+  try {
+    await runQuery(`
+      MERGE (m:ConsolidationRun {run_id: $run_id})
+      SET m.completed_at = datetime(),
+          m.phases = $phases,
+          m.duration_ms = $duration_ms,
+          m.plan_count = $plan_count
+    `, {
+      run_id: `run_${Date.now()}`,
+      phases: Object.keys(results.phases),
+      duration_ms: results.durationMs,
+      plan_count: workPlan.length,
+    })
+    logger.info(`KG Director: watermark written as ConsolidationRun node`)
+  } catch (err) {
+    logger.error('KG Director: watermark write failed', { error: err.message })
+  }
 
   return results
 }
