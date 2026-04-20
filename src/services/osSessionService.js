@@ -26,6 +26,7 @@ const secretSafety = require('./secretSafetyService')
 const usageEnergy = require('./usageEnergyService')
 const osIncident = require('./osIncidentService')
 const sessionMemory = require('./sessionMemoryService')
+const osConversationLog = require('./osConversationLog')
 
 // Fire quota-checks for BOTH accounts on startup to get real usage % immediately
 usageEnergy.refreshAllAccounts()
@@ -1006,6 +1007,27 @@ async function _sendMessageImpl(content, opts = {}) {
     activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()
 
+    let _turnNo = 0
+    try {
+      const next = await osConversationLog.getNextTurnNumber(dbSessionId)
+      if (typeof next === 'number') _turnNo = next
+    } catch (e) {
+      logger.debug('osConversationLog.getNextTurnNumber failed, defaulting to 0', { err: e.message })
+    }
+    // Log the user turn once up front. finalPrompt already contains the effective user text for this query.
+    try {
+      await osConversationLog.logTurn({
+        ccSessionId: dbSessionId,
+        turnNumber: _turnNo++,
+        role: 'user',
+        content: finalPrompt,
+        contentJson: null,
+        tokenCount: null,
+      })
+    } catch (e) {
+      logger.debug('osConversationLog.logTurn(user) failed', { err: e.message })
+    }
+
     // Stream all messages from the SDK
     for await (const msg of q) {
       _resetInactivityTimer()  // got a message, reset timeout
@@ -1045,6 +1067,18 @@ async function _sendMessageImpl(content, opts = {}) {
               if (block.type === 'tool_result') {
                 // Clear the watchdog for this tool_use_id — it completed.
                 _markToolCompleted(block.tool_use_id)
+                try {
+                  await osConversationLog.logTurn({
+                    ccSessionId: dbSessionId,
+                    turnNumber: _turnNo++,
+                    role: 'tool_result',
+                    content: null,
+                    contentJson: { tool_use_id: block.tool_use_id, content: block.content ?? null },
+                    tokenCount: null,
+                  })
+                } catch (e) {
+                  logger.debug('osConversationLog.logTurn(tool_result) failed', { err: e.message })
+                }
                 // Extract readable result text (truncate large blobs)
                 let resultText = ''
                 if (typeof block.content === 'string') {
@@ -1117,6 +1151,30 @@ async function _sendMessageImpl(content, opts = {}) {
                 // Log for history/turns-this-week count (non-blocking)
                 usageEnergy.logUsage({ sessionId: dbSessionId, source: 'os_session', provider, model, inputTokens: turnInput, outputTokens: turnOutput }).catch(() => {})
               }
+            }
+            try {
+              if (safeText && safeText.trim()) {
+                await osConversationLog.logTurn({
+                  ccSessionId: dbSessionId,
+                  turnNumber: _turnNo++,
+                  role: 'assistant',
+                  content: safeText,
+                  contentJson: null,
+                  tokenCount: null,
+                })
+              }
+              for (const tu of toolUses) {
+                await osConversationLog.logTurn({
+                  ccSessionId: dbSessionId,
+                  turnNumber: _turnNo++,
+                  role: 'tool_use',
+                  content: null,
+                  contentJson: { id: tu.id, name: tu.name, input: tu.input ?? null },
+                  tokenCount: null,
+                })
+              }
+            } catch (e) {
+              logger.debug('osConversationLog.logTurn(assistant/tool_use) failed', { err: e.message })
             }
             break
           }
