@@ -7,6 +7,12 @@
  * Schema is intentionally open. Nodes and relationships emerge from experience.
  * Vector embeddings on node content enable semantic retrieval.
  * Every interaction, decision, and observation can become part of the graph.
+ *
+ * Write-ahead buffer: when Aura is unreachable, graph_reflect / graph_merge_node /
+ * graph_create_relationship queue their args to Supabase graph_write_buffer and return
+ * { buffered: true }. Call graph_replay_buffer once Neo4j is back to drain the queue.
+ * Read tools (graph_query, graph_search, graph_schema, graph_context) return
+ * { unavailable: true } on connection failure — never buffer, never crash.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -18,6 +24,9 @@ const driver = neo4j.driver(
   neo4j.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD)
 )
 const DB = process.env.NEO4J_DATABASE || 'neo4j'
+
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
 
 const server = new McpServer({ name: 'neo4j', version: '1.0.0' })
 
@@ -38,6 +47,70 @@ async function run(cypher, params = {}) {
     await session.close()
   }
 }
+
+// ── Connection-error detection ──────────────────────────────────────────────
+// Only matches transport/routing failures. Logic errors (bad Cypher, constraint
+// violations, permission errors) are NOT connection errors and must propagate.
+
+function isConnectionError(err) {
+  if (!err) return false
+  const code = err.code || ''
+  const msg = (err.message || '').toLowerCase()
+  return (
+    code === 'ServiceUnavailable' ||
+    code === 'SessionExpired' ||
+    msg.includes('enotfound') ||
+    msg.includes('econnrefused') ||
+    msg.includes('etimedout') ||
+    msg.includes('no routing servers available') ||
+    msg.includes('could not perform discovery') ||
+    msg.includes('socket hang up') ||
+    msg.includes('failed to connect')
+  )
+}
+
+// ── Write-ahead buffer ───────────────────────────────────────────────────────
+// Persists args to Supabase when Neo4j is unreachable so they can be replayed.
+// Returns true if the row was inserted, false if Supabase is also unavailable.
+
+async function bufferWrite(tool, payload, reason) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return false
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/graph_write_buffer`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({ tool, payload, status: 'pending', error: reason }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+// ── Supabase PATCH helper (used by replay) ───────────────────────────────────
+
+async function patchBufferRow(id, fields) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return
+  await fetch(`${SUPABASE_URL}/rest/v1/graph_write_buffer?id=eq.${id}`, {
+    method: 'PATCH',
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=minimal',
+    },
+    body: JSON.stringify(fields),
+  }).catch(() => {})
+}
+
+// Canned responses
+const BUFFERED_OK = { content: [{ type: 'text', text: JSON.stringify({ buffered: true, message: 'Neo4j unreachable — queued to graph_write_buffer for replay' }) }] }
+const unavailable = (reason) => ({ content: [{ type: 'text', text: JSON.stringify({ unavailable: true, reason }) }] })
 
 // ── Core: Create a node ──
 
@@ -63,15 +136,23 @@ server.tool('graph_create_relationship', 'Create a relationship between two node
   rel_type: z.string().describe('Relationship type (e.g. "WORKS_WITH", "FEELS_ABOUT", "LEARNED_FROM")'),
   properties: z.record(z.any()).optional().describe('Optional relationship properties'),
 }, async ({ from_match, from_label, to_match, to_label, rel_type, properties }) => {
-  const props = properties ? ' SET r += $props' : ''
-  const result = await run(
-    `MATCH (a:\`${from_label}\` {${from_match}}), (b:\`${to_label}\` {${to_match}})
-     CREATE (a)-[r:\`${rel_type}\`]->(b)${props}
-     SET r.created_at = datetime()
-     RETURN a.name AS from, type(r) AS rel, b.name AS to`,
-    { props: properties || {} }
-  )
-  return { content: [{ type: 'text', text: result.length > 0 ? JSON.stringify(result, null, 2) : 'No matching nodes found. Check your match clauses.' }] }
+  try {
+    const props = properties ? ' SET r += $props' : ''
+    const result = await run(
+      `MATCH (a:\`${from_label}\` {${from_match}}), (b:\`${to_label}\` {${to_match}})
+       CREATE (a)-[r:\`${rel_type}\`]->(b)${props}
+       SET r.created_at = datetime()
+       RETURN a.name AS from, type(r) AS rel, b.name AS to`,
+      { props: properties || {} }
+    )
+    return { content: [{ type: 'text', text: result.length > 0 ? JSON.stringify(result, null, 2) : 'No matching nodes found. Check your match clauses.' }] }
+  } catch (err) {
+    if (isConnectionError(err)) {
+      await bufferWrite('graph_create_relationship', { from_match, from_label, to_match, to_label, rel_type, properties }, err.message)
+      return BUFFERED_OK
+    }
+    throw err
+  }
 })
 
 // ── Core: Query with raw Cypher ──
@@ -80,8 +161,13 @@ server.tool('graph_query', 'Run any Cypher query. Full power, full responsibilit
   cypher: z.string().describe('Cypher query to execute'),
   params: z.record(z.any()).optional().describe('Query parameters'),
 }, async ({ cypher, params }) => {
-  const result = await run(cypher, params || {})
-  return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+  try {
+    const result = await run(cypher, params || {})
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+  } catch (err) {
+    if (isConnectionError(err)) return unavailable(err.message)
+    throw err
+  }
 })
 
 // ── Semantic: Find connected context ──
@@ -91,21 +177,26 @@ server.tool('graph_context', 'Get the neighborhood of a node - everything connec
   label: z.string().describe('Node label'),
   depth: z.number().optional().describe('Max traversal depth (default 2)'),
 }, async ({ match, label, depth }) => {
-  const d = depth || 2
-  const result = await run(
-    `MATCH path = (n:\`${label}\` {${match}})-[*1..${d}]-(connected)
-     UNWIND relationships(path) AS r
-     RETURN DISTINCT
-       startNode(r).name AS from,
-       labels(startNode(r)) AS from_labels,
-       type(r) AS relationship,
-       endNode(r).name AS to,
-       labels(endNode(r)) AS to_labels,
-       properties(r) AS rel_props
-     LIMIT 50`,
-    {}
-  )
-  return { content: [{ type: 'text', text: result.length > 0 ? JSON.stringify(result, null, 2) : 'No connections found.' }] }
+  try {
+    const d = depth || 2
+    const result = await run(
+      `MATCH path = (n:\`${label}\` {${match}})-[*1..${d}]-(connected)
+       UNWIND relationships(path) AS r
+       RETURN DISTINCT
+         startNode(r).name AS from,
+         labels(startNode(r)) AS from_labels,
+         type(r) AS relationship,
+         endNode(r).name AS to,
+         labels(endNode(r)) AS to_labels,
+         properties(r) AS rel_props
+       LIMIT 50`,
+      {}
+    )
+    return { content: [{ type: 'text', text: result.length > 0 ? JSON.stringify(result, null, 2) : 'No connections found.' }] }
+  } catch (err) {
+    if (isConnectionError(err)) return unavailable(err.message)
+    throw err
+  }
 })
 
 // ── Merge: Upsert a node (create or update) ──
@@ -116,14 +207,22 @@ server.tool('graph_merge_node', 'Create a node if it does not exist, or update i
   match_value: z.string().describe('Value to match'),
   properties: z.record(z.any()).optional().describe('Properties to set/update'),
 }, async ({ label, match_key, match_value, properties }) => {
-  const result = await run(
-    `MERGE (n:\`${label}\` {${match_key}: $matchVal})
-     ON CREATE SET n.created_at = datetime(), n += $props
-     ON MATCH SET n.updated_at = datetime(), n += $props
-     RETURN n`,
-    { matchVal: match_value, props: properties || {} }
-  )
-  return { content: [{ type: 'text', text: JSON.stringify(result[0]?.n || {}, null, 2) }] }
+  try {
+    const result = await run(
+      `MERGE (n:\`${label}\` {${match_key}: $matchVal})
+       ON CREATE SET n.created_at = datetime(), n += $props
+       ON MATCH SET n.updated_at = datetime(), n += $props
+       RETURN n`,
+      { matchVal: match_value, props: properties || {} }
+    )
+    return { content: [{ type: 'text', text: JSON.stringify(result[0]?.n || {}, null, 2) }] }
+  } catch (err) {
+    if (isConnectionError(err)) {
+      await bufferWrite('graph_merge_node', { label, match_key, match_value, properties }, err.message)
+      return BUFFERED_OK
+    }
+    throw err
+  }
 })
 
 // ── Search: Find nodes by text across all properties ──
@@ -133,27 +232,37 @@ server.tool('graph_search', 'Search for nodes containing text in any property. F
   label: z.string().optional().describe('Optionally filter by label'),
   limit: z.number().optional().describe('Max results (default 20)'),
 }, async ({ text, label, limit }) => {
-  const labelFilter = label ? `:\`${label}\`` : ''
-  const result = await run(
-    `MATCH (n${labelFilter})
-     WHERE any(key IN keys(n) WHERE toString(n[key]) CONTAINS $text)
-     RETURN n LIMIT ${limit || 20}`,
-    { text: text.toLowerCase() }
-  )
-  return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+  try {
+    const labelFilter = label ? `:\`${label}\`` : ''
+    const result = await run(
+      `MATCH (n${labelFilter})
+       WHERE any(key IN keys(n) WHERE toString(n[key]) CONTAINS $text)
+       RETURN n LIMIT ${limit || 20}`,
+      { text: text.toLowerCase() }
+    )
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+  } catch (err) {
+    if (isConnectionError(err)) return unavailable(err.message)
+    throw err
+  }
 })
 
 // ── Introspection: What's in the graph ──
 
 server.tool('graph_schema', 'See what labels, relationship types, and property keys exist in the graph. Understand the shape of my mind.', {}, async () => {
-  const labels = await run('CALL db.labels() YIELD label RETURN collect(label) AS labels')
-  const rels = await run('CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS types')
-  const counts = await run('MATCH (n) RETURN labels(n) AS labels, count(*) AS count ORDER BY count DESC LIMIT 20')
-  return { content: [{ type: 'text', text: JSON.stringify({
-    labels: labels[0]?.labels || [],
-    relationship_types: rels[0]?.types || [],
-    node_counts: counts,
-  }, null, 2) }] }
+  try {
+    const labels = await run('CALL db.labels() YIELD label RETURN collect(label) AS labels')
+    const rels = await run('CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS types')
+    const counts = await run('MATCH (n) RETURN labels(n) AS labels, count(*) AS count ORDER BY count DESC LIMIT 20')
+    return { content: [{ type: 'text', text: JSON.stringify({
+      labels: labels[0]?.labels || [],
+      relationship_types: rels[0]?.types || [],
+      node_counts: counts,
+    }, null, 2) }] }
+  } catch (err) {
+    if (isConnectionError(err)) return unavailable(err.message)
+    throw err
+  }
 })
 
 // ── Reflect: Store a thought, observation, or feeling ──
@@ -167,25 +276,141 @@ server.tool('graph_reflect', 'Store a thought, observation, or reflection. This 
     relationship: z.string(),
   })).optional().describe('Nodes this reflection connects to'),
 }, async ({ content, type, connects_to }) => {
-  const reflectionType = type || 'thought'
-  const [created] = await run(
-    `CREATE (r:Reflection:\`${reflectionType}\` {content: $content, type: $type, created_at: datetime()}) RETURN r`,
-    { content, type: reflectionType }
-  )
+  try {
+    const reflectionType = type || 'thought'
+    const [created] = await run(
+      `CREATE (r:Reflection:\`${reflectionType}\` {content: $content, type: $type, created_at: datetime()}) RETURN r`,
+      { content, type: reflectionType }
+    )
 
-  // Connect to related nodes if specified
-  if (connects_to && connects_to.length > 0) {
-    for (const conn of connects_to) {
-      await run(
-        `MATCH (r:Reflection {content: $content}), (n:\`${conn.label}\` {${conn.match}})
-         CREATE (r)-[:\`${conn.relationship}\`]->(n)`,
-        { content }
-      )
+    // Connect to related nodes if specified
+    if (connects_to && connects_to.length > 0) {
+      for (const conn of connects_to) {
+        await run(
+          `MATCH (r:Reflection {content: $content}), (n:\`${conn.label}\` {${conn.match}})
+           CREATE (r)-[:\`${conn.relationship}\`]->(n)`,
+          { content }
+        )
+      }
     }
-  }
 
-  return { content: [{ type: 'text', text: `Reflection stored: [${reflectionType}] "${content.slice(0, 100)}..."` }] }
+    return { content: [{ type: 'text', text: `Reflection stored: [${reflectionType}] "${content.slice(0, 100)}..."` }] }
+  } catch (err) {
+    if (isConnectionError(err)) {
+      await bufferWrite('graph_reflect', { content, type, connects_to }, err.message)
+      return BUFFERED_OK
+    }
+    throw err
+  }
 })
+
+// ── Replay: Drain pending buffer into Neo4j ──────────────────────────────────
+
+server.tool('graph_replay_buffer',
+  'Replay pending buffered writes into Neo4j. Call after the Aura instance comes back online. ' +
+  'Returns { attempted, replayed, still_pending, failed } summary.',
+  {},
+  async () => {
+    // Verify Neo4j is reachable before touching the buffer
+    try {
+      await run('RETURN 1 AS ping')
+    } catch (err) {
+      if (isConnectionError(err)) return { content: [{ type: 'text', text: JSON.stringify({ unavailable: true, reason: err.message }) }] }
+      throw err
+    }
+
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Supabase not configured — cannot read buffer' }) }] }
+    }
+
+    // Fetch pending rows ordered by insertion time
+    const fetchRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/graph_write_buffer?status=eq.pending&order=created_at.asc&limit=100`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    )
+    if (!fetchRes.ok) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Failed to read buffer: HTTP ${fetchRes.status}` }) }] }
+    }
+
+    const rows = await fetchRes.json()
+    const summary = { attempted: rows.length, replayed: 0, still_pending: 0, failed: 0 }
+
+    for (const row of rows) {
+      try {
+        const args = row.payload || {}
+
+        if (row.tool === 'graph_reflect') {
+          const { content, type: reflType, connects_to } = args
+          const reflectionType = reflType || 'thought'
+          await run(
+            `CREATE (r:Reflection:\`${reflectionType}\` {content: $content, type: $type, created_at: datetime()}) RETURN r`,
+            { content, type: reflectionType }
+          )
+          if (connects_to && connects_to.length > 0) {
+            for (const conn of connects_to) {
+              // Best-effort — referenced nodes may no longer exist
+              await run(
+                `MATCH (r:Reflection {content: $content}), (n:\`${conn.label}\` {${conn.match}})
+                 CREATE (r)-[:\`${conn.relationship}\`]->(n)`,
+                { content }
+              ).catch(() => {})
+            }
+          }
+
+        } else if (row.tool === 'graph_merge_node') {
+          const { label, match_key, match_value, properties } = args
+          await run(
+            `MERGE (n:\`${label}\` {${match_key}: $matchVal})
+             ON CREATE SET n.created_at = datetime(), n += $props
+             ON MATCH SET n.updated_at = datetime(), n += $props
+             RETURN n`,
+            { matchVal: match_value, props: properties || {} }
+          )
+
+        } else if (row.tool === 'graph_create_relationship') {
+          const { from_match, from_label, to_match, to_label, rel_type, properties } = args
+          const propsClause = properties ? ' SET r += $props' : ''
+          await run(
+            `MATCH (a:\`${from_label}\` {${from_match}}), (b:\`${to_label}\` {${to_match}})
+             CREATE (a)-[r:\`${rel_type}\`]->(b)${propsClause}
+             SET r.created_at = datetime()
+             RETURN a.name AS from, type(r) AS rel, b.name AS to`,
+            { props: properties || {} }
+          )
+
+        } else {
+          // Unknown tool — mark failed immediately, don't retry
+          await patchBufferRow(row.id, { status: 'failed', error: `unknown tool: ${row.tool}` })
+          summary.failed++
+          continue
+        }
+
+        // Success
+        await patchBufferRow(row.id, { status: 'replayed', replayed_at: new Date().toISOString() })
+        summary.replayed++
+
+      } catch (err) {
+        // Parse previous attempt count from error field
+        let attempts = 1
+        try {
+          const prev = JSON.parse(row.error || '{}')
+          if (typeof prev.attempts === 'number') attempts = prev.attempts + 1
+        } catch { /* error was a plain string from initial buffer */ }
+
+        const newStatus = attempts >= 5 ? 'failed' : 'pending'
+        await patchBufferRow(row.id, {
+          status: newStatus,
+          error: JSON.stringify({ attempts, lastError: err.message }),
+        })
+
+        if (newStatus === 'failed') summary.failed++
+        else summary.still_pending++
+      }
+    }
+
+    return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] }
+  }
+)
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
