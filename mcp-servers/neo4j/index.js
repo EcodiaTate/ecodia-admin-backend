@@ -175,7 +175,7 @@ server.tool('graph_query', 'Run any Cypher query. Full power, full responsibilit
 server.tool('graph_context', 'Get the neighborhood of a node - everything connected within N hops. Use this before making decisions.', {
   match: z.string().describe('Property match (e.g. "name: \'Co-Exist\'")'),
   label: z.string().describe('Node label'),
-  depth: z.number().optional().describe('Max traversal depth (default 2)'),
+  depth: z.coerce.number().optional().describe('Max traversal depth (default 2)'),
 }, async ({ match, label, depth }) => {
   try {
     const d = depth || 2
@@ -227,10 +227,10 @@ server.tool('graph_merge_node', 'Create a node if it does not exist, or update i
 
 // ── Search: Find nodes by text across all properties ──
 
-server.tool('graph_search', 'Search for nodes containing text in any property. Fuzzy, broad, exploratory.', {
+server.tool('graph_search', 'Substring text match across node properties (case-insensitive CONTAINS). NOT semantic — use graph_semantic_search for meaning-based retrieval.', {
   text: z.string().describe('Text to search for (case-insensitive contains)'),
   label: z.string().optional().describe('Optionally filter by label'),
-  limit: z.number().optional().describe('Max results (default 20)'),
+  limit: z.coerce.number().optional().describe('Max results (default 20)'),
 }, async ({ text, label, limit }) => {
   try {
     const labelFilter = label ? `:\`${label}\`` : ''
@@ -409,6 +409,90 @@ server.tool('graph_replay_buffer',
     }
 
     return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] }
+  }
+)
+
+// ── Semantic Search: Vector similarity across embedded nodes ──
+
+server.tool('graph_semantic_search',
+  'Semantic vector search across the knowledge graph. Returns nodes most conceptually similar to the query text, scored by cosine similarity. Use this (not graph_search) when you want meaning-based retrieval.',
+  {
+    text: z.string().describe('The query. Natural language, not a keyword.'),
+    label: z.string().optional().describe('Optionally filter results to one label'),
+    limit: z.coerce.number().optional().describe('Max results (default 10)'),
+    min_score: z.coerce.number().optional().describe('Minimum cosine similarity (0-1, default 0.7)'),
+  },
+  async ({ text, label, limit, min_score }) => {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+    if (!OPENAI_API_KEY) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'OPENAI_API_KEY not set — semantic search unavailable' }) }] }
+    }
+
+    // Embed the query
+    let queryVector
+    try {
+      const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
+      })
+      if (!embedRes.ok) {
+        const errText = await embedRes.text()
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `embedding API failed: ${errText}` }) }] }
+      }
+      const embedData = await embedRes.json()
+      queryVector = embedData.data[0].embedding
+    } catch (err) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `embedding API failed: ${err.message}` }) }] }
+    }
+
+    const resultLimit = limit || 10
+    const minScore = min_score ?? 0.7
+    // Over-fetch when label filtering so post-hoc filter doesn't starve results
+    const k = Math.min(resultLimit * (label ? 3 : 1), 100)
+
+    try {
+      const session = driver.session({ database: DB })
+      let records
+      try {
+        const result = await session.run(
+          `CALL db.index.vector.queryNodes('node_embeddings', $k, $queryVector) YIELD node, score
+           WHERE $label IS NULL OR $label IN labels(node)
+           WITH node, score WHERE score >= $minScore
+           RETURN node, labels(node) AS labels, score
+           ORDER BY score DESC
+           LIMIT $limit`,
+          {
+            k: neo4j.int(k),
+            queryVector,
+            label: label || null,
+            minScore,
+            limit: neo4j.int(resultLimit),
+          }
+        )
+        records = result.records
+      } finally {
+        await session.close()
+      }
+
+      const mapped = records.map(r => {
+        const node = r.get('node')
+        const props = { ...node.properties }
+        delete props.embedding  // strip noisy vector from output
+        return {
+          node: { ...props, _labels: r.get('labels'), _id: node.identity.toNumber() },
+          score: r.get('score'),
+        }
+      })
+
+      return { content: [{ type: 'text', text: JSON.stringify(mapped, null, 2) }] }
+    } catch (err) {
+      if (isConnectionError(err)) return unavailable(err.message)
+      throw err
+    }
   }
 )
 
