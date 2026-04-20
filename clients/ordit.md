@@ -232,6 +232,24 @@ The first review traced the happy paths end-to-end and checked for correctness t
 
 ---
 
+## 2026-04-21 - Phase 2.2 final nit cleanup (PR 212)
+
+Eugene's follow-up review on PR 212 flagged a handful of small nits. All actioned in one Factory pass.
+
+**What changed (commit `0298b56` on `feat/cognito-be-integration`):**
+- `src/auth/auth.service.ts` - added `AuthSource` to existing `@prisma/client` import; replaced 3 `user.authSource === 'COGNITO'` string comparisons with `AuthSource.COGNITO` enum comparisons (lines 58, 252, 290).
+- `src/users/users.service.ts` - added `AuthSource` to `@prisma/client` import; line 320 creation object now uses `AuthSource.COGNITO`; line 812 dropped the redundant `|| user.cognitoSub` branch since `authSource` is now the single source of truth.
+- `src/users/dto/create-user.dto.ts` - removed the `authSource` field from the DTO (7-line block including `@IsEnum(AuthSource)`) and dropped the now-unused `AuthSource` import. `IsEnum` retained for other fields. Consumer audit: nothing was reading `createUserDto.authSource` - the real switch is the `useCognitoAuthSource` boolean derived from env, not a client-supplied field.
+
+**Doctrine captured (Neo4j Patterns 1268/1275/1285, Decision 1267):**
+1. Use Prisma-generated enums in comparisons, never string literals. Typo-safe, rename-safe, refactor-safe.
+2. Creation switches live in env, not on the DTO. A user should never be able to tell the server which auth system they belong to by setting a field - the server decides based on env config.
+3. Bitbucket API auth vs git remote auth are two different contexts. REST API uses `code@ecodia.au:API_KEY` Basic auth. Git HTTPS remote uses the literal username `x-bitbucket-api-token-auth` with the key as password. Same key, different username, different purpose.
+
+**Followups:** commented on PR 212 (comment id 785480298) pointing Eugene at the four changed files. status_board row updated to `phase22-cleanup-pushed-awaiting-eugene-rereview`, next_action_by=external. Waiting on his re-review before the FE ticket unblocks.
+
+---
+
 ## 2026-04-20 - Frontend Cognito Ticket + Testing Ticket (QUEUED, do NOT start without Tate's go-ahead)
 
 Parked here because the BE PR (`feat/cognito-be-integration`, 3 commits on `uat`) is awaiting Eugene. The FE ticket and the testing ticket come next after that merges. Do NOT spin up work on either until Tate explicitly greenlights.
