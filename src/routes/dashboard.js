@@ -3,7 +3,7 @@ const db = require('../config/db')
 
 const router = Router()
 
-// GET /api/dashboard/data — live JSON snapshot
+// GET /api/dashboard/data - live JSON snapshot
 router.get('/data', async (_req, res, next) => {
   try {
     const results = {}
@@ -88,7 +88,7 @@ router.get('/data', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// GET /api/dashboard — self-contained HTML dashboard
+// GET /api/dashboard - self-contained HTML dashboard
 router.get('/', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.send(buildHtml())
