@@ -41,16 +41,38 @@ router.post('/workers/:name/trigger', async (req, res, next) => {
 
     if (name === 'kg_embed') {
       const kgService = require('../services/knowledgeGraphService')
-      kgService.embedStaleNodes().catch(() => {})
-      logger.info('Manual trigger: KG embedding')
-      return res.json({ ok: true, message: 'KG embedding started' })
+      logger.info('Manual trigger: KG embedding — starting')
+      kgService.embedStaleNodes()
+        .then(result => {
+          logger.info('KG embedding complete', { embedded: result?.embedded, skipped: result?.skipped })
+        })
+        .catch(err => {
+          logger.error('KG embedding FAILED', {
+            error: err.message,
+            stack: err.stack?.split('\n').slice(0, 8).join('\n'),
+          })
+        })
+      return res.json({ ok: true, message: 'KG embedding started — check logs for completion' })
     }
 
     if (name === 'kg_consolidation') {
       const kgConsolidation = require('../services/kgConsolidationService')
-      kgConsolidation.runConsolidationPipeline({ dryRun: false }).catch(() => {})
-      logger.info('Manual trigger: KG consolidation')
-      return res.json({ ok: true, message: 'KG consolidation started' })
+      logger.info('Manual trigger: KG consolidation — starting')
+      kgConsolidation.runConsolidationPipeline({ dryRun: false })
+        .then(result => {
+          logger.info('KG consolidation complete', {
+            phases: Object.keys(result?.phases || {}),
+            durationMs: result?.durationMs,
+            plan: result?.plan?.map(p => p.phase),
+          })
+        })
+        .catch(err => {
+          logger.error('KG consolidation FAILED', {
+            error: err.message,
+            stack: err.stack?.split('\n').slice(0, 8).join('\n'),
+          })
+        })
+      return res.json({ ok: true, message: 'KG consolidation started — check logs for completion' })
     }
 
     if (name === 'maintenance_cycle') {
