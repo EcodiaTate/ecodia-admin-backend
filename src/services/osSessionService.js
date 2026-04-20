@@ -1115,8 +1115,9 @@ async function _sendMessageImpl(content, opts = {}) {
             }
 
             const text = extractTextFromContent(blocks)
+            let safeText = null
             if (text) {
-              const safeText = secretSafety.scrubSecrets(text)
+              safeText = secretSafety.scrubSecrets(text)
               collectedText.push(safeText)
               await appendLog(dbSessionId, safeText)
               // Broadcast the full assistant text for the frontend
