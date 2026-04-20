@@ -26,12 +26,15 @@ router.post('/message', async (req, res, next) => {
     res.json({ accepted: true, status: 'streaming' })
 
     // Process in background — errors are broadcast via WS, not HTTP.
-    // priority: true means if the OS is mid-stream doing tool calls,
-    // abort it immediately and deliver this message NOW. The session
-    // resumes via session_id so no context is lost — the user's message
-    // just gets seen between turns instead of waiting behind the entire
-    // agentic loop.
-    osSession.sendMessage(message, { priority: true }).catch(err => {
+    // priority: false (default) means user messages QUEUE behind any active
+    // tool-call loop and fire after it completes (via _sendQueue chain in
+    // osSessionService.js). This preserves mid-turn flow - Tate's check-in
+    // messages won't kill an in-progress audit, deploy, or Factory dispatch.
+    // Explicit kill switch is the frontend Stop button -> POST /api/os-session/abort.
+    // Never flip priority:true here without explicit Tate sign-off - it was
+    // the cause of mid-turn session breaks where check-in messages aborted
+    // long-running tool streams (logged as "Background error: write CONNECTION_ENDED").
+    osSession.sendMessage(message, { priority: false }).catch(err => {
       console.error('[OS Session /message] Background error:', err.message)
     })
   } catch (err) {
