@@ -70,8 +70,23 @@ Fix: Add a guard: `if (!process.env.AWS_COGNITO_USER_POOL_ID) { logger.warn('Cog
 - DO NOT push to UAT without Tate's explicit OK
 - DO NOT push to their repo without Tate's go-ahead
 - Waiting on Eugene to provide AWS Cognito creds for integration testing
-- Atlassian API token expires Apr 20 — get it before then
 - Migration quote (3 options) pending Bitbucket access to frontend repo
+
+---
+
+## Bitbucket Auth - API Keys (NOT personal tokens)
+
+**Atlassian killed personal access tokens in 2026.** It is API keys only now.
+
+- **Credential location:** `kv_store.creds.bitbucket_api_token` (stored Apr 20 2026)
+- **Account email:** `kv_store.creds.bitbucket_account_email` = `code@ecodia.au`
+- **Git remote format (Bitbucket-specific):**
+  `https://x-bitbucket-api-token-auth:<API_KEY>@bitbucket.org/fireauditors1/be.git`
+  - The username is LITERALLY `x-bitbucket-api-token-auth` (not the account email).
+  - The password field is the API key.
+- **Verified working:** push of `feat/cognito-be-integration` c3e43cd succeeded 2026-04-20 21:50 UTC to PR 212.
+- **If auth fails again:** Tate rotates the key at `id.atlassian.com` and updates `kv_store.creds.bitbucket_api_token`. I re-embed it in the git remote via `git remote set-url origin https://x-bitbucket-api-token-auth:<NEW_KEY>@bitbucket.org/...`.
+- **Do NOT look for "personal access tokens" in the Atlassian UI** - that feature is gone. It is API keys.
 
 ---
 
