@@ -156,6 +156,16 @@ let _stopped = false
 let _lastHeartbeatAt = 0
 
 async function isSessionBusy() {
+  // In-process atomic check beats the HTTP-then-fire race. The HTTP version
+  // took ~5-50ms and in that window a user message could land in the queue;
+  // heartbeat would then fire and stomp on it / overwrite the breadcrumb.
+  try {
+    const osSession = require('./osSessionService')
+    if (typeof osSession._isQueueBusy === 'function' && osSession._isQueueBusy()) {
+      return true
+    }
+  } catch {}
+  // Fall-through HTTP check for defensive coverage.
   try {
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/status`, {
       signal: AbortSignal.timeout(5_000),

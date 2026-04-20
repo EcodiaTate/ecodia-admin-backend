@@ -47,6 +47,13 @@ function computeNextRun(cronExpr) {
 // ── Check if OS session is currently streaming ──
 
 async function isSessionBusy() {
+  // Prefer in-process atomic check to avoid the HTTP-then-fire race.
+  try {
+    const osSession = require('./osSessionService')
+    if (typeof osSession._isQueueBusy === 'function' && osSession._isQueueBusy()) {
+      return true
+    }
+  } catch {}
   try {
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/status`, {
       signal: AbortSignal.timeout(5_000),
