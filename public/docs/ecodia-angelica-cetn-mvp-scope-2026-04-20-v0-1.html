@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CETN MVP Scope v0.1 — Ecodia + Angelica Choppin</title>
+<style>
+  body { font-family: 'Helvetica Neue', Arial, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 24px; color: #1a1a1a; line-height: 1.55; font-size: 14px; }
+  h1 { font-size: 20px; text-transform: uppercase; letter-spacing: 1px; border-bottom: 2px solid #1a1a1a; padding-bottom: 8px; margin-bottom: 24px; }
+  h2 { font-size: 15px; margin-top: 28px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  h3 { font-size: 14px; margin-top: 16px; margin-bottom: 6px; }
+  p { margin: 8px 0; }
+  ol, ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .meta { color: #666; font-size: 12px; margin-bottom: 24px; }
+  .tbc { background: #fffbe6; border-left: 3px solid #d4a017; padding: 8px 12px; margin: 8px 0; font-style: italic; }
+  .note { background: #f0f4ff; border-left: 3px solid #2b5fb3; padding: 8px 12px; margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+  th, td { border: 1px solid #bbb; padding: 6px 10px; text-align: left; font-size: 13px; vertical-align: top; }
+  th { background: #f7f7f4; }
+</style>
+</head>
+<body>
+
+<h1>CETN MVP Scope v0.1</h1>
+<p class="meta">Working draft for co-development with Angelica Choppin — Ecodia Pty Ltd, 20 April 2026</p>
+
+<div class="note">
+<strong>How to read this document.</strong> This is a working scope document, not a final spec. Sections marked <em>TBC</em> need to be filled in together before we kick off build. Once we agree, this version is locked in as v1.0 and attached to the CETN MVP Build Agreement. Minor adjustments during build are handled by revision rounds as defined in the Agreement.
+</div>
+
+<h2>1. Product Overview</h2>
+
+<h3>1.1 Concept</h3>
+<p>CETN — Circular Economy Tech Network — is a platform that connects people, organisations, and projects working on circular-economy initiatives, enabling them to discover each other, share resources, collaborate, and track impact.</p>
+<div class="tbc">TBC: Angelica to finalise the 1-2 sentence elevator pitch and 3-5 core user outcomes the MVP must deliver. Ecodia will rewrite this section based on her answers before the scope is locked.</div>
+
+<h3>1.2 Primary users</h3>
+<ul>
+  <li><strong>Members</strong> — individuals and organisations joining the network.</li>
+  <li><strong>Project leads</strong> — members running circular-economy initiatives or seeking collaborators.</li>
+  <li><strong>Admin (Angelica / CETN team)</strong> — curates content, approves members, moderates.</li>
+</ul>
+<div class="tbc">TBC: Confirm user types and any membership tiers or paywall logic for v1.</div>
+
+<h2>2. Core MVP Features</h2>
+<p>Features below are Ecodia's current best interpretation of the minimum required scope, subject to Angelica's redline. All are included in the Build Fee unless explicitly flagged as out of scope in section 3.</p>
+
+<table>
+<thead><tr><th>#</th><th>Feature</th><th>Description</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>F1</td><td>Landing page</td><td>Public-facing page: CETN pitch, value proposition, call-to-action to sign up or request access.</td><td>Included</td></tr>
+<tr><td>F2</td><td>Member sign-up and profile</td><td>Email + password (or magic link) sign-up. Profile with name, org, bio, location, focus areas, links.</td><td>Included</td></tr>
+<tr><td>F3</td><td>Directory / search</td><td>Members can browse and filter other members by focus area, location, and type.</td><td>Included</td></tr>
+<tr><td>F4</td><td>Project listings</td><td>Members can post projects or opportunities (title, description, tags, location, contact).</td><td>Included</td></tr>
+<tr><td>F5</td><td>Messaging or contact flow</td><td>Member-to-member contact, either via in-app message thread or a contact form that routes to email.</td><td>TBC: choose one</td></tr>
+<tr><td>F6</td><td>Admin dashboard</td><td>Angelica approves new members, manages featured projects, and views basic platform metrics.</td><td>Included</td></tr>
+<tr><td>F7</td><td>Content pages</td><td>About, privacy policy, terms, contact. Simple CMS-lite for Angelica to edit copy without code.</td><td>Included</td></tr>
+<tr><td>F8</td><td>Email notifications</td><td>Transactional emails: welcome, message received, approval granted.</td><td>Included</td></tr>
+<tr><td>F9</td><td>Analytics</td><td>Basic analytics (page views, signups, active members) via a lightweight third-party service.</td><td>Included</td></tr>
+<tr><td>F10</td><td>Payments / memberships</td><td>Paid membership tiers with Stripe Checkout.</td><td>TBC: include in v1 or defer to v1.1</td></tr>
+<tr><td>F11</td><td>Impact tracking</td><td>Projects log quantifiable outcomes (e.g. kg diverted, $ saved, partners engaged) and display summary metrics.</td><td>TBC: include in v1 or defer</td></tr>
+<tr><td>F12</td><td>Events / calendar</td><td>Members post events; directory view of upcoming events.</td><td>TBC: defer to v1.1 by default</td></tr>
+</tbody>
+</table>
+
+<div class="tbc">TBC: Angelica to confirm F5 direction (in-app messaging vs. email contact form), and F10–F12 scope for v1.</div>
+
+<h2>3. Out of Scope for v1</h2>
+<p>The following are explicitly excluded from the MVP Build Fee. Any of these can be added later as a change order or v1.1 engagement.</p>
+<ul>
+  <li>Native mobile apps (iOS / Android). The MVP is a responsive web app.</li>
+  <li>AI features (recommendations, matchmaking, semantic search) beyond simple keyword search.</li>
+  <li>Custom branding / design system beyond a clean, accessible Ecodia-default look-and-feel. Major brand design work is a separate engagement.</li>
+  <li>Integrations with third-party systems (other than Stripe and the chosen email/auth provider).</li>
+  <li>Multi-language / internationalisation.</li>
+  <li>Data migration from any existing CETN systems.</li>
+  <li>Content creation (marketing copy, images, video, member onboarding content) — provided by the Client.</li>
+  <li>Ongoing marketing, SEO, and growth work.</li>
+</ul>
+
+<h2>4. Technical Stack</h2>
+<p>The MVP will be built on Ecodia's standard stack:</p>
+<ul>
+  <li><strong>Frontend:</strong> Next.js 14+ (App Router), Tailwind CSS, TypeScript.</li>
+  <li><strong>Backend:</strong> Next.js API routes (or lightweight Node service if needed).</li>
+  <li><strong>Database and auth:</strong> Supabase (PostgreSQL + Auth + Storage).</li>
+  <li><strong>Hosting:</strong> Vercel (frontend), Supabase (database and auth).</li>
+  <li><strong>Payments (if F10 included):</strong> Stripe (AUD).</li>
+  <li><strong>Email:</strong> Resend or Postmark (transactional).</li>
+  <li><strong>Analytics:</strong> Plausible or PostHog (lightweight, privacy-respecting).</li>
+  <li><strong>Source control:</strong> GitHub repository under the EcodiaTate organisation, private.</li>
+</ul>
+
+<h2>5. Milestones and Timeline</h2>
+<p>Indicative timeline from signed Agreement and signed Scope v1.0, assuming timely Client input.</p>
+<table>
+<thead><tr><th>Milestone</th><th>Deliverable</th><th>Target</th></tr></thead>
+<tbody>
+<tr><td>M0 — Kickoff</td><td>Signed Agreement + Scope v1.0. Kickoff call. Access credentials.</td><td>Week 0</td></tr>
+<tr><td>M1 — Design preview</td><td>Wireframes / visual mockups of 4-6 key screens for sign-off.</td><td>Week 1-2</td></tr>
+<tr><td>M2 — Alpha build</td><td>Core features (F1, F2, F3, F4, F7) live on staging. Client walks through, logs feedback.</td><td>Week 3-4</td></tr>
+<tr><td>M3 — Beta build</td><td>Remaining in-scope features live on staging. Revision round begins.</td><td>Week 5-6</td></tr>
+<tr><td>M4 — UAT</td><td>Client performs user acceptance testing against this Scope Document and logs any material defects.</td><td>Week 6-7</td></tr>
+<tr><td>M5 — Production launch</td><td>MVP deployed to production URL. Delivery certified under Agreement cl. 9.1. 30-day warranty begins.</td><td>Week 7-8</td></tr>
+<tr><td>M6 — Licence start</td><td>60 days after M5. Monthly Licence Fee commences.</td><td>Week ~16</td></tr>
+</tbody>
+</table>
+<p><em>Delays caused by the Client (e.g. late content, slow feedback, unclear answers to TBC items) shift the timeline accordingly.</em></p>
+
+<h2>6. Acceptance Criteria</h2>
+<p>At M5, the MVP is accepted if, in Client's reasonable assessment:</p>
+<ol>
+  <li>All features marked "Included" in section 2 are present and materially functioning.</li>
+  <li>The MVP is deployed to a production URL accessible to the Client's admin account.</li>
+  <li>Basic responsive layout works on current versions of Chrome and Safari, desktop and mobile.</li>
+  <li>No known critical bugs that prevent a user from signing up, signing in, and using core directory and project features.</li>
+</ol>
+
+<h2>7. Assumptions and Dependencies</h2>
+<ul>
+  <li>Client provides all content (text, images, logos, copy) in usable form at or before the relevant milestone.</li>
+  <li>Client responds to Ecodia feedback requests within 5 business days during active build phases.</li>
+  <li>Client owns (or has permission to use) all content and branding supplied.</li>
+  <li>A domain name is either supplied by the Client or purchased by Ecodia and on-billed as a small reimbursable cost.</li>
+  <li>Third-party services (Vercel, Supabase, Stripe, Resend/Postmark, analytics) are available and on their standard pricing as of the signing date.</li>
+</ul>
+
+<h2>8. Open Questions (for Angelica to answer before v1.0 lock)</h2>
+<ol>
+  <li>1-2 sentence pitch and 3-5 core user outcomes (see 1.1).</li>
+  <li>Confirm user types and any membership tiers (see 1.2).</li>
+  <li>F5: in-app messaging or email contact form — which is right for v1?</li>
+  <li>F10: paid memberships — include in v1, or defer to v1.1?</li>
+  <li>F11: impact tracking — include in v1, or defer?</li>
+  <li>Domain name (existing or new)? Preferred URL for launch?</li>
+  <li>Any existing branding (logo, colours, typography) or does Ecodia proceed with a clean default?</li>
+  <li>Any hard launch date driven by an external event (grant, conference, partner commitment) that we should plan around?</li>
+</ol>
+
+<p class="meta">Once Angelica answers the Open Questions and we agree on F5/F10/F11, Ecodia will issue Scope v1.0 for attachment to the CETN MVP Build Agreement.</p>
+
+</body>
+</html>
