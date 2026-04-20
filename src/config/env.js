@@ -235,6 +235,11 @@ const envSchema = z.object({
   // continuity far better than our brief→warm-session dance. Only trigger
   // when we're genuinely approaching the context ceiling.
   OS_SESSION_COMPACT_THRESHOLD: z.string().default('800000'),
+  // Automatic Neo4j memory injection into user messages.
+  // Semantic-searches Pattern/Decision/Episode nodes and prepends a
+  // <relevant_memory> block between <now> and <restart_recovery>.
+  // Default true - set to 'false' to disable if it misbehaves.
+  OS_MEMORY_INJECTION_ENABLED: z.string().default('true'),
 })
 
 const parsed = envSchema.safeParse(process.env)

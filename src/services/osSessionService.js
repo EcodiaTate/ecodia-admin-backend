@@ -27,6 +27,7 @@ const usageEnergy = require('./usageEnergyService')
 const osIncident = require('./osIncidentService')
 const sessionMemory = require('./sessionMemoryService')
 const osConversationLog = require('./osConversationLog')
+const neo4jRetrieval = require('./neo4jRetrieval')
 
 // Fire quota-checks for BOTH accounts on startup to get real usage % immediately
 usageEnergy.refreshAllAccounts()
@@ -614,6 +615,49 @@ function extractTextFromContent(content) {
 // have when a hang on the fallback provider triggered another fallback.
 const MAX_RETRY_DEPTH = 2
 
+// ── Relevant memory injection ──────────────────────────────────────────────
+// Searches Neo4j for Pattern/Decision/Episode nodes semantically similar to
+// the current user message + last assistant reply. Returns a formatted
+// <relevant_memory> block, or null if nothing clears the threshold.
+//
+// Hard 2s timeout - if Neo4j is slow or unavailable the user turn proceeds
+// unblocked. Fail-open on all errors.
+
+async function _injectRelevantMemory(userMessage, lastAssistantTail) {
+  if (env.OS_MEMORY_INJECTION_ENABLED === 'false') return null
+
+  try {
+    // Build query: tail-biased concat of last assistant reply + user message
+    const combined = [lastAssistantTail, userMessage]
+      .filter(Boolean)
+      .join('\n')
+    const queryText = combined.length > 800
+      ? combined.slice(combined.length - 800)
+      : combined
+    if (!queryText.trim()) return null
+
+    // 2s hard cap - never block the user turn on retrieval
+    const results = await Promise.race([
+      neo4jRetrieval.semanticSearch(queryText, { limit: 3, minScore: 0.78 }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('neo4j retrieval timeout')), 2000)
+      ),
+    ])
+
+    if (!results || results.length === 0) return null
+
+    const lines = results.map((r, i) => {
+      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim()}` : ''
+      return `${i + 1}. [${r.label}] ${r.name}${desc}`
+    })
+
+    return `<relevant_memory>\n${lines.join('\n')}\n</relevant_memory>`
+  } catch (err) {
+    logger.warn('OS Session: relevant memory injection failed (skipping)', { error: err.message })
+    return null
+  }
+}
+
 async function _sendMessageImpl(content, opts = {}) {
   const { suppressOutput = false } = opts
   const retryDepth = opts._retryDepth || 0
@@ -707,26 +751,29 @@ async function _sendMessageImpl(content, opts = {}) {
     logger.warn('Failed to read handoff state', { error: err.message })
   }
 
-  // Load last-turn breadcrumb for fresh sessions (no ccSessionId -> no SDK
-  // resume available). This is the cheap, always-on continuity signal:
-  // auto-written at the end of every user turn, ~1.5KB max, bounded and
-  // structured. Only stitched when we're starting fresh — if SDK resume is
-  // active the model already has full prior context and injecting this
-  // would double-up.
+  // Load last-turn breadcrumb. Two purposes:
+  //   1. Fresh-session display: stitch "where I left off" into the user message
+  //      when SDK resume isn't available (!ccSessionId).
+  //   2. Memory query context: assistant_tail feeds into Neo4j memory injection
+  //      regardless of resume state (so retrieval is always contextualised).
   let breadcrumbBlock = null
-  if (!ccSessionId) {
-    try {
-      const rows = await db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`
-      const raw = rows?.[0]?.value
-      // Tolerate both JSONB (object) and TEXT (JSON string) column types —
-      // the live DB has been observed as both depending on migration history.
-      let b = null
-      if (raw && typeof raw === 'object') b = raw
-      else if (typeof raw === 'string') { try { b = JSON.parse(raw) } catch {} }
-      if (b && Number.isFinite(b.ts)) {
+  let _lastAssistantTail = ''  // used by memory injection below
+  try {
+    const rows = await db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`
+    const raw = rows?.[0]?.value
+    // Tolerate both JSONB (object) and TEXT (JSON string) column types --
+    // the live DB has been observed as both depending on migration history.
+    let b = null
+    if (raw && typeof raw === 'object') b = raw
+    else if (typeof raw === 'string') { try { b = JSON.parse(raw) } catch {} }
+    if (b && Number.isFinite(b.ts)) {
+      // Capture assistant tail for memory injection (no age gate - recent context is useful)
+      if (b.assistant_tail) _lastAssistantTail = b.assistant_tail
+
+      // Only surface the display block for fresh sessions and if reasonably recent (12h).
+      // Stale breadcrumbs create more confusion than continuity.
+      if (!ccSessionId) {
         const ageMin = Math.round((Date.now() - b.ts) / 60000)
-        // Only surface if reasonably recent (12h). Stale breadcrumbs create
-        // more confusion than continuity.
         if (ageMin < 12 * 60) {
           breadcrumbBlock = [
             `Last turn ended ${ageMin} min ago on provider ${b.provider || 'unknown'}.`,
@@ -735,9 +782,9 @@ async function _sendMessageImpl(content, opts = {}) {
           ].filter(Boolean).join('\n')
         }
       }
-    } catch (err) {
-      logger.debug('Breadcrumb read failed (non-fatal)', { error: err.message })
     }
+  } catch (err) {
+    logger.debug('Breadcrumb read failed (non-fatal)', { error: err.message })
   }
 
   const options = {
@@ -989,16 +1036,36 @@ async function _sendMessageImpl(content, opts = {}) {
     hour12: false,
   })
   continuityParts.push(`<now>${_nowAEST} AEST</now>`)
+
+  // Relevant Neo4j memory injection. Runs in parallel with the rest of setup.
+  // Searches Pattern/Decision/Episode nodes semantically similar to the current
+  // turn. Block goes between <now> and <restart_recovery> so it reads as
+  // "current context" before any session recovery state.
+  // Fire and forget the lookup while the rest of the options build.
+  const _memoryBlockPromise = _injectRelevantMemory(content, _lastAssistantTail)
+
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
   }
   if (breadcrumbBlock) {
     continuityParts.push(`<last_turn_breadcrumb>\n${breadcrumbBlock}\n</last_turn_breadcrumb>`)
   }
+
+  // Await memory result and splice after <now>, before restart_recovery
+  let _memoryBlock = null
+  try {
+    _memoryBlock = await _memoryBlockPromise
+  } catch {}
+  if (_memoryBlock) {
+    // Insert at index 1 (after <now> which is at index 0)
+    continuityParts.splice(1, 0, _memoryBlock)
+  }
+
   if (continuityParts.length > 0) {
     finalPrompt = `${continuityParts.join('\n\n')}\n\n${promptWithMemory}`
     logger.info('OS Session: stitching continuity blocks into user message', {
       now: true,
+      memory: !!_memoryBlock,
       restart_recovery: !!recoveryBlock,
       breadcrumb: !!breadcrumbBlock,
       totalBlocksLen: continuityParts.join('\n\n').length,
