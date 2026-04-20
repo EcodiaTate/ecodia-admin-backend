@@ -621,10 +621,7 @@ async function _sendMessageImpl(content, opts = {}) {
 
   // Kill any active query — SDK query() is one-shot, so each message needs a new call.
   // Session continuity is maintained via options.resume + ccSessionId.
-  if (activeQuery) {
-    try { activeQuery.close() } catch {}
-    activeQuery = null
-  }
+  _abortActiveQuery('new_turn_starting')
 
   // Find or create the OS session (DB record)
   // IMPORTANT: Reuse existing rows even when cc_cli_session_id is missing.
@@ -942,10 +939,7 @@ async function _sendMessageImpl(content, opts = {}) {
         tool_use_id: oldestId, ageSec, outstanding: _toolStartedAt.size,
       })
       _toolWatchdogAborted = true
-      if (activeQuery) {
-        try { activeQuery.close() } catch {}
-        activeQuery = null
-      }
+      _abortActiveQuery('tool_watchdog')
     }, remaining)
   }
   const _markToolStarted = (id) => {
@@ -972,10 +966,7 @@ async function _sendMessageImpl(content, opts = {}) {
         currentProvider: _currentProvider,
       })
       _inactivityAborted = true
-      if (activeQuery) {
-        try { activeQuery.close() } catch {}
-        activeQuery = null
-      }
+      _abortActiveQuery('inactivity_timeout')
     }, INACTIVITY_TIMEOUT_MS)
   }
 
@@ -1595,6 +1586,103 @@ async function _sendMessageImpl(content, opts = {}) {
   }
 }
 
+// Safe swap helper — atomically takes the current activeQuery, nulls the ref,
+// then attempts close(). Prevents the orphan-reference bug where a close() throw
+// leaves activeQuery pointing at a dead query, so the NEXT turn thinks a query
+// is still running and double-closes.
+function _abortActiveQuery(reason) {
+  const q = activeQuery
+  activeQuery = null
+  activeQuerySuppressed = false
+  if (q) {
+    try { q.close() } catch (err) {
+      logger.debug('activeQuery.close() threw (ignored)', { reason, error: err?.message })
+    }
+  }
+}
+
+// Hard ceiling on any single turn. If _sendMessageImpl hasn't resolved within
+// this window, the global watchdog force-aborts the query, writes a failure
+// breadcrumb, emits 'error' status so the frontend unfreezes, and resolves the
+// promise so _sendQueue advances. This is the last-resort recovery path — all
+// inner timeouts (per-tool 60s, inactivity 90s) should fire first. Only kicks
+// in when everything else has failed to notice the hang.
+//
+// Background turns (heartbeat, scheduled crons, handover brief generation) are
+// capped at 8 min because they should never legitimately need that long. User
+// turns get 15 min to accommodate genuinely slow thinking + heavy tool chains.
+const TURN_WATCHDOG_USER_MS = 15 * 60 * 1000
+const TURN_WATCHDOG_BG_MS = 8 * 60 * 1000
+
+async function _sendMessageWithWatchdog(content, opts) {
+  const isBackground = !!opts.suppressOutput
+  const timeoutMs = isBackground ? TURN_WATCHDOG_BG_MS : TURN_WATCHDOG_USER_MS
+  let watchdogFired = false
+  let watchdogTimer = null
+
+  const watchdogPromise = new Promise((resolve) => {
+    watchdogTimer = setTimeout(async () => {
+      watchdogFired = true
+      logger.error('OS Session: global turn watchdog fired — force-aborting', {
+        timeoutMs, isBackground, contentLen: content?.length,
+      })
+      try {
+        osIncident.log({
+          kind: 'tool_hung',
+          severity: 'error',
+          component: 'os_session',
+          message: `global turn watchdog fired after ${Math.round(timeoutMs / 1000)}s`,
+          context: { isBackground, contentLen: content?.length || 0 },
+        })
+      } catch {}
+      _abortActiveQuery('turn_watchdog')
+      if (!isBackground) {
+        try {
+          emitOutput({ type: 'error', content: `Turn timed out after ${Math.round(timeoutMs / 60000)} min. The OS has been force-reset and will accept new messages.` })
+          emitStatus('error', { error: 'turn_watchdog' })
+          broadcast('os-session:complete', { sessionId: null, code: 1, watchdogged: true })
+        } catch {}
+      }
+      // Write a failure-path breadcrumb so auto-wake can rehydrate if this
+      // immediately precedes a restart.
+      try {
+        const TAIL_CHARS = 600
+        const userTail = content && content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : (content || '')
+        await db`
+          INSERT INTO kv_store (key, value)
+          VALUES ('session.last_breadcrumb', ${JSON.stringify({
+            ts: Date.now(),
+            user_tail: userTail,
+            assistant_tail: '[turn_watchdog — global timeout fired, turn force-aborted]',
+            provider: _currentProvider,
+            failed: true,
+          })})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        `
+      } catch (bcErr) {
+        logger.warn('watchdog breadcrumb write failed', { error: bcErr.message })
+      }
+      resolve({ sessionId: null, ccCliSessionId: null, code: 1, text: 'Error: turn watchdog timeout', watchdogged: true })
+    }, timeoutMs)
+    watchdogTimer.unref?.()
+  })
+
+  try {
+    const result = await Promise.race([
+      _sendMessageImpl(content, opts),
+      watchdogPromise,
+    ])
+    if (watchdogFired) {
+      // Watchdog won the race — _sendMessageImpl may still resolve later.
+      // We've already aborted the query; its eventual resolution is a no-op.
+      return result
+    }
+    return result
+  } finally {
+    if (watchdogTimer) clearTimeout(watchdogTimer)
+  }
+}
+
 // Serialized wrapper — all sendMessage calls queue through this so they never
 // race or clobber each other's queries. This prevents scheduler crons, factory
 // completions, and user messages from interrupting each other mid-stream.
@@ -1603,6 +1691,17 @@ async function _sendMessageImpl(content, opts = {}) {
 // they abort the active query, flush the queue, and send immediately.
 // The CC session resumes via session_id so no context is lost.
 async function sendMessage(content, opts = {}) {
+  // Input size guard — reject pathologically huge prompts at the door. The
+  // SDK technically accepts them but they cause unpredictable tool/CLI
+  // behaviour and make debugging "it just froze" nearly impossible. 200KB
+  // covers any legitimate paste + generous margin.
+  if (typeof content === 'string' && content.length > 200_000) {
+    logger.warn('OS Session: oversized message rejected', { length: content.length })
+    const err = new Error(`Message too large (${content.length} chars, max 200000). Paste a summary or use a file reference.`)
+    err.code = 'MESSAGE_TOO_LARGE'
+    throw err
+  }
+
   if (opts.priority && activeQuery) {
     // If the task we're about to kill was a suppressed background task
     // (sendTask), don't broadcast an interrupt to the frontend — the user
@@ -1611,9 +1710,7 @@ async function sendMessage(content, opts = {}) {
     // "half-sentences from KG consolidation appear mid-conversation" bug.
     const wasSuppressed = activeQuerySuppressed
     logger.info('Priority message — aborting active query to deliver immediately', { wasSuppressed })
-    try { activeQuery.close() } catch {}
-    activeQuery = null
-    activeQuerySuppressed = false
+    _abortActiveQuery('priority_preempt')
     // Flush the queue — stale system messages shouldn't fire after a user interrupt
     _sendQueue = Promise.resolve()
     if (!wasSuppressed) {
@@ -1623,7 +1720,7 @@ async function sendMessage(content, opts = {}) {
     }
   }
 
-  const promise = _sendQueue.then(() => _sendMessageImpl(content, opts))
+  const promise = _sendQueue.then(() => _sendMessageWithWatchdog(content, opts))
   // Always chain even on error so the queue doesn't stall
   _sendQueue = promise.catch(() => {})
   return promise
@@ -1647,10 +1744,7 @@ async function getStatus() {
 // ── Restart — kill current, start fresh ──
 
 async function restart() {
-  if (activeQuery) {
-    try { activeQuery.close() } catch {}
-    activeQuery = null
-  }
+  _abortActiveQuery('manual_restart')
   ccSessionId = null
   _currentProvider = 'claude_max'  // reset — smart selection will re-evaluate on next message
   usageEnergy.setProvider('claude_max')
@@ -1683,11 +1777,7 @@ async function getHistory(limit = 100) {
 // losing all conversation history. Only kept for the /compact endpoint backwards compat.
 async function compact(summary) {
   logger.warn('compact() called — this is DEPRECATED and destroys session context. Use SDK compaction instead.')
-  // Kill any active query
-  if (activeQuery) {
-    try { activeQuery.close() } catch {}
-    activeQuery = null
-  }
+  _abortActiveQuery('compact_deprecated')
 
   // Create a new session
   const newSession = await createOSSession()
@@ -1717,9 +1807,53 @@ async function compact(summary) {
 //  4. Signals frontend with last-N messages so UI can do a seamless dissolve
 //  5. Never interrupts an active stream — deferred until turn completes
 
+// Hard ceiling on the entire handover flow. If brief-generation + warmup takes
+// longer than this, the handover watchdog force-resets state so the OS can
+// accept new messages again. Without this guard, a hung brief call could
+// leave handoverInProgress=true forever — next call returns immediately,
+// effectively disabling the whole session until PM2 restart.
+const HANDOVER_WATCHDOG_MS = 10 * 60 * 1000
+
 async function autoHandover(recentMessages) {
-  if (handoverInProgress) return
+  if (handoverInProgress) {
+    logger.warn('autoHandover: already in progress, skipping')
+    return
+  }
   handoverInProgress = true
+  const handoverStartedAt = Date.now()
+
+  // Watchdog: if the whole flow exceeds HANDOVER_WATCHDOG_MS, force-reset.
+  // Doesn't interrupt running calls — they'll continue and resolve/error on
+  // their own — but ensures the session isn't permanently wedged.
+  const handoverWatchdog = setTimeout(() => {
+    if (handoverInProgress) {
+      logger.error('autoHandover: watchdog fired, force-resetting', {
+        elapsedMs: Date.now() - handoverStartedAt,
+      })
+      try {
+        osIncident.log({
+          kind: 'context_reset',
+          severity: 'error',
+          component: 'os_session',
+          message: 'handover watchdog fired — force-reset handoverInProgress',
+          context: { elapsedMs: Date.now() - handoverStartedAt, trigger: 'handover_watchdog' },
+        })
+      } catch {}
+      handoverInProgress = false
+      _abortActiveQuery('handover_watchdog')
+      _sendQueue = Promise.resolve()
+      try {
+        broadcast('os-session:handover', { phase: 'failed', error: 'handover_watchdog_timeout' })
+        emitStatus('error', { error: 'handover_watchdog' })
+      } catch {}
+    }
+  }, HANDOVER_WATCHDOG_MS)
+  handoverWatchdog.unref?.()
+
+  // Flush any pending queued messages BEFORE starting the handover. Messages
+  // that arrive during brief-generation would otherwise fire against the dying
+  // session. The user can always re-send; silent mis-delivery is worse.
+  _sendQueue = Promise.resolve()
 
   try {
     const tokensAtHandover = sessionTokenUsage.input + sessionTokenUsage.output
@@ -1786,10 +1920,7 @@ Write this now. Be thorough — this brief is the only continuity between sessio
     emitStatus('handover_warming', { phase: 'warming_new_session' })
 
     // Kill current session state and create new session
-    if (activeQuery) {
-      try { activeQuery.close() } catch {}
-      activeQuery = null
-    }
+    _abortActiveQuery('handover_prep')
     const newSession = await createOSSession()
     sessionTokenUsage = { input: 0, output: 0 }
     ccSessionId = null
@@ -1837,9 +1968,14 @@ The handover is complete when you've read the docs and are ready to continue. Do
   } catch (err) {
     logger.error('OS Session: auto-handover failed', { error: err.message })
     broadcast('os-session:handover', { phase: 'failed', error: err.message })
-    handoverInProgress = false
+    // Emit a terminal status so the frontend doesn't stay stuck on "handover_warming"
+    try {
+      emitStatus('error', { error: 'handover_failed' })
+      broadcast('os-session:complete', { sessionId: null, code: 1, handoverFailed: true })
+    } catch {}
   } finally {
     handoverInProgress = false
+    clearTimeout(handoverWatchdog)
   }
 }
 
@@ -1893,8 +2029,7 @@ async function abort() {
   if (!activeQuery) {
     return { aborted: false, reason: 'no_active_query' }
   }
-  try { activeQuery.close() } catch {}
-  activeQuery = null
+  _abortActiveQuery('explicit_abort')
 
   // Clear the send queue so queued messages don't auto-fire
   _sendQueue = Promise.resolve()
@@ -1917,4 +2052,16 @@ async function abort() {
 // can never race chat for OAuth. See services/claudeService.js and
 // services/deepseekService.js for the call sites.
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort }
+// Internal introspection for the heartbeat/scheduler to avoid race-conditions
+// where they check "busy" then fire while a user message is landing in the queue.
+// Returns true if activeQuery OR _sendQueue has anything pending.
+function _isQueueBusy() {
+  if (activeQuery) return true
+  // _sendQueue is always a resolved Promise when idle (after .catch()).
+  // We treat handoverInProgress as busy too — anything queuing during a
+  // handover would be orphaned by the queue flush.
+  if (handoverInProgress) return true
+  return false
+}
+
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort, _isQueueBusy }
