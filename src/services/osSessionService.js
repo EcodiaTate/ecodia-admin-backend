@@ -24,6 +24,7 @@ const env = require('../config/env')
 const { broadcast } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
 const usageEnergy = require('./usageEnergyService')
+const osIncident = require('./osIncidentService')
 const sessionMemory = require('./sessionMemoryService')
 
 // Fire quota-checks for BOTH accounts on startup to get real usage % immediately
@@ -460,6 +461,7 @@ async function _DEAD_tryTokenRefresh(mode = 'force') {
 // After an exhaustion event on the current provider, mark it rejected and pick the next best.
 // Returns { provider, reason, isBedrockFallback } or null if no alternative.
 function _switchAfterExhaustion() {
+  const from = _currentProvider
   // Mark current provider as rejected so getBestProvider skips it
   usageEnergy.markAccountRejected(_currentProvider, 'exhaustion_detected')
   // Re-probe to see what's available
@@ -468,6 +470,13 @@ function _switchAfterExhaustion() {
     // getBestProvider returned the same one (best-effort) — no real alternative
     return null
   }
+  osIncident.log({
+    kind: 'provider_switch',
+    severity: best.isBedrockFallback ? 'error' : 'warn',
+    component: from,
+    message: `switched ${from} -> ${best.provider}`,
+    context: { from, to: best.provider, reason: best.reason, isBedrockFallback: !!best.isBedrockFallback },
+  })
   return best
 }
 
@@ -1224,6 +1233,13 @@ async function _sendMessageImpl(content, opts = {}) {
         return _sendMessageImpl(content, { ...opts, _retryDepth: retryDepth + 1 })
       }
       logger.error(`OS Session: ${hangReason} at max retry depth — surfacing error`, { retryDepth, provider: _currentProvider })
+      osIncident.log({
+        kind: _toolWatchdogAborted ? 'tool_hung' : 'turn_failure',
+        severity: 'error',
+        component: 'os_session',
+        message: `${hangReason} after ${MAX_RETRY_DEPTH} retries`,
+        context: { provider: _currentProvider, retryDepth, sessionId: dbSessionId },
+      })
       if (!suppressOutput) {
         emitOutput({ type: 'error', content: `Session hung (${hangReason}) after ${MAX_RETRY_DEPTH} retries. Check MCP servers.` })
         emitStatus('error', { error: hangReason })
@@ -1250,6 +1266,13 @@ async function _sendMessageImpl(content, opts = {}) {
       }
       const message = 'Session ended without delivering a response. Check pm2 logs for "claude CLI exit".'
       logger.error('OS Session: empty SDK stream (post-retry or no resume id)', { provider: _currentProvider, retryDepth })
+      osIncident.log({
+        kind: 'empty_sdk_stream',
+        severity: 'error',
+        component: 'os_session',
+        message: 'CC CLI exited with no result message',
+        context: { provider: _currentProvider, retryDepth, sessionId: dbSessionId },
+      })
       if (!suppressOutput) {
         emitOutput({ type: 'error', content: message })
         emitStatus('error', { error: 'empty_stream' })
@@ -1395,6 +1418,13 @@ async function _sendMessageImpl(content, opts = {}) {
     // If the user sees an error they can decide what to do; half our past
     // bugs came from this code trying to self-heal in opaque ways.
     logger.error('OS Session SDK error', { error: errMsg, stack: err.stack })
+    osIncident.log({
+      kind: 'turn_failure',
+      severity: 'error',
+      component: 'os_session',
+      message: errMsg,
+      context: { provider: _currentProvider, retryDepth, sessionId: dbSessionId },
+    })
 
     emitOutput({ type: 'error', content: errMsg })
     emitStatus('error', { error: errMsg })

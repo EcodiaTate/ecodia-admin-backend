@@ -140,7 +140,20 @@ async function _fire(alertType, subject, body) {
     _sendSms(smsBody).catch(() => {})
   }
   const ok = await _send(subject, body)
-  if (ok) await _markFired(alertType)
+  if (ok) {
+    await _markFired(alertType)
+    // Log the outgoing alert so the OS can see what Tate has been notified
+    // about without scraping its own email inbox.
+    try {
+      require('./osIncidentService').log({
+        kind: 'alert_fired',
+        severity: 'info',
+        component: alertType,
+        message: subject,
+        context: { alertType },
+      })
+    } catch {}
+  }
   return ok
 }
 
