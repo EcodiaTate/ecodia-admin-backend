@@ -25,7 +25,8 @@ const KNOWN_KINDS = new Set([
   'cert_warning',        // TLS cert < warn threshold
   'neo4j_unreachable',   // KG context fetch failed
   'empty_sdk_stream',    // CC CLI exited with no result message
-  'subsystem_recovered', // counterpart to the above — a previously-failed subsystem came back
+  'subsystem_recovered', // a previously-failed subsystem came back
+  'context_reset',       // ccSessionId was nulled — auto-handover, stale-retry, empty-stream retry. Why matters.
 ])
 
 async function log({ kind, severity = 'warn', component = null, message, context = {} }) {

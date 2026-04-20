@@ -1156,6 +1156,13 @@ async function _sendMessageImpl(content, opts = {}) {
                 errTexts.includes('Invalid session')
               )) {
                 logger.warn('OS Session: stale resume ID in result, starting fresh', { staleCcSessionId: ccSessionId })
+                osIncident.log({
+                  kind: 'context_reset',
+                  severity: 'warn',
+                  component: 'os_session',
+                  message: 'stale resume ID in result — CC CLI lost the session, restarting fresh',
+                  context: { trigger: 'stale_retry_in_result', staleCcSessionId: ccSessionId },
+                })
                 ccSessionId = null
                 activeQuery = null
                 await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${dbSessionId}`.catch(() => {})
@@ -1258,6 +1265,13 @@ async function _sendMessageImpl(content, opts = {}) {
     if (!sawResultMessage && collectedText.length === 0) {
       if (retryDepth < MAX_RETRY_DEPTH && ccSessionId) {
         logger.warn('OS Session: empty SDK stream — retrying with fresh session_id', { retryDepth, provider: _currentProvider })
+        osIncident.log({
+          kind: 'context_reset',
+          severity: 'warn',
+          component: 'os_session',
+          message: 'empty SDK stream — ccSessionId nulled, retrying fresh',
+          context: { trigger: 'empty_stream_retry', provider: _currentProvider, retryDepth },
+        })
         ccSessionId = null
         if (session?.id) {
           await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
@@ -1405,6 +1419,13 @@ async function _sendMessageImpl(content, opts = {}) {
       errMsg.includes('Invalid session')
     )) {
       logger.warn('OS Session: stale resume ID — starting fresh', { staleCcSessionId: ccSessionId })
+      osIncident.log({
+        kind: 'context_reset',
+        severity: 'warn',
+        component: 'os_session',
+        message: 'stale resume ID surfaced as exception — restarting fresh',
+        context: { trigger: 'stale_retry_outer_catch', errMsg: errMsg.slice(0, 200) },
+      })
       ccSessionId = null
       if (session?.id) {
         await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${session.id}`.catch(() => {})
@@ -1569,8 +1590,14 @@ async function autoHandover(recentMessages) {
   handoverInProgress = true
 
   try {
-    logger.info('OS Session: auto-handover triggered', {
-      tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+    const tokensAtHandover = sessionTokenUsage.input + sessionTokenUsage.output
+    logger.info('OS Session: auto-handover triggered', { tokens: tokensAtHandover })
+    osIncident.log({
+      kind: 'context_reset',
+      severity: 'warn',
+      component: 'os_session',
+      message: `auto-handover triggered at ${tokensAtHandover} tokens — ccSessionId nulled, warm brief generated`,
+      context: { tokens: tokensAtHandover, trigger: 'auto_handover' },
     })
 
     // Signal frontend: handover is starting. Pass last 6 messages for continuity display.

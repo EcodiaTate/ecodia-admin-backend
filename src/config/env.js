@@ -230,7 +230,11 @@ const envSchema = z.object({
   // OS Session tuning
   OS_SESSION_MODEL: z.string().default(''),
   OS_SESSION_CWD: z.string().default('/home/tate/ecodiaos'),
-  OS_SESSION_COMPACT_THRESHOLD: z.string().default('250000'),
+  // Bumped from 250k to 800k (Apr 2026). On Opus 4.7's 1M context, handover
+  // was firing way too early — the SDK's native compaction preserves
+  // continuity far better than our brief→warm-session dance. Only trigger
+  // when we're genuinely approaching the context ceiling.
+  OS_SESSION_COMPACT_THRESHOLD: z.string().default('800000'),
 })
 
 const parsed = envSchema.safeParse(process.env)
