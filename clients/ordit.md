@@ -214,3 +214,91 @@ The rollback try/catch in the transaction callback only wrapped `prisma.user.cre
 ### Why these got missed on the first pass
 
 The first review traced the happy paths end-to-end and checked for correctness there. The bugs all live in edge cases (Cognito challenge state, mid-transaction failure, service-call failure between two external operations). **Lesson: for security-critical code, a second review pass focused specifically on "what happens when external service / subsequent operation fails after the critical-path write" is mandatory.** That framing would have caught all three on the first pass.
+
+---
+
+## 2026-04-20 - Frontend Cognito Ticket + Testing Ticket (QUEUED, do NOT start without Tate's go-ahead)
+
+Parked here because the BE PR (`feat/cognito-be-integration`, 3 commits on `uat`) is awaiting Eugene. The FE ticket and the testing ticket come next after that merges. Do NOT spin up work on either until Tate explicitly greenlights.
+
+### FE Ticket: Implement Cognito Login Flow (Frontend)
+
+**Description:** Implement the Cognito login flow in the frontend and ensure seamless integration with the backend.
+
+**Tasks (from ticket):**
+- Implement Cognito Login Flow: login flow that uses a URL to trigger the native Cognito login flow (not via Ordit's Next.js API services).
+- Evaluate OAuth2 Clients: research and select a lightweight OAuth2 client that is Cognito compatible.
+- Consider Resources: review `next-auth/react`, `amazon-cognito-identity-js` for guidance.
+- Prioritize Lightweight and Platform Agnostic Solutions: avoid bloated AWS coupling or libraries like `aws-sdk` or Amplify.
+- Implement Background Token Refreshes: the chosen client must support background token refresh.
+- Register Screens: register screens should function as before, calling the updated register endpoint in the backend.
+- Token Storage and Management: secure storage and management of JWTs (access token, ID token, refresh token) in the frontend.
+- UI Updates (If Necessary): reflect any changes in user roles or permissions based on new Cognito JWT claims.
+- Logout Flow: invalidates both the existing token (if applicable) and the Cognito JWT.
+- Error Handling and User Feedback: clear error messages and user feedback for all auth operations.
+
+**Ticket scope estimate:** 16-24 hours (2-3 days).
+
+**Eugene's clarification (authoritative — simpler than the ticket reads):**
+
+> This is the FE/UI ticket, its a little wordy but the basic requirement is to make a POC:
+>
+> 1. Make a login screen that
+>    a. uses the native Cognito login flow
+>    b. Does not affect any of our existing login flows
+>    c. Is not customer facing (it's on a uri that is known only to us)
+> 2. Make a logout flow in the same forum.
+>
+> So, our current login flows use our BE apis which issue the token. The POC login flow will not use our BE apis to issue the token. I imagine the flow will be like:
+> - Use the Cognito secure login flow to attain a token.
+> - Call an Ordit BE/API endpoint to fetch the user details (the details we have in our Users table).
+> - Save the user and token in the FE state in the same way the existing login flow does.
+
+**What this means practically:** POC behind a hidden URI, completely parallel to legacy flow. We are NOT replacing the existing login UX — we are proving Cognito-only auth works end-to-end without touching our BE's token issuance path. Scope is probably closer to 4-8 hours of real work; the ticket's 16-24 hours is padded.
+
+**Open questions to confirm with Eugene BEFORE starting:**
+1. Which frontend repo is this for? (Bitbucket access request pending.)
+2. Desired URI for the hidden login screen? (e.g. `/cognito-login-poc`?)
+3. Does the "fetch user details" BE endpoint already exist, or do we need to add one? If new, what's the auth guard — the Cognito JWT?
+4. Token storage preference: `localStorage`, `sessionStorage`, or in-memory only for POC?
+5. Is `amazon-cognito-identity-js` acceptable, or does Eugene want a truly SDK-free approach (direct OIDC against the Cognito user pool endpoints)?
+
+### Testing Ticket (follow-on after FE)
+
+**Description:** Thoroughly test the Cognito integration and authentication flows to ensure functionality, security, and stability.
+
+**BE testing:**
+- All updated user endpoints work correctly with Cognito.
+- JWT authentication works for both existing and Cognito JWTs.
+- User object mapping returns correct data.
+- User data synchronization creates/updates DB records correctly.
+- Error handling and logging tracking/reporting issues.
+
+**FE testing:**
+- Cognito login flow works end-to-end.
+- Tokens stored and managed securely.
+- UI updates reflect user roles and permissions correctly.
+- Logout flow invalidates tokens correctly.
+- Error handling and user feedback clear and informative.
+
+**Security testing:** identify and address any Cognito integration vulnerabilities. Protect sensitive data. Verify auth flows are secure.
+
+**Performance testing:** ensure new auth system does not negatively impact app performance.
+
+**Ticket scope estimate:** 16-24 hours (2-3 days). Realistically, most of this is covered by the unit/e2e tests already shipped in Phase 2 + a smoke test suite we can add to `tests/suites/ordit.js` via our Puppeteer pipeline.
+
+### Sequencing
+
+1. Eugene reviews and merges `feat/cognito-be-integration` to UAT.
+2. Tate explicitly says: "go on the FE ticket."
+3. Confirm the 5 open questions with Eugene.
+4. Spin up FE work on the Ordit frontend repo (need Bitbucket access if not already granted).
+5. POC behind hidden URI, BE call for user details, JWT in FE state.
+6. Testing ticket rolls in on the same branch or as a follow-up smoke suite.
+
+### Do NOT
+
+- Do not start FE work without Tate's explicit greenlight on this ticket specifically.
+- Do not touch existing login/logout flows. Parallel implementation only.
+- Do not make it customer-facing. Hidden URI only.
+- Do not introduce `aws-sdk` or `amplify` as dependencies — ticket explicitly rules them out.
