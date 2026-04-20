@@ -1,8 +1,8 @@
 /**
  * OS Alerting — ONE way for the OS to reach Tate when he's in Africa.
  *
- * Fires email (via gmailService) when the OS hits states that need human
- * awareness but aren't crash-severe:
+ * Fires email + SMS (for urgent alerts) when the OS hits states that need
+ * human awareness but aren't crash-severe:
  *   - Bedrock fallback triggered (cost spike risk)
  *   - Weekly quota above 90% (heading into critical)
  *   - 3+ consecutive failed turns (systemic issue)
@@ -12,15 +12,15 @@
  * Dedup-aware: each alert has a cooldown so we don't spam the inbox when a
  * state flaps. Cooldowns persist across pm2 restarts via kv_store.
  *
- * All alerts go to ALERT_EMAIL_TO (default: code@ecodia.au) from the first
- * configured Gmail inbox. If gmail is disabled or sending fails, we log
- * loudly but never throw — alerts must never break the caller's path.
+ * All alerts go FROM code@ecodia.au TO ALERT_EMAIL_TO (default: tate@ecodia.au).
+ * If gmail is disabled or sending fails, we log loudly but never throw —
+ * alerts must never break the caller's path.
  */
 
 const logger = require('../config/logger')
 const db = require('../config/db')
 
-const ALERT_TO = process.env.ALERT_EMAIL_TO || 'code@ecodia.au'
+const ALERT_TO = process.env.ALERT_EMAIL_TO || 'tate@ecodia.au'
 
 // Per-alert cooldowns in ms. After firing, same alert type blocked until elapsed.
 const COOLDOWNS = {
@@ -31,18 +31,33 @@ const COOLDOWNS = {
   daily_digest:        20 * 60 * 60 * 1000,  // once per ~day
 }
 
-// kv_store.value is JSONB. Store a JSON object {ts: <ms>} so we're
-// unambiguously structured on both sides. Previous code stored
-// String(Date.now()) and relied on postgres.js coercing it to a JSONB
-// string literal — fragile across driver updates and parseInt quirks.
+// kv_store.value is TEXT — we serialise JSON ourselves.
+// New rows store JSON.stringify({ts: <ms>, type: <alertType>}).
+// Legacy rows may contain a bare numeric string ("1776634957262").
+// Broken rows contain "[object Object]" (old bug) — parse fails → Infinity → fires once, self-heals.
 async function _getCooldownMs(alertType) {
   try {
     const row = await db`SELECT value FROM kv_store WHERE key = ${`alert_last:${alertType}`}`
     if (!row.length) return Infinity
     const v = row[0].value
-    const lastAt = (v && typeof v === 'object' && Number.isFinite(v.ts))
-      ? v.ts
-      : Number(typeof v === 'string' ? v : NaN)
+    let lastAt = Infinity
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v)
+        if (parsed && typeof parsed === 'object' && Number.isFinite(parsed.ts)) {
+          lastAt = parsed.ts
+        } else if (Number.isFinite(Number(parsed))) {
+          lastAt = Number(parsed)
+        }
+      } catch {
+        // Not JSON — try as bare number (legacy bedrock_fallback rows)
+        const n = Number(v)
+        if (Number.isFinite(n)) lastAt = n
+      }
+    } else if (typeof v === 'object' && v !== null && Number.isFinite(v.ts)) {
+      // Driver returned parsed object despite TEXT column — handle gracefully
+      lastAt = v.ts
+    }
     if (!Number.isFinite(lastAt)) return Infinity
     return Date.now() - lastAt
   } catch {
@@ -52,8 +67,8 @@ async function _getCooldownMs(alertType) {
 
 async function _markFired(alertType) {
   try {
-    // postgres.js auto-encodes JS objects for JSONB columns.
-    const payload = { ts: Date.now(), type: alertType }
+    // kv_store.value is TEXT — must JSON.stringify ourselves.
+    const payload = JSON.stringify({ ts: Date.now(), type: alertType })
     await db`
       INSERT INTO kv_store (key, value)
       VALUES (${`alert_last:${alertType}`}, ${payload})
@@ -64,12 +79,42 @@ async function _markFired(alertType) {
   }
 }
 
+async function _sendSms(body) {
+  const sid = process.env.TWILIO_ACCOUNT_SID
+  const token = process.env.TWILIO_AUTH_TOKEN
+  const from = (process.env.TWILIO_FROM_NUMBER || '').trim()
+  const to = process.env.TATE_MOBILE
+  if (!sid || !token || !from || !to) {
+    logger.warn('alerting: SMS env not configured, skipping SMS')
+    return false
+  }
+  try {
+    const auth = Buffer.from(`${sid}:${token}`).toString('base64')
+    const params = new URLSearchParams({ From: from, To: to, Body: body.slice(0, 1500) })
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      logger.error('alerting: Twilio SMS failed', { status: res.status, body: text.slice(0, 200) })
+      return false
+    }
+    return true
+  } catch (err) {
+    logger.error('alerting: SMS send threw', { error: err.message })
+    return false
+  }
+}
+
+const SMS_ALERT_TYPES = new Set(['consecutive_failures', 'process_restart', 'bedrock_fallback'])
+
 async function _send(subject, body) {
   try {
     const gmail = require('./gmailService')
-    // sendNewEmail signature: (inbox, to, subject, body). Passing null lets
-    // the service pick the first configured inbox.
-    await gmail.sendNewEmail(null, ALERT_TO, `[EcodiaOS] ${subject}`, body)
+    // sendNewEmail signature: (inbox, to, subject, body). Send FROM code@ (OS inbox) TO tate@.
+    await gmail.sendNewEmail('code@ecodia.au', ALERT_TO, `[EcodiaOS] ${subject}`, body)
     logger.info('Alert sent', { subject, to: ALERT_TO })
     return true
   } catch (err) {
@@ -88,6 +133,11 @@ async function _fire(alertType, subject, body) {
       logger.debug('alerting: suppressed by cooldown', { alertType, agoMs: ago, cooldownMs: cooldown })
       return false
     }
+  }
+  // SMS first for urgent alert types — so Tate gets it even if email fails
+  if (SMS_ALERT_TYPES.has(alertType)) {
+    const smsBody = `[EcodiaOS] ${subject}\n${body.split('\n')[0]}`
+    _sendSms(smsBody).catch(() => {})
   }
   const ok = await _send(subject, body)
   if (ok) await _markFired(alertType)
