@@ -76,7 +76,7 @@ async function triggerAutoWakeIfNeeded() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: `⚡ Auto-wake: session restart detected. Handoff state from ${ageMinutes} minutes ago is available in your system prompt. Resume where you left off: run the status_board orientation query, check for overdue scheduled tasks (SELECT name, next_run_at FROM os_scheduled_tasks WHERE status='active' AND type='delayed' AND next_run_at < NOW()), then continue the work captured in handoff state. This is a self-triggered wake, not from Tate.`,
+          message: `⚡ Back. Handoff state from ${ageMinutes} minutes ago is in your system prompt. Carry on with whatever's most valuable right now. If external blockers are all that's active, default to self-evolution, research, or creative work per CLAUDE.md — don't idle waiting for Tate.`,
         }),
       })
     } catch (fetchErr) {
