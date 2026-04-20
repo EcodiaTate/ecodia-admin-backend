@@ -976,6 +976,19 @@ async function _sendMessageImpl(content, opts = {}) {
   // included when they carry real signal (fresh session / recent handoff).
   let finalPrompt = promptWithMemory
   const continuityParts = []
+  // Current-moment injection. Varies per turn (cache-safe - lives in user msg)
+  // Fixes temporal blindness from only having a date-only system prompt stamp.
+  const _nowAEST = new Date().toLocaleString('en-AU', {
+    timeZone: 'Australia/Brisbane',
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  continuityParts.push(`<now>${_nowAEST} AEST</now>`)
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
   }
@@ -985,6 +998,7 @@ async function _sendMessageImpl(content, opts = {}) {
   if (continuityParts.length > 0) {
     finalPrompt = `${continuityParts.join('\n\n')}\n\n${promptWithMemory}`
     logger.info('OS Session: stitching continuity blocks into user message', {
+      now: true,
       restart_recovery: !!recoveryBlock,
       breadcrumb: !!breadcrumbBlock,
       totalBlocksLen: continuityParts.join('\n\n').length,
