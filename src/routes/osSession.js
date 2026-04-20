@@ -7,6 +7,7 @@ const router = express.Router()
 const osSession = require('../services/osSessionService')
 const usageEnergy = require('../services/usageEnergyService')
 const { saveHandoffState } = require('../services/sessionHandoff')
+const { stampTateActive } = require('../services/tateActiveGate')
 
 // Send a message to the OS session.
 // Response streams in real-time via WebSocket (text_delta, tool_use, os-session:complete).
@@ -22,6 +23,11 @@ router.post('/message', async (req, res, next) => {
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'message is required' })
     }
+    // Stamp Tate as active before queuing — crons stand down for 15 minutes.
+    // Fire-and-forget: never block the response if this errors.
+    stampTateActive().catch(err => {
+      console.error('[OS Session /message] stampTateActive error:', err.message)
+    })
     // Return immediately — the real response streams via WebSocket
     res.json({ accepted: true, status: 'streaming' })
 
