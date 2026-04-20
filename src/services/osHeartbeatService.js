@@ -21,6 +21,7 @@
 const logger = require('../config/logger')
 const usageEnergy = require('./usageEnergyService')
 const db = require('../config/db')
+const osIncident = require('./osIncidentService')
 
 // ─── Grounded context gathering ─────────────────────────────────────────────
 // Pulls concrete signals the OS can act on instead of a pure open prompt.
@@ -109,6 +110,10 @@ async function _gatherHeartbeatContext() {
   const lastUser      = pick(7)?.[0]?.last_user ?? null
   const breadcrumb    = pick(8)?.[0]?.value ?? null
 
+  // Incident summary — one extra query, independent of the Promise.allSettled
+  // above since it's a different module. Cheap aggregate query (single row).
+  const incidentSummary = await osIncident.recentSummary({ hours: 4 }).catch(() => null)
+
   return {
     urgentEmails,
     pendingEmails,
@@ -120,6 +125,7 @@ async function _gatherHeartbeatContext() {
     staleReviewOldestAgoH: staleReviewRow?.oldest
       ? (now - new Date(staleReviewRow.oldest).getTime()) / 3_600_000
       : null,
+    incidentSummary,
     lastHeartbeatAgoH: lastHeartbeat ? ((now - new Date(lastHeartbeat).getTime()) / 3_600_000) : null,
     lastUserAgoH:      lastUser      ? ((now - new Date(lastUser).getTime())      / 3_600_000) : null,
     breadcrumb: (breadcrumb && typeof breadcrumb === 'object' && breadcrumb.ts) ? breadcrumb : null,
@@ -214,13 +220,26 @@ function _heartbeatPrompt(ctx) {
     `  • Overdue scheduled tasks (>1h):     ${_fmtNum(ctx.overdueCrons)}`,
     `  • Factory sessions still running:    ${_fmtNum(ctx.runningFactory)}`,
     `  • Factory reviews awaiting decision: ${_fmtNum(ctx.staleFactoryReviews)}${ctx.staleReviewOldestAgoH ? ` (oldest ${ctx.staleReviewOldestAgoH.toFixed(1)}h)` : ''}`,
+  )
+
+  // Self-health signal — one line summary of the last 4h of incidents.
+  // If anything here is non-trivial, the OS should call os_self_check
+  // and os_incident_patterns before doing other work.
+  if (ctx.incidentSummary) {
+    const is = ctx.incidentSummary
+    const has = (is.critical || 0) > 0 || (is.errors || 0) > 0 || (is.turn_failures || 0) > 0
+    lines.push(`  • Self-health (last 4h): ${is.total || 0} incidents, ${is.errors || 0} errors, ${is.critical || 0} critical, ${is.turn_failures || 0} turn failures, ${is.provider_switches || 0} provider switches${has ? '  ← call os_self_check' : ''}`)
+  }
+
+  lines.push(
     '',
     'Decision framework:',
     '  1. If "where you left off" shows mid-task work, CONTINUE that work before starting anything new.',
-    '  2. If Factory reviews are waiting, review + approve/reject them FIRST — they block deploy flow and Tate can\'t resolve them from Africa.',
-    '  3. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
-    '  4. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
-    '  5. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
+    '  2. If self-health shows repeated errors or any critical, call os_self_check + os_incident_patterns to diagnose BEFORE doing normal work. A system that can\'t observe itself can\'t fix itself.',
+    '  3. If Factory reviews are waiting, review + approve/reject them — they block deploy flow and Tate can\'t resolve them from Africa.',
+    '  4. If any counter above is non-zero and actionable — do the highest-leverage item now. No approval needed.',
+    '  5. If everything is zero or already handled, reply with a ONE-LINE "nothing pressing" and end. Do NOT invent work — conserving quota is a valid outcome.',
+    '  6. If Tate last messaged >24h ago, briefly (one line) scan Gmail / Calendar / Actions MCP for anything new that the counters above might not reflect.',
     '',
     'You are the CEO. Act.',
   )

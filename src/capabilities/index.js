@@ -24,6 +24,7 @@ const domains = [
   './finance',
   './system',
   './selfhood',
+  './self_observability',
   './context',
   './growth',
   './bookkeeping',
