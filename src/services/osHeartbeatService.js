@@ -128,7 +128,13 @@ async function _gatherHeartbeatContext() {
     incidentSummary,
     lastHeartbeatAgoH: lastHeartbeat ? ((now - new Date(lastHeartbeat).getTime()) / 3_600_000) : null,
     lastUserAgoH:      lastUser      ? ((now - new Date(lastUser).getTime())      / 3_600_000) : null,
-    breadcrumb: (breadcrumb && typeof breadcrumb === 'object' && breadcrumb.ts) ? breadcrumb : null,
+    // Tolerate JSONB (object) and TEXT (JSON string) — live column type varies
+    breadcrumb: (() => {
+      if (!breadcrumb) return null
+      if (typeof breadcrumb === 'object' && Number.isFinite(breadcrumb.ts)) return breadcrumb
+      if (typeof breadcrumb === 'string') { try { const p = JSON.parse(breadcrumb); if (p && Number.isFinite(p.ts)) return p } catch {} }
+      return null
+    })(),
     timestamp: new Date(now).toISOString(),
     timestampLocal: new Date(now).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
   }

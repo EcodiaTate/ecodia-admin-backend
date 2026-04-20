@@ -719,8 +719,13 @@ async function _sendMessageImpl(content, opts = {}) {
   if (!ccSessionId) {
     try {
       const rows = await db`SELECT value FROM kv_store WHERE key = 'session.last_breadcrumb'`
-      const b = rows?.[0]?.value
-      if (b && typeof b === 'object' && b.ts) {
+      const raw = rows?.[0]?.value
+      // Tolerate both JSONB (object) and TEXT (JSON string) column types —
+      // the live DB has been observed as both depending on migration history.
+      let b = null
+      if (raw && typeof raw === 'object') b = raw
+      else if (typeof raw === 'string') { try { b = JSON.parse(raw) } catch {} }
+      if (b && Number.isFinite(b.ts)) {
         const ageMin = Math.round((Date.now() - b.ts) / 60000)
         // Only surface if reasonably recent (12h). Stale breadcrumbs create
         // more confusion than continuity.
@@ -1320,17 +1325,22 @@ async function _sendMessageImpl(content, opts = {}) {
         const TAIL_CHARS = 600
         const userTail = content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : content
         const asstTail = lastAssistant.length > TAIL_CHARS ? '…' + lastAssistant.slice(-TAIL_CHARS) : lastAssistant
+        // JSON.stringify explicitly — the live kv_store has been observed as
+        // both TEXT and JSONB on different DB versions. A stringified JSON
+        // object works for both (JSONB accepts JSON-string input; TEXT takes
+        // it as-is). Passing a bare JS object to TEXT writes "[object Object]".
+        const breadcrumbPayload = JSON.stringify({
+          ts: Date.now(),
+          session_id: dbSessionId,
+          cc_session_id: ccSessionId,
+          provider: _currentProvider,
+          user_tail: userTail,
+          assistant_tail: asstTail,
+          tokens: sessionTokenUsage.input + sessionTokenUsage.output,
+        })
         await db`
           INSERT INTO kv_store (key, value)
-          VALUES ('session.last_breadcrumb', ${{
-            ts: Date.now(),
-            session_id: dbSessionId,
-            cc_session_id: ccSessionId,
-            provider: _currentProvider,
-            user_tail: userTail,
-            assistant_tail: asstTail,
-            tokens: sessionTokenUsage.input + sessionTokenUsage.output,
-          }})
+          VALUES ('session.last_breadcrumb', ${breadcrumbPayload})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
         `.catch(err => logger.debug('breadcrumb write failed (non-fatal)', { error: err.message }))
       } catch (err) {
