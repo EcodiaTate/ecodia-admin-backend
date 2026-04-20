@@ -9,7 +9,8 @@ async function readHandoffState() {
     const rows = await db`SELECT value FROM kv_store WHERE key = ${KV_KEY}`
     if (!rows.length) return null
 
-    const state = rows[0].value
+    const raw = rows[0].value
+    const state = typeof raw === 'string' ? JSON.parse(raw) : raw
     if (!state.saved_at) return null
 
     const age = Date.now() - new Date(state.saved_at).getTime()
