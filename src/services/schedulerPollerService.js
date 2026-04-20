@@ -11,6 +11,7 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
 const usageEnergy = require('./usageEnergyService')
+const { isTateActive } = require('./tateActiveGate')
 
 const POLL_INTERVAL_MS = 30_000
 const TZ_OFFSET_HOURS = 10 // AEST (UTC+10, no DST)
@@ -60,6 +61,19 @@ async function isSessionBusy() {
 // ── Fire a single task ──
 
 async function fireTask(task) {
+  // Gate: stand down if Tate is actively talking to the OS (last message < 15min ago).
+  // Reschedule to +20min so the task retries after the active window likely ends.
+  if (await isTateActive()) {
+    const deferred = new Date(Date.now() + 20 * 60 * 1000)
+    await db`
+      UPDATE os_scheduled_tasks
+      SET next_run_at = ${deferred}, last_deferred_at = now()
+      WHERE id = ${task.id}
+    `.catch(() => {})
+    logger.info('Scheduler: Tate active - deferred task', { name: task.name, retryAt: deferred })
+    return
+  }
+
   try {
     const prompt = `[SCHEDULED: ${task.name}] ${task.prompt}`
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/message`, {
