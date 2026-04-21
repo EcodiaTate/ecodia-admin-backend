@@ -126,6 +126,15 @@ process.on('unhandledRejection', (reason) => {
 server.listen(env.PORT, async () => {
   logger.info(`Ecodia API running on :${env.PORT}`)
 
+  // ── Boot: Neo4j Retrieval Warmup ──────────────────────────────────
+  // Warm the Neo4j retrieval path so the first user-turn injection doesn't pay
+  // the ~2.4s driver cold-start cost (vs the 2s outer timeout in _injectRelevantMemory).
+  setImmediate(() => {
+    require('./services/neo4jRetrieval')
+      .semanticSearch('warmup', { limit: 1, minScore: 0.99 })
+      .catch(() => {}) // intentional - fire and forget
+  })
+
   // ── Boot: Schema Constraint Validator ─────────────────────────────
   // Advisory check — warns if code enum values don't match DB constraints
   try {

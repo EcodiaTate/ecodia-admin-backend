@@ -734,12 +734,20 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
     if (!queryText.trim()) return null
 
     // 2s hard cap - never block the user turn on retrieval
+    const t0 = Date.now()
     const results = await Promise.race([
-      neo4jRetrieval.semanticSearch(queryText, { limit: 3, minScore: 0.78 }),
+      neo4jRetrieval.semanticSearch(queryText, { limit: 3 }),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('neo4j retrieval timeout')), 2000)
       ),
     ])
+
+    logger.info('OS Session: relevant memory', {
+      query_len: queryText.length,
+      hits: results ? results.length : 0,
+      top_score: results && results[0] ? results[0].score ?? null : null,
+      elapsed_ms: Date.now() - t0,
+    })
 
     if (!results || results.length === 0) return null
 
