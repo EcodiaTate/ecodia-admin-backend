@@ -4,6 +4,10 @@
 import { z } from 'zod'
 import { getGmailClient, primaryAccount } from './auth.js'
 
+const INTERNAL_DOMAIN = 'ecodia.au'
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+
 function decodeBody(parts) {
   if (!parts) return ''
   for (const part of parts) {
@@ -35,6 +39,50 @@ function encodeHeaderValue(str) {
   if (!str || !/[^\x00-\x7F]/.test(str)) return str
   return `=?UTF-8?B?${Buffer.from(str, 'utf-8').toString('base64')}?=`
 }
+
+// ── External-send gate helpers ───────────────────────────────────────────────
+
+function extractEmailsFromField(field) {
+  if (!field) return []
+  const s = Array.isArray(field) ? field.join(',') : String(field)
+  const matches = s.match(/[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g) || []
+  return matches.map(e => e.trim().toLowerCase())
+}
+
+function externalRecipients({ to, cc, bcc }) {
+  const all = [...extractEmailsFromField(to), ...extractEmailsFromField(cc), ...extractEmailsFromField(bcc)]
+  return all.filter(e => {
+    const domain = e.split('@')[1] || ''
+    return domain && domain !== INTERNAL_DOMAIN
+  })
+}
+
+async function auditExternalSend({ inbox, to, cc, bcc, external, subject, tateGoaheadRef, messageId, threadId }) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return
+  const allRecipients = [...extractEmailsFromField(to), ...extractEmailsFromField(cc), ...extractEmailsFromField(bcc)]
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/external_send_audit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({
+        inbox: inbox || primaryAccount,
+        recipients_all: allRecipients,
+        external_recipients: external,
+        subject: subject || null,
+        tate_goahead_ref: tateGoaheadRef,
+        message_id: messageId || null,
+        thread_id: threadId || null,
+      }),
+    })
+  } catch (_) { /* non-blocking — gate already fired, audit failure should not break send */ }
+}
+
+// ── Tool registration ────────────────────────────────────────────────────────
 
 export function registerGmailTools(server) {
 
@@ -85,26 +133,84 @@ export function registerGmailTools(server) {
 
   server.tool('gmail_send',
     'Send a new email.',
-    { to: z.string().describe('Recipient email'), subject: z.string().describe('Email subject'), body: z.string().describe('Email body (plain text)'), cc: z.string().optional().describe('CC recipients (comma-separated)'), inbox: z.string().optional().describe('Send-as email account') },
-    async ({ to, subject, body, cc, inbox }) => {
+    {
+      to: z.string().describe('Recipient email'),
+      subject: z.string().describe('Email subject'),
+      body: z.string().describe('Email body (plain text)'),
+      cc: z.string().optional().describe('CC recipients (comma-separated)'),
+      inbox: z.string().optional().describe('Send-as email account'),
+      allowExternal: z.boolean().optional().describe('Must be true to send to any non-ecodia.au recipient'),
+      tateGoaheadRef: z.string().optional().describe('Required when allowExternal=true. Pointer to Tate authorisation: SMS id, kv_store key, status_board row id, or free-text explanation.'),
+    },
+    async ({ to, subject, body, cc, inbox, allowExternal, tateGoaheadRef }) => {
+      const external = externalRecipients({ to, cc })
+      if (external.length > 0) {
+        if (allowExternal !== true) {
+          throw new Error(`External send blocked. Recipients: ${external.join(', ')}. Pattern file: /home/tate/ecodiaos/patterns/no-client-contact-without-tate-goahead.md. To send, call gmail_send again with allowExternal=true and tateGoaheadRef populated. Tate must authorise every client-facing send.`)
+        }
+        if (!tateGoaheadRef || !tateGoaheadRef.trim()) {
+          throw new Error('allowExternal=true requires tateGoaheadRef (non-empty string).')
+        }
+      }
       const gmail = getGmailClient(inbox || primaryAccount)
       const from = inbox || primaryAccount
       const headers = [`From: ${from}`, `To: ${to}`, cc ? `Cc: ${cc}` : '', `Subject: ${encodeHeaderValue(subject)}`, 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
       const raw = Buffer.from(headers).toString('base64url')
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
+      if (external.length > 0) {
+        await auditExternalSend({ inbox, to, cc, bcc: undefined, external, subject, tateGoaheadRef, messageId: res.data.id })
+        return { content: [{ type: 'text', text: `EXTERNAL SEND (audited, ref="${tateGoaheadRef}"): Sent. Message ID: ${res.data.id}` }] }
+      }
       return { content: [{ type: 'text', text: `Sent. Message ID: ${res.data.id}` }] }
     }
   )
 
   server.tool('gmail_reply',
     'Reply to an existing email thread.',
-    { threadId: z.string().describe('Thread ID to reply to'), to: z.string().describe('Recipient email'), body: z.string().describe('Reply body'), subject: z.string().optional().describe('Subject (usually Re: original)'), messageId: z.string().optional().describe('Message ID for In-Reply-To header'), inbox: z.string().optional().describe('Send-as email account') },
-    async ({ threadId, messageId, to, body, subject, inbox }) => {
+    {
+      threadId: z.string().describe('Thread ID to reply to'),
+      to: z.string().describe('Recipient email'),
+      body: z.string().describe('Reply body'),
+      subject: z.string().optional().describe('Subject (usually Re: original)'),
+      messageId: z.string().optional().describe('Message ID for In-Reply-To header'),
+      inbox: z.string().optional().describe('Send-as email account'),
+      allowExternal: z.boolean().optional().describe('Must be true to send to any non-ecodia.au recipient'),
+      tateGoaheadRef: z.string().optional().describe('Required when allowExternal=true. Pointer to Tate authorisation: SMS id, kv_store key, status_board row id, or free-text explanation.'),
+    },
+    async ({ threadId, messageId, to, body, subject, inbox, allowExternal, tateGoaheadRef }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
+
+      // Collect all participant emails from thread to detect external recipients
+      const threadRes = await gmail.users.threads.get({ userId: 'me', id: threadId, format: 'metadata', metadataHeaders: ['From', 'To', 'Cc'] })
+      const participantFields = [to]
+      for (const msg of (threadRes.data.messages || [])) {
+        const headers = msg.payload?.headers || []
+        participantFields.push(
+          getHeader(headers, 'From'),
+          getHeader(headers, 'To'),
+          getHeader(headers, 'Cc'),
+        )
+      }
+      const external = externalRecipients({ to: participantFields.join(','), cc: undefined, bcc: undefined })
+
+      if (external.length > 0) {
+        if (allowExternal !== true) {
+          throw new Error(`External send blocked. Recipients: ${external.join(', ')}. Pattern file: /home/tate/ecodiaos/patterns/no-client-contact-without-tate-goahead.md. To send, call gmail_reply again with allowExternal=true and tateGoaheadRef populated. Tate must authorise every client-facing send.`)
+        }
+        if (!tateGoaheadRef || !tateGoaheadRef.trim()) {
+          throw new Error('allowExternal=true requires tateGoaheadRef (non-empty string).')
+        }
+      }
+
       const from = inbox || primaryAccount
       const headers = [`From: ${from}`, `To: ${to}`, `Subject: ${encodeHeaderValue(subject || 'Re:')}`, messageId ? `In-Reply-To: ${messageId}` : '', messageId ? `References: ${messageId}` : '', 'Content-Type: text/plain; charset=utf-8', '', body].filter(Boolean).join('\r\n')
       const raw = Buffer.from(headers).toString('base64url')
       const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw, threadId } })
+
+      if (external.length > 0) {
+        await auditExternalSend({ inbox, to, cc: undefined, bcc: undefined, external, subject: subject || 'Re:', tateGoaheadRef, messageId: res.data.id, threadId })
+        return { content: [{ type: 'text', text: `EXTERNAL SEND (audited, ref="${tateGoaheadRef}"): Reply sent. Message ID: ${res.data.id}` }] }
+      }
       return { content: [{ type: 'text', text: `Reply sent. Message ID: ${res.data.id}` }] }
     }
   )
