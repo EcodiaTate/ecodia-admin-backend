@@ -47,7 +47,26 @@ The triggering incident: on 2026-04-21 22:57 AEST I replied directly to Eugene (
 
 Failure mode this pattern addresses: the earlier pattern was Eugene-specific. I generalised incorrectly: "don't contact Eugene" did NOT generalise in my reasoning to "don't contact Craige, Vikki, Angelica, any coexist contact, any landcare contact, etc." The new pattern is scoped to ALL external contact so there is no analogous hole.
 
+## Technical enforcement (Layer 3 of three-layer defence)
+Beyond doctrine (Layer 1, `~/CLAUDE.md`) and pattern surfacing (Layer 2, this file), the rule is enforced at the MCP call layer:
+
+- `mcp-servers/google-workspace/gmail.js` defines `INTERNAL_DOMAIN = 'ecodia.au'` and `externalRecipients({to, cc, bcc})` helpers.
+- Both `gmail_send` and `gmail_reply` Zod schemas accept optional `allowExternal: boolean` and `tateGoaheadRef: string` params.
+- Before the Gmail API call: if any recipient domain is not `ecodia.au`, the handler throws:
+  - With `allowExternal !== true`: error includes the external addresses and a pointer to this pattern file, instructing me to resend with `allowExternal=true` and `tateGoaheadRef` populated.
+  - With `allowExternal=true` but empty/missing `tateGoaheadRef`: error `allowExternal=true requires tateGoaheadRef (non-empty string).`
+- On successful external send: a row is appended to the `external_send_audit` table (migration `059_external_send_audit.sql`) with inbox, recipients, subject, `tate_goahead_ref`, and message_id. Rejected sends are NOT audited (no noise).
+- Deployed in commit `e334c91` (gmail.js changes + migration 059). Session 218ff29d authored the changes; commit was subsumed into e334c91 and later reconciled. Verified live 2026-04-22 05:50 AEST: `gmail_send to=test@example.com` without `allowExternal` threw the expected error with pattern-file pointer.
+
+The three layers are defence in depth:
+- Layer 1 doctrine is what future-me reads on cold start.
+- Layer 2 pattern surfacing catches me if I skip the read (grep hook on high-leverage actions).
+- Layer 3 code gate catches me if I skip both layers - there is no path to a client inbox that does not require a `tateGoaheadRef`.
+
+If a future evolution adds a new outbound channel (Slack, Zernio DM, Bitbucket comment), that channel MUST ship with an equivalent Layer 3 gate, not just doctrine updates. The Eugene incident proved doctrine alone is insufficient.
+
 ## Related
 - `never-contact-eugene-directly.md` - the predecessor, Eugene-specific, still accurate, this file supersedes it in scope.
 - `~/CLAUDE.md` "Client Communication" block currently tells me how to write as Ecodia. That block assumes I've been authorised to write. This pattern sits upstream of it.
 - `~/CLAUDE.md` "Decision Authority" block's "Act immediately (no confirmation needed): Respond to client emails" - that line is OUT OF DATE as of 2026-04-22. Update on next CLAUDE.md reflection pass.
+- `factory-phantom-session-no-commit.md` Mode 3 applies here: session 218ff29d had `cc_sessions.commit_sha=NULL` but delivered real work subsumed into e334c91. Reconciliation protocol used (manual UPDATE cc_sessions).
