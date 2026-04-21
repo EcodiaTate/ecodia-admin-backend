@@ -345,19 +345,109 @@ let _currentProvider = 'claude_max'  // tracks which provider the current sessio
 // each other's queries. Each sendMessage waits for the previous one to finish.
 let _sendQueue = Promise.resolve()
 
-// Consecutive-failure tracking. Alert Tate at 3 in a row (systemic, not transient).
+// Consecutive-failure tracking. At 3 in a row, auto-restart ecodia-api (Tate's
+// direction Apr 21 2026: "instead of just texting/emailing me that 3 consecutive
+// calls to the chat have failed ... It should just automatically run pm2 restart
+// ecodia-api"). PM2 will bring us back up, and alertProcessRestart fires after
+// the fact so Tate sees the event in email/SMS.
+//
+// Cooldown: 15m between auto-restarts via kv_store to prevent crash loops if
+// something is persistently broken (PM2 also has its own max_restarts guard).
 let _consecutiveFailures = 0
+const AUTO_RESTART_COOLDOWN_MS = 15 * 60 * 1000
+
+async function _shouldAutoRestart() {
+  try {
+    const row = await db`SELECT value FROM kv_store WHERE key = 'auto_restart_last_at'`
+    if (!row.length) return true
+    const v = row[0].value
+    let lastAt = 0
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v)
+        if (parsed && typeof parsed === 'object' && Number.isFinite(parsed.ts)) lastAt = parsed.ts
+        else if (Number.isFinite(Number(parsed))) lastAt = Number(parsed)
+      } catch {
+        const n = Number(v)
+        if (Number.isFinite(n)) lastAt = n
+      }
+    } else if (typeof v === 'object' && v !== null && Number.isFinite(v.ts)) {
+      lastAt = v.ts
+    }
+    return (Date.now() - lastAt) >= AUTO_RESTART_COOLDOWN_MS
+  } catch {
+    return true
+  }
+}
+
+async function _markAutoRestart(reason) {
+  try {
+    const payload = JSON.stringify({ ts: Date.now(), reason: reason || 'consecutive_failures' })
+    await db`
+      INSERT INTO kv_store (key, value)
+      VALUES ('auto_restart_last_at', ${payload})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+    `
+  } catch (err) {
+    logger.warn('auto-restart: failed to record cooldown', { error: err.message })
+  }
+}
+
 function _recordTurnOutcome(ok, errorMsg) {
   if (ok) {
     _consecutiveFailures = 0
     return
   }
   _consecutiveFailures += 1
-  if (_consecutiveFailures === 3) {
-    try {
-      const alerting = require('./osAlertingService')
-      alerting.alertConsecutiveFailures(_consecutiveFailures, errorMsg).catch(() => {})
-    } catch {}
+  if (_consecutiveFailures >= 3) {
+    // Fire-and-forget async restart; caller returns immediately.
+    ;(async () => {
+      try {
+        const allowed = await _shouldAutoRestart()
+        if (!allowed) {
+          logger.warn('auto-restart: suppressed by cooldown', {
+            consecutiveFailures: _consecutiveFailures,
+            cooldownMs: AUTO_RESTART_COOLDOWN_MS,
+          })
+          // Still email/SMS as fallback so Tate knows we're stuck
+          try {
+            const alerting = require('./osAlertingService')
+            alerting.alertConsecutiveFailures(_consecutiveFailures, errorMsg).catch(() => {})
+          } catch {}
+          return
+        }
+        logger.error('auto-restart: 3+ consecutive turn failures, restarting ecodia-api', {
+          consecutiveFailures: _consecutiveFailures,
+          lastError: errorMsg,
+        })
+        // Log incident BEFORE restart so we have a trail.
+        try {
+          await require('./osIncidentService').log({
+            kind: 'auto_restart',
+            severity: 'warning',
+            component: 'os_session',
+            message: `Auto pm2 restart after ${_consecutiveFailures} consecutive turn failures`,
+            context: { consecutiveFailures: _consecutiveFailures, lastError: errorMsg },
+          })
+        } catch {}
+        await _markAutoRestart(errorMsg)
+        // Exec pm2 restart. Detached so the restart signal survives our own death.
+        const { exec } = require('child_process')
+        exec('pm2 restart ecodia-api', { timeout: 10000 }, (err, stdout, stderr) => {
+          if (err) {
+            logger.error('auto-restart: pm2 restart failed', {
+              error: err.message, stderr: (stderr || '').slice(0, 500),
+            })
+          } else {
+            logger.info('auto-restart: pm2 restart ecodia-api issued', {
+              stdout: (stdout || '').slice(0, 200),
+            })
+          }
+        })
+      } catch (e) {
+        logger.error('auto-restart: unexpected failure', { error: e.message })
+      }
+    })()
   }
 }
 
