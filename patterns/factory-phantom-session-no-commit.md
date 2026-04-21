@@ -16,15 +16,25 @@ Factory sessions snapshot the worktree at dispatch time. If a recent commit land
 
 The downstream failure: `approve_factory_deploy` runs the deploy pipeline, finds nothing to commit, but still marks `cc_sessions.deploy_status = 'deployed'`. The reject path is worse: it `git stash`es or cleans the worktree, deleting any actual file the session DID write. So a phantom-session approval silently loses real work AND a phantom-session rejection silently loses real work.
 
+## Three failure modes (all involve `commit_sha = NULL`)
+
+**Mode 1 — Worktree drift phantom (Apr 21, session 4989b582):** `filesChanged[]` populated from a commit that landed seconds before dispatch; target file never existed on disk; session produced nothing.
+
+**Mode 2 — Cleanup-path wipe (Apr 21, session a44af212):** file was on disk at review time, `approve_factory_deploy` ran the cleanup logic on a NULL-commit-sha session, file was wiped post-approve.
+
+**Mode 3 — State-drift (real work, broken tracking) (Apr 22, session 9dbf39ce):** Factory did the work correctly, made a real commit locally, triggered PM2 restart, live endpoints serve the fix — BUT cc_sessions.commit_sha/deploy_status never populated AND the commit was never pushed to origin. The deliverable is real; only the tracking row and the push step failed. This looks identical to Mode 1/2 on a quick scan of cc_sessions, so the disk/commit verification below is the only way to tell them apart.
+
 ## Protocol
 
 Before EVERY `approve_factory_deploy` or `reject_factory_session` on a session against `ecodiaos-backend`:
 
 1. **Verify the actual deliverable exists on disk.** Use `ls -la <expected-target-path>` (NOT just the `filesChanged` array from `review_factory_session`). For migrations: `ls src/db/migrations/ | tail -3`. For new modules: `ls <expected-path>`. For tests: `ls tests/ | grep <feature>`.
 2. **Verify a new commit landed.** `git log --oneline -3` and check the top commit is genuinely new (compare timestamps to the session's `started_at`).
-3. **Cross-check `commit_sha`.** Query `SELECT commit_sha, deploy_status FROM cc_sessions WHERE id = <sessionId>`. If `commit_sha IS NULL` and `deploy_status = 'deployed'`, the deploy was a no-op. The session produced nothing real.
-4. **If the file is in the diff but not on disk:** the session authored it in its own scratch space but the commit hook failed. Recover by either (a) re-dispatching with `git status` and `git log -1 --stat` required as the final shell command in the session prompt, or (b) reconstructing the file from the diff in `review_factory_session.diff` and committing it manually.
-5. **If `filesChanged[]` matches the previous commit's `git show --name-only HEAD`:** confirmed phantom session. Reject with reason `phantom-no-deliverable` and re-dispatch on a clean worktree.
+3. **Cross-check `commit_sha`.** Query `SELECT commit_sha, deploy_status FROM cc_sessions WHERE id = <sessionId>`. If `commit_sha IS NULL` and `deploy_status = 'deployed'`, the deploy was a no-op OR a state-drift (see step 4 to differentiate). The session may or may not have produced real work.
+4. **Check push state.** `git fetch origin main && git log origin/main..HEAD --oneline` — if the top local commit is ahead of origin AND it matches the session scope AND the file is on disk, you are in **Mode 3 (state-drift)**: the work is real, but not pushed and not tracked. Do NOT run `approve_factory_deploy` (cleanup path risk). Do NOT run `reject_factory_session` (wipes uncommitted work if any). Instead: **manual reconcile** — `git push origin main`, then `UPDATE cc_sessions SET commit_sha='<short-sha>', deploy_status='deployed' WHERE id=<sessionId>`, then functional verification (curl the affected endpoints).
+5. **Live functional check.** For API/route changes: curl the affected endpoints with proper auth (`TOK=$(grep MCP_INTERNAL_TOKEN ~/ecodiaos/.env | cut -d= -f2); curl -s -H "Authorization: Bearer $TOK" <url>`). If the response matches the fix spec, the deployment is live regardless of what cc_sessions says.
+6. **If the file is in the diff but not on disk:** Mode 1 phantom. Recover by either (a) re-dispatching with `git status` and `git log -1 --stat` required as the final shell command in the session prompt, or (b) reconstructing the file from the diff in `review_factory_session.diff` and committing it manually.
+7. **If `filesChanged[]` matches the previous commit's `git show --name-only HEAD`:** confirmed Mode 1 phantom. Reject with reason `phantom-no-deliverable` and re-dispatch on a clean worktree.
 
 ## Dispatch hardening to prevent recurrence
 
