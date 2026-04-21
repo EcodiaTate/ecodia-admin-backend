@@ -236,7 +236,9 @@ server.tool('graph_search', 'Substring text match across node properties (case-i
     const labelFilter = label ? `:\`${label}\`` : ''
     const result = await run(
       `MATCH (n${labelFilter})
-       WHERE any(key IN keys(n) WHERE toString(n[key]) CONTAINS $text)
+       WHERE any(key IN keys(n)
+                 WHERE key <> 'embedding'
+                   AND toLower(toStringOrNull(n[key])) CONTAINS $text)
        RETURN n LIMIT ${limit || 20}`,
       { text: text.toLowerCase() }
     )
