@@ -8,6 +8,24 @@ const db = require('../config/db')
 const logger = require('../config/logger')
 const deepseek = require('./deepseekService')
 
+// Maps staged_transactions.source_account values (source names) to GL account codes.
+// Verified current values in production: ba_ecodia, ba_personal, up_personal.
+// Fallback handles legacy rows that already stored a GL code directly (e.g. '1000', '2100').
+const SOURCE_ACCOUNT_TO_GL = {
+  ba_ecodia:   '1000', // Business Bank Account (Bank Australia - Ecodia)
+  up_personal: '1010', // Up Bank (Personal)
+  ba_personal: '1020', // Bank Australia (Personal)
+}
+
+function resolveBankAccount(sourceAccount) {
+  if (!sourceAccount) return '1000'
+  // If it's already a 4-digit GL code (legacy data), pass through unchanged
+  if (/^\d{4}$/.test(sourceAccount)) return sourceAccount
+  const mapped = SOURCE_ACCOUNT_TO_GL[sourceAccount]
+  if (!mapped) throw new Error(`Unknown source_account: "${sourceAccount}". Add it to SOURCE_ACCOUNT_TO_GL in bookkeeperService.js.`)
+  return mapped
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // CSV PARSING — AI-powered, handles any bank format
 // ═══════════════════════════════════════════════════════════════════════
@@ -555,8 +573,8 @@ async function postStagedTransaction(stagedId) {
   const gst = tx.gst_amount_cents || 0
   const exGst = amountAbs - gst
   const isIncome = tx.amount_cents > 0
-  // source_account: '1000' = company bank, '2100' = personal bank (director loan)
-  const bankAccount = tx.source_account || '1000'
+  // Resolve source_account name to GL code (e.g. 'ba_ecodia' -> '1000')
+  const bankAccount = resolveBankAccount(tx.source_account)
   const lines = []
 
   // Guard: if category equals the bank account, the journal would DR/CR the same account — skip
@@ -601,27 +619,32 @@ async function postStagedTransaction(stagedId) {
     lines.push({ account_code: bankAccount, debit_cents: 0, credit_cents: amountAbs })
   }
 
-  // Persist
+  // Persist — wrap header + lines in a single DB transaction so partial
+  // inserts (header without lines) cannot corrupt the ledger.
   const tags = tx.subcategory ? [tx.subcategory] : []
   const supplier = tx.subcategory?.startsWith('supplier:') ? tx.subcategory.replace('supplier:', '') : null
 
-  const [ledgerTx] = await db`
-    INSERT INTO ledger_transactions (occurred_at, description, source_system, source_ref, tags, supplier)
-    VALUES (${tx.occurred_at}, ${tx.description}, ${tx.source === 'csv' ? 'csv_import' : tx.source},
-      ${tx.source_ref}, ${JSON.stringify(tags)}, ${supplier})
-    RETURNING id
-  `
-
-  for (const line of lines) {
-    await db`
-      INSERT INTO ledger_lines (tx_id, account_code, debit_cents, credit_cents, tax_code, tax_amount_cents)
-      VALUES (${ledgerTx.id}, ${line.account_code}, ${line.debit_cents}, ${line.credit_cents},
-        ${line.tax_code || null}, ${line.tax_amount_cents || null})
+  const ledgerTxId = await db.begin(async sql => {
+    const [ledgerTx] = await sql`
+      INSERT INTO ledger_transactions (occurred_at, description, source_system, source_ref, tags, supplier)
+      VALUES (${tx.occurred_at}, ${tx.description}, ${tx.source === 'csv' ? 'csv_import' : tx.source},
+        ${tx.source_ref}, ${JSON.stringify(tags)}, ${supplier})
+      RETURNING id
     `
-  }
 
-  await markPosted(stagedId, ledgerTx.id)
-  return ledgerTx.id
+    for (const line of lines) {
+      await sql`
+        INSERT INTO ledger_lines (tx_id, account_code, debit_cents, credit_cents, tax_code, tax_amount_cents)
+        VALUES (${ledgerTx.id}, ${line.account_code}, ${line.debit_cents}, ${line.credit_cents},
+          ${line.tax_code || null}, ${line.tax_amount_cents || null})
+      `
+    }
+
+    return ledgerTx.id
+  })
+
+  await markPosted(stagedId, ledgerTxId)
+  return ledgerTxId
 }
 
 // ═══════════════════════════════════════════════════════════════════════
