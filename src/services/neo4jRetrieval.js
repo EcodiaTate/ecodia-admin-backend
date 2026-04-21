@@ -15,7 +15,7 @@ const env = require('../config/env')
 const neo4j = require('neo4j-driver')
 
 // Labels we want to retrieve (noise labels excluded)
-const DEFAULT_LABELS = ['Pattern', 'Decision', 'Episode']
+const DEFAULT_LABELS = ['Pattern', 'Decision', 'Episode', 'Strategic_Direction', 'Reflection']
 
 /**
  * Embed a text string via OpenAI text-embedding-3-small.
@@ -53,7 +53,7 @@ async function semanticSearch(query, opts = {}) {
   if (!env.NEO4J_URI || !env.OPENAI_API_KEY) return []
 
   const limit = opts.limit ?? 3
-  const minScore = opts.minScore ?? 0.78
+  const minScore = opts.minScore ?? 0.70
   const labels = opts.labels ?? DEFAULT_LABELS
 
   const embedding = await embedText(query)
