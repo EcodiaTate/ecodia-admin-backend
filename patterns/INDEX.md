@@ -27,6 +27,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [factory-phantom-session-no-commit.md](factory-phantom-session-no-commit.md) | factory, factory-dispatch, cc-session, approve-deploy, phantom-session, files-changed, commit-sha-null, deploy-status-deployed, ecodiaos-backend, worktree-drift, deliverable-verification |
 | [mcp-array-param-bypass.md](mcp-array-param-bypass.md) | mcp, mcp-server, array-param, stringified, invalid-type-expected-array, invalid-type-expected-number, zernio, zernio-create-post, zod-validation, bypass-to-http, direct-api, mcp-harness-bug |
 | [never-contact-eugene-directly.md](never-contact-eugene-directly.md) | eugene, ekerner, ordit, fireauditors, craige, PR 212, ordit review, ordit comms |
+| [neo4j-canonical-entity-dedup.md](neo4j-canonical-entity-dedup.md) | neo4j, knowledge-graph, kg, consolidation, dedup, deduplicate, merge, canonical-entity, embedded-label, kgConsolidationService, exact-name-match, duplicate-nodes, cross-label, cortex-memory |
+| [verify-before-asserting-in-durable-memory.md](verify-before-asserting-in-durable-memory.md) | neo4j, graph_reflect, reflection, episode, durable-memory, cold-start, speculation, assertion, zero-count, null-count, kv_store-handoff, memory-integrity |
 
 ## Authoring rules
 
