@@ -135,6 +135,10 @@ function buildSubagentConfigs(allConfigs) {
         '- Emails must sound like a sharp, professional business partner -- not a bot or template.',
         '- Report back a concise summary of what you did and any follow-up actions needed.',
       ].join('\n'),
+      // Sonnet default = cheap baseline. Conductor can override per call by
+      // passing `model: 'opus'` (or 'haiku') to the Agent tool when it judges
+      // a specific delegation needs more/less power. Keeping the default low
+      // so routine work doesn't silently burn Opus tokens.
       model: 'sonnet',
       mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.comms),
       permissionMode: 'bypassPermissions',
@@ -154,6 +158,7 @@ function buildSubagentConfigs(allConfigs) {
         '- Auto-categorize transactions using rules (bk_list_rules) before falling back to manual categorization.',
         '- Report back concise financial summaries, not raw data dumps.',
       ].join('\n'),
+      // Sonnet default — conductor can override via Agent tool `model` param.
       model: 'sonnet',
       mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.finance),
       permissionMode: 'bypassPermissions',
@@ -173,6 +178,7 @@ function buildSubagentConfigs(allConfigs) {
         '- Report service health clearly: what is running, what is not, any error patterns.',
         '- Use db_query via supabase for diagnostic queries when needed.',
       ].join('\n'),
+      // Sonnet default — conductor can override via Agent tool `model` param.
       model: 'sonnet',
       mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.ops),
       permissionMode: 'bypassPermissions',
@@ -191,6 +197,7 @@ function buildSubagentConfigs(allConfigs) {
         '- For Vercel deploys, verify the deployment status after triggering.',
         '- Report analytics concisely with key metrics highlighted.',
       ].join('\n'),
+      // Sonnet default — conductor can override via Agent tool `model` param.
       model: 'sonnet',
       mcpServers: _mcpForDomain(allConfigs, SUBAGENT_DOMAINS.social),
       permissionMode: 'bypassPermissions',
@@ -723,13 +730,13 @@ async function _sendMessageImpl(content, opts = {}) {
   const allConfigs = getAllMcpServerConfigs(cwd)
   const mcpServers = loadConductorServers(allConfigs)
 
-  // Energy-gated thinking: extended thinking on full/healthy.
-  // The OS uses thinking for strategic reasoning, diff/code review, and multi-step
-  // planning on Opus 1M — 2k was confirmed too low, 10k/5k is the right ceiling.
+  // Energy level is still tracked for logging + provider routing, but no longer
+  // gates thinking — the conductor thinks on every turn now (see thinking block
+  // below). Provider routing still honours energy (Bedrock fallback when both
+  // Max accounts are exhausted).
   let energy = null
   try { energy = await usageEnergy.getEnergy() } catch {}
   const energyLevel = energy?.level || 'healthy'
-  const canThink = energyLevel === 'full' || energyLevel === 'healthy'
 
   // Build the custom system prompt (cached per-cwd). This replaces the SDK's
   // default ~5-6k-token scaffolding entirely — see buildCustomSystemPrompt docs.
@@ -787,6 +794,65 @@ async function _sendMessageImpl(content, opts = {}) {
     logger.debug('Breadcrumb read failed (non-fatal)', { error: err.message })
   }
 
+  // Rich recent-exchange block — the real continuity fix.
+  //
+  // When ccSessionId is missing (PM2 restart / provider switch / stale retry)
+  // SDK resume isn't available. The tiny breadcrumb above carries ~600 chars of
+  // each side's last line, which is enough for "am I back online" acknowledgement
+  // but loses the NUANCE of the last several exchanges — the thing Tate described
+  // as "ruins the flow".
+  //
+  // Solution: on a fresh session with an existing DB row, pull the last ~15
+  // [USER]/assistant turns from cc_session_logs and inject them as a real
+  // transcript tail. ~8-15KB of genuine conversation instead of 1.5KB of
+  // sentence-tails. The OS rehydrates into the actual conversation, not a
+  // summary of it.
+  //
+  // Only runs when (a) we have a DB session row (not a cold start) and (b) we
+  // don't have a live ccSessionId (resume path is not active). Skipped entirely
+  // on resume to avoid double-context.
+  let recentExchangeBlock = null
+  if (!ccSessionId && session?.id) {
+    try {
+      const RECENT_CHARS_BUDGET = 12_000   // ~3k tokens, generous but bounded
+      const RECENT_ROW_LIMIT = 40          // enough for ~15-20 turn pairs
+      const rows = await db`
+        SELECT content, created_at FROM cc_session_logs
+        WHERE session_id = ${session.id}
+        ORDER BY created_at DESC
+        LIMIT ${RECENT_ROW_LIMIT}
+      `
+      if (rows?.length) {
+        // Rows are newest-first from the query. Walk newest→oldest, pushing
+        // into a buffer, stop when we hit the char budget. Then reverse so
+        // the model reads them in chronological order.
+        const picked = []
+        let used = 0
+        for (const r of rows) {
+          const c = r.content || ''
+          if (!c) continue
+          const isUser = c.startsWith('[USER] ')
+          const role = isUser ? 'Tate' : 'You'
+          const body = isUser ? c.slice(7) : c
+          const chunk = `${role}: ${body}`
+          if (used + chunk.length + 2 > RECENT_CHARS_BUDGET) break
+          picked.push(chunk)
+          used += chunk.length + 2
+        }
+        if (picked.length) {
+          // Reverse for chronological display and note if we truncated.
+          const chronological = picked.reverse()
+          if (rows.length > picked.length) {
+            chronological.unshift('… (earlier exchanges omitted to fit budget)')
+          }
+          recentExchangeBlock = chronological.join('\n\n')
+        }
+      }
+    } catch (err) {
+      logger.debug('Recent-exchange block read failed (non-fatal)', { error: err.message })
+    }
+  }
+
   const options = {
     cwd,
     permissionMode: 'bypassPermissions',
@@ -809,13 +875,17 @@ async function _sendMessageImpl(content, opts = {}) {
     // different API path). Passing it was a no-op. The CLI manages compaction
     // internally based on context-window pressure; we can't override that from JS.
     //
-    // Extended thinking — scales with energy level.
-    ...(canThink ? {
-      thinking: {
-        type: 'enabled',
-        budget_tokens: energyLevel === 'full' ? 10000 : 5000,
-      },
-    } : {}),
+    // Extended thinking — unconditional, maximum budget. Tate's directive:
+    // the conductor should be the absolute smartest it can be on every turn.
+    // Previous energy-gated tiers (5k/10k/off) were trading quality for weekly
+    // budget; weekly-budget pressure is now handled upstream via account
+    // routing + Bedrock fallback, so there's no reason to throttle reasoning.
+    // 10k was empirically the right ceiling before — keeping it as the cap to
+    // avoid eating into the response budget on turns that need long output.
+    thinking: {
+      type: 'enabled',
+      budget_tokens: 10000,
+    },
     // Conductor-level MCP servers only (neo4j, scheduler, factory, supabase).
     // Subagent domains (comms, finance, ops, social) are defined below in agents.
     mcpServers,
@@ -1047,7 +1117,12 @@ async function _sendMessageImpl(content, opts = {}) {
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
   }
-  if (breadcrumbBlock) {
+  // Recent exchange block takes precedence over the tiny breadcrumb — it's the
+  // same signal at much higher fidelity. Ship both only in the degenerate case
+  // where we have a breadcrumb but no session row (shouldn't normally happen).
+  if (recentExchangeBlock) {
+    continuityParts.push(`<recent_exchanges>\nBelow is the tail of the conversation before this session restarted. Pick up naturally — do NOT summarise or acknowledge the gap. Just continue as if nothing happened.\n\n${recentExchangeBlock}\n</recent_exchanges>`)
+  } else if (breadcrumbBlock) {
     continuityParts.push(`<last_turn_breadcrumb>\n${breadcrumbBlock}\n</last_turn_breadcrumb>`)
   }
 
@@ -1067,6 +1142,7 @@ async function _sendMessageImpl(content, opts = {}) {
       now: true,
       memory: !!_memoryBlock,
       restart_recovery: !!recoveryBlock,
+      recent_exchanges: !!recentExchangeBlock,
       breadcrumb: !!breadcrumbBlock,
       totalBlocksLen: continuityParts.join('\n\n').length,
     })

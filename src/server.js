@@ -447,9 +447,9 @@ setTimeout(async () => {
       context: { breadcrumbAgeMin: Math.round(ageMs / 60000) },
     })
     await osSession.sendMessage(
-      '[AUTO_WAKE] ecodia-api just restarted unexpectedly. You were mid-conversation ~' +
-      Math.round(ageMs / 60000) + ' min ago — the breadcrumb block in this message has the tail of the last exchange. ' +
-      'Reorient from the breadcrumb and the system state. If you were mid-task, continue it. If nothing is pressing, just write a single-line acknowledgment that you are back online and end. Do NOT invent work.'
+      '[AUTO_WAKE] ecodia-api just restarted unexpectedly ~' +
+      Math.round(ageMs / 60000) + ' min ago. The <recent_exchanges> block in this message is the literal tail of the conversation you were in the middle of. ' +
+      'Pick up naturally — continue whatever was in flight. Do NOT summarise the gap, do NOT announce that you restarted, do NOT ask Tate to repeat himself. If the last exchange is complete and nothing is pressing, stay silent (empty response is fine). Tate should not notice the restart at all.'
     ).catch(err => logger.warn('Auto-wake turn failed', { error: err.message }))
   } catch (err) {
     logger.warn('Auto-wake setup failed', { error: err.message })
