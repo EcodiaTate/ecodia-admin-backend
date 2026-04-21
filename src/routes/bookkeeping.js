@@ -7,6 +7,13 @@ const logger = require('../config/logger')
 const router = Router()
 router.use(auth)
 
+function todayIso() { return new Date().toISOString().slice(0, 10) }
+function defaultFyStart() {
+  const now = new Date()
+  const year = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1
+  return `${year}-07-01`
+}
+
 // ── Staged Transactions ──
 
 router.get('/staged', async (req, res, next) => {
@@ -139,18 +146,26 @@ router.get('/reports/bas', async (req, res, next) => {
 })
 
 router.get('/reports/pnl', async (req, res, next) => {
-  try { res.json(await bk.getPnLReport(req.query.period_start, req.query.period_end)) }
-  catch (err) { next(err) }
+  try {
+    const from = req.query.from || req.query.period_start || defaultFyStart()
+    const to = req.query.to || req.query.period_end || todayIso()
+    res.json(await bk.getPnLReport(from, to))
+  } catch (err) { next(err) }
 })
 
 router.get('/reports/balance-sheet', async (req, res, next) => {
-  try { res.json(await bk.getBalanceSheet(req.query.as_of)) }
-  catch (err) { next(err) }
+  try {
+    const asOf = req.query.as_at || req.query.as_of || todayIso()
+    res.json(await bk.getBalanceSheet(asOf))
+  } catch (err) { next(err) }
 })
 
 router.get('/reports/expense-breakdown', async (req, res, next) => {
-  try { res.json(await bk.getExpenseBreakdown(req.query.period_start, req.query.period_end)) }
-  catch (err) { next(err) }
+  try {
+    const from = req.query.from || req.query.period_start || defaultFyStart()
+    const to = req.query.to || req.query.period_end || todayIso()
+    res.json(await bk.getExpenseBreakdown(from, to))
+  } catch (err) { next(err) }
 })
 
 router.get('/reports/gst-summary', async (req, res, next) => {
