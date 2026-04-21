@@ -240,6 +240,9 @@ const envSchema = z.object({
   // <relevant_memory> block between <now> and <restart_recovery>.
   // Default true - set to 'false' to disable if it misbehaves.
   OS_MEMORY_INJECTION_ENABLED: z.string().default('true'),
+  // When true, each semantic hit is expanded by 1 hop to show relationship context.
+  // Set to 'false' to revert to point-only (no neighbourhood query).
+  OS_MEMORY_NEIGHBORHOOD_ENABLED: z.string().default('true'),
 })
 
 const parsed = envSchema.safeParse(process.env)

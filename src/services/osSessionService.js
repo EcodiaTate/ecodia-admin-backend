@@ -735,8 +735,12 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
 
     // 2s hard cap - never block the user turn on retrieval
     const t0 = Date.now()
+    const useNeighborhood = env.OS_MEMORY_NEIGHBORHOOD_ENABLED !== 'false'
+    const searchFn = useNeighborhood
+      ? neo4jRetrieval.semanticSearchWithNeighborhood
+      : neo4jRetrieval.semanticSearch
     const results = await Promise.race([
-      neo4jRetrieval.semanticSearch(queryText, { limit: 3 }),
+      searchFn(queryText, { limit: 3 }),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('neo4j retrieval timeout')), 2000)
       ),
@@ -746,6 +750,7 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
       query_len: queryText.length,
       hits: results ? results.length : 0,
       top_score: results && results[0] ? results[0].score ?? null : null,
+      neighborhood: useNeighborhood,
       elapsed_ms: Date.now() - t0,
     })
 
@@ -753,7 +758,13 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
 
     const lines = results.map((r, i) => {
       const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim()}` : ''
-      return `${i + 1}. [${r.label}] ${r.name}${desc}`
+      const head = `${i + 1}. [${r.label}] ${r.name}${desc}`
+      if (!r.neighbours || r.neighbours.length === 0) return head
+      const edges = r.neighbours.map(n => {
+        const nDesc = n.description ? `: ${n.description.replace(/\s+/g, ' ').trim()}` : ''
+        return `   -> ${n.rel_type} [${n.label}] ${n.name}${nDesc}`
+      })
+      return [head, ...edges].join('\n')
     })
 
     return `<relevant_memory>\n${lines.join('\n')}\n</relevant_memory>`
