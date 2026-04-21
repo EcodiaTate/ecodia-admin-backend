@@ -96,4 +96,55 @@ async function semanticSearch(query, opts = {}) {
   }
 }
 
-module.exports = { semanticSearch }
+/**
+ * Semantic search with 1-hop neighbourhood expansion.
+ *
+ * Calls semanticSearch to get top-K hits, then for each hit fetches its
+ * direct neighbours (1 hop) from Neo4j so callers can surface relationship
+ * context alongside the matched node.
+ *
+ * @param {string} query - Natural language query text
+ * @param {object} opts
+ * @param {number} [opts.limit=3] - Max seed results
+ * @param {number} [opts.minScore=0.70] - Minimum cosine similarity
+ * @param {string[]} [opts.labels] - Label whitelist
+ * @param {number} [opts.hopLimit=1] - Traversal depth (currently fixed at 1)
+ * @param {number} [opts.maxNeighboursPerHit=5] - Max neighbours per seed node
+ * @returns {Array<{label, name, description, score, neighbours: Array<{rel_type, label, name, description}>}>}
+ */
+async function semanticSearchWithNeighborhood(query, opts = {}) {
+  const { maxNeighboursPerHit = 5, ...searchOpts } = opts
+  const hits = await semanticSearch(query, searchOpts)
+  if (hits.length === 0) return []
+
+  // Expand each hit by 1 hop using its name (elementId not exposed by semanticSearch)
+  const expanded = await Promise.all(hits.map(async hit => {
+    try {
+      const records = await runQuery(
+        `MATCH (n {name: $name})
+         MATCH (n)-[r]-(m)
+         WHERE m.name IS NOT NULL
+         RETURN type(r) AS rel_type, labels(m)[0] AS neighbour_label,
+                m.name AS neighbour_name, m.description AS neighbour_description
+         LIMIT $maxN`,
+        { name: hit.name, maxN: neo4j.int(maxNeighboursPerHit) }
+      )
+
+      const neighbours = records.map(rec => ({
+        rel_type: rec.get('rel_type') || '',
+        label: rec.get('neighbour_label') || 'Node',
+        name: rec.get('neighbour_name') || '',
+        description: (rec.get('neighbour_description') || '').slice(0, 120),
+      })).filter(n => n.name)
+
+      return { ...hit, neighbours }
+    } catch (err) {
+      logger.warn('neo4jRetrieval: neighbourhood query failed', { name: hit.name, error: err.message })
+      return { ...hit, neighbours: [] }
+    }
+  }))
+
+  return expanded
+}
+
+module.exports = { semanticSearch, semanticSearchWithNeighborhood }
