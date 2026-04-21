@@ -25,6 +25,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [edge-function-safe-defaults.md](edge-function-safe-defaults.md) | edge-function, supabase, default-param, missing-param, write-endpoint, mutation, idempotency, deno-serve |
 | [ios-signing-credential-paths.md](ios-signing-credential-paths.md) | ios, xcodebuild, code-signing, provisioning-profile, app-store, asc-api-key, testflight, mac, sy094, exportarchive, manual-signing |
 | [factory-phantom-session-no-commit.md](factory-phantom-session-no-commit.md) | factory, factory-dispatch, cc-session, approve-deploy, phantom-session, files-changed, commit-sha-null, deploy-status-deployed, ecodiaos-backend, worktree-drift, deliverable-verification |
+| [mcp-array-param-bypass.md](mcp-array-param-bypass.md) | mcp, mcp-server, array-param, stringified, invalid-type-expected-array, invalid-type-expected-number, zernio, zernio-create-post, zod-validation, bypass-to-http, direct-api, mcp-harness-bug |
+| [never-contact-eugene-directly.md](never-contact-eugene-directly.md) | eugene, ekerner, ordit, fireauditors, craige, PR 212, ordit review, ordit comms |
 
 ## Authoring rules
 
