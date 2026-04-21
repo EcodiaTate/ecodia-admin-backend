@@ -96,20 +96,45 @@ async function deduplicateNodes({ dryRun = false } = {}) {
     const label = rec.get('label')
     if (!label || label === '__Embedded__') continue
 
-    // APOC first, then fallback to toLower
+    // Group-by-normName approach: O(n) per label instead of O(n²) cross-product.
+    // With labels like Concept (1492 nodes) or Pattern (942), the naive MATCH(a),MATCH(b)
+    // self-join hangs for minutes. Group first, then unwind duplicates.
     const batch = await runQuery(`
-      MATCH (a:\`${sanitizeLabel(label)}\`), (b:\`${sanitizeLabel(label)}\`)
-      WHERE elementId(a) < elementId(b)
-        AND toLower(trim(a.name)) = toLower(trim(b.name))
-        AND a.name <> b.name
-      RETURN elementId(a) AS keepId, a.name AS keepName,
-             elementId(b) AS dupeId, b.name AS dupeName,
-             labels(a) AS labels
+      MATCH (n:\`${sanitizeLabel(label)}\`)
+      WHERE n.name IS NOT NULL
+      WITH toLower(trim(n.name)) AS normName, collect(n) AS nodes
+      WHERE size(nodes) > 1
+      WITH nodes[0] AS keep, nodes[1..] AS dupes
+      UNWIND dupes AS dupe
+      RETURN elementId(keep) AS keepId, keep.name AS keepName,
+             elementId(dupe) AS dupeId, dupe.name AS dupeName,
+             labels(keep) AS labels
       LIMIT 20
     `).catch(() => [])
     dupes.push(...batch)
     if (dupes.length >= 50) break
   }
+
+  // Strategy 1b: Cross-label exact-name match via __Embedded__ anchor.
+  // Catches canonical entities fragmented across typed labels (e.g. "EcodiaOS"
+  // living as both :Project and :System). The per-label loop above never catches
+  // these because no single typed label has duplicate counts for them.
+  //
+  // Uses a group-by-name approach (O(n) pass) to avoid the O(n²) cross-product
+  // that a naive MATCH (a:__Embedded__), (b:__Embedded__) would require at 9k+ nodes.
+  const crossLabelBatch = await runQuery(`
+    MATCH (n:__Embedded__)
+    WHERE n.name IS NOT NULL
+    WITH toLower(trim(n.name)) AS normName, collect(n) AS nodes
+    WHERE size(nodes) > 1
+    WITH nodes[0] AS keep, nodes[1..] AS dupes
+    UNWIND dupes AS dupe
+    RETURN elementId(keep) AS keepId, keep.name AS keepName,
+           elementId(dupe) AS dupeId, dupe.name AS dupeName,
+           labels(keep) AS keepLabels, labels(dupe) AS dupeLabels
+    LIMIT 100
+  `).catch(() => [])
+  dupes.push(...crossLabelBatch)
 
   // Strategy 2: Embedding similarity — also partitioned by label
   // Try GDS first (fast, native), fall back to Cypher-native cosine if GDS unavailable
@@ -173,9 +198,13 @@ async function deduplicateNodes({ dryRun = false } = {}) {
     const dupeId = record.get('dupeId')
     const keepName = record.get('keepName')
     const dupeName = record.get('dupeName')
+    // dupeLabels/keepLabels are only present on cross-label (Strategy 1b) rows.
+    // Use has() to guard — record.get() on a missing key throws in neo4j-driver.
+    const dupeLabels = record.has('dupeLabels') ? (record.get('dupeLabels') || null) : null
+    const keepLabels = record.has('keepLabels') ? (record.get('keepLabels') || null) : null
 
     if (dryRun) {
-      merged.push({ action: 'would_merge', keep: keepName, dupe: dupeName })
+      merged.push({ action: 'would_merge', keep: keepName, dupe: dupeName, crossLabel: !!dupeLabels })
       continue
     }
 
@@ -196,6 +225,19 @@ async function deduplicateNodes({ dryRun = false } = {}) {
         SET keep.name = $keepName
         DETACH DELETE dupe
       `, { dupeId, keepId, keepName })
+
+      // For cross-label merges: union the dupe's typed labels onto the keep node.
+      // SET keep:LabelName requires a literal label (not a parameter), so we iterate in JS.
+      if (dupeLabels && keepLabels) {
+        const keepLabelSet = new Set(keepLabels)
+        const labelsToAdd = dupeLabels.filter(l => l !== '__Embedded__' && !keepLabelSet.has(l))
+        for (const lbl of labelsToAdd) {
+          await runWrite(
+            `MATCH (keep) WHERE elementId(keep) = $keepId SET keep:\`${sanitizeLabel(lbl)}\``,
+            { keepId }
+          ).catch(err => logger.debug(`Label union failed for "${lbl}" on "${keepName}"`, { error: err.message }))
+        }
+      }
 
       merged.push({ action: 'merged', keep: keepName, dupe: dupeName })
       logger.info(`KG consolidation: merged "${dupeName}" into "${keepName}"`)
