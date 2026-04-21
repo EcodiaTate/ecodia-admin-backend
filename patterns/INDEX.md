@@ -29,6 +29,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [never-contact-eugene-directly.md](never-contact-eugene-directly.md) | eugene, ekerner, ordit, fireauditors, craige, PR 212, ordit review, ordit comms |
 | [neo4j-canonical-entity-dedup.md](neo4j-canonical-entity-dedup.md) | neo4j, knowledge-graph, kg, consolidation, dedup, deduplicate, merge, canonical-entity, embedded-label, kgConsolidationService, exact-name-match, duplicate-nodes, cross-label, cortex-memory |
 | [verify-before-asserting-in-durable-memory.md](verify-before-asserting-in-durable-memory.md) | neo4j, graph_reflect, reflection, episode, durable-memory, cold-start, speculation, assertion, zero-count, null-count, kv_store-handoff, memory-integrity |
+| [retrieval-threshold-tune-to-data.md](retrieval-threshold-tune-to-data.md) | neo4j, retrieval, semantic-search, vector-search, threshold, min-score, relevant-memory, injection, embedding, cold-start-warmup, telemetry, graphrag, cortex-memory, node_embeddings |
 
 ## Authoring rules
 
