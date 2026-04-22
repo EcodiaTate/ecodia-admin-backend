@@ -33,7 +33,7 @@ async function triggerAutoWakeIfNeeded() {
       }
     }
 
-    // Handoff state check — value column is TEXT (JSON-encoded object)
+    // Handoff state check - value column is TEXT (JSON-encoded object)
     const handoffRows = await db`SELECT value FROM kv_store WHERE key = ${HANDOFF_KEY}`
     if (!handoffRows.length) {
       logger.info('auto-wake: no recent handoff, skipping')
@@ -51,7 +51,7 @@ async function triggerAutoWakeIfNeeded() {
       return
     }
 
-    // Rate-limit guard — prevents wake storms during PM2 flap cycles
+    // Rate-limit guard - prevents wake storms during PM2 flap cycles
     const rateRows = await db`SELECT value FROM kv_store WHERE key = ${LAST_WAKE_KEY}`
     if (rateRows.length > 0) {
       try {
@@ -59,12 +59,12 @@ async function triggerAutoWakeIfNeeded() {
         if (lastWakeStr) {
           const sinceLastWake = Date.now() - new Date(lastWakeStr).getTime()
           if (sinceLastWake < RATE_LIMIT_MS) {
-            logger.info('auto-wake: rate-limited, skipping — PM2 flap protection')
+            logger.info('auto-wake: rate-limited, skipping - PM2 flap protection')
             return
           }
         }
       } catch {
-        // Malformed rate-limit entry — ignore, proceed with wake
+        // Malformed rate-limit entry - ignore, proceed with wake
       }
     }
 
@@ -85,7 +85,7 @@ async function triggerAutoWakeIfNeeded() {
     }
 
     if (!res.ok) {
-      logger.warn(`auto-wake: HTTP ${res.status} — message endpoint rejected wake`)
+      logger.warn(`auto-wake: HTTP ${res.status} - message endpoint rejected wake`)
       return
     }
 
@@ -95,7 +95,7 @@ async function triggerAutoWakeIfNeeded() {
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     `
 
-    logger.info(`auto-wake: fired — handoff was from ${ageMinutes} minutes ago`)
+    logger.info(`auto-wake: fired - handoff was from ${ageMinutes} minutes ago`)
   } catch (err) {
     logger.warn('auto-wake: failed', { error: err.message })
   }
