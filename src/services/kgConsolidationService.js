@@ -58,7 +58,7 @@ async function releaseConsolidationLock(phase = 'dedup') {
 
 // ─── Phase 1: Deduplication ─────────────────────────────────────────────
 
-async function deduplicateNodes({ dryRun = false } = {}) {
+async function deduplicateNodes({ dryRun = false, skipEmbeddingSimilarity = false } = {}) {
   // Acquire lock to prevent concurrent merges
   if (!dryRun) {
     const locked = await acquireConsolidationLock('dedup')
@@ -139,6 +139,10 @@ async function deduplicateNodes({ dryRun = false } = {}) {
   // Strategy 2: Embedding similarity — also partitioned by label
   // Try GDS first (fast, native), fall back to Cypher-native cosine if GDS unavailable
   const embeddingDupes = []
+  if (skipEmbeddingSimilarity) {
+    logger.info('KG dedup: skipping Strategy 2 (embedding similarity) per flag')
+  }
+  if (!skipEmbeddingSimilarity) {
   const dedupThreshold = parseFloat(env.KG_DEDUP_SIMILARITY_THRESHOLD || '0.90')
 
   for (const rec of labelCounts) {
@@ -190,6 +194,7 @@ async function deduplicateNodes({ dryRun = false } = {}) {
     embeddingDupes.push(...batch)
     if (embeddingDupes.length >= 30) break
   }
+  } // end if (!skipEmbeddingSimilarity)
 
   const allDupes = [...dupes, ...embeddingDupes]
 
