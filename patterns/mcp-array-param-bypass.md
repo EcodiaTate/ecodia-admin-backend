@@ -17,6 +17,8 @@ Known afflicted tools (as of 2026-04-21):
 - `mcp__business-tools__zernio_create_post` - `platforms` arrives as string
 - Gmail bulk tools (`gmail_archive`, `gmail_trash`, `gmail_modify_labels`) - `messageIds`/`labels` arrive as strings (per status_board infrastructure row)
 
+> **Upstream fix live across 6 MCP servers (Apr 22 2026).** Commits `35cdb2e` (numeric), `0bec7dd` (neo4j object/array), `00da85a` (business-tools/zernio + google-workspace/{drive,calendar,gmail} + supabase). Every `z.record`/`z.array` site on tool input schemas now uses `z.preprocess` helpers that accept either a parsed value or a JSON-encoded string. The bypass should no longer be needed for these 6 servers. The protocol below remains valid for any OTHER MCP server or any newly discovered stringification surface — bypass first, audit the server's Zod schemas second, and extend the `z.preprocess` coerce if the bug class appears again.
+
 ## Protocol
 
 1. **Confirm the bug, do not guess.** If first call returns `invalid_type expected array received string`, the payload is being stringified. One retry at most. Do not rearrange fields.
