@@ -14,6 +14,8 @@ Before any high-leverage action, `Grep` this directory for matching triggers. Sp
 - Sending a client-facing email that is not a trivial response
 - Making a commercial commitment (pricing, scope, IP, termination)
 - Building or shipping an iOS/Android binary (signing, upload, release)
+- Opening any substantive turn (auto-wake, restart, cron fire, new Tate directive): query Neo4j for recent Decisions/Episodes matching the turn context before acting on kv_store handoff_state (see neo4j-first-context-discipline.md)
+- Shipping any artefact (post, email, proposal, code, doctrine): run the five-second gate from ocd-ambition-refuse-mediocrity.md before hitting send/commit/publish
 
 Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern's title + triggers so you can pick which to read in full.
 
@@ -33,6 +35,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [retrieval-threshold-tune-to-data.md](retrieval-threshold-tune-to-data.md) | neo4j, retrieval, semantic-search, vector-search, threshold, min-score, relevant-memory, injection, embedding, cold-start-warmup, telemetry, graphrag, cortex-memory, node_embeddings |
 | [zernio-twitter-length-limit.md](zernio-twitter-length-limit.md) | zernio, twitter, x, crosspost, post-too-long, social-media-queue, zernio-create-post, multi-platform-publish, tweet-280-chars, publish-failed, partial-status |
 | [no-symbolic-logging-act-or-schedule.md](no-symbolic-logging-act-or-schedule.md) | symbolic-logging, ill-log-this, ill-note-this, ill-come-back-to, will-fix-later, will-address-later, self-promise, followup, cold-session-memory, todo-drift, paper-todo, act-or-schedule, turn-completion-discipline |
+| [neo4j-first-context-discipline.md](neo4j-first-context-discipline.md) | neo4j, context, orientation, restart, handoff, kv_store, stale-state, retrieval, memory, continuity, directive, decision, episode, cold-start, auto-wake, before-acting, after-directive, turn-open, turn-close |
+| [ocd-ambition-refuse-mediocrity.md](ocd-ambition-refuse-mediocrity.md) | quality, standard, mediocre, mediocrity, good-enough, ocd, ambition, unparalleled, refuse, bar, ecodia-bar, piercing-uniquity, generic-ai, self-review, polish, craftsmanship, highest-standard, push-boundaries |
 
 ## Authoring rules
 
