@@ -52,9 +52,45 @@ async function deploySession(sessionId) {
     // 1. Git commit
     const hasChanges = git(['status', '--porcelain'], repoPath)
     if (!hasChanges) {
-      logger.info(`No changes to deploy for session ${sessionId}`)
-      await db`UPDATE cc_sessions SET pipeline_stage = 'complete', deploy_status = 'deployed' WHERE id = ${sessionId}`
-      return { status: 'no_changes' }
+      logger.info(`No changes to deploy for session ${sessionId} — syncing HEAD state`)
+      try {
+        const headSha = git(['rev-parse', 'HEAD'], repoPath)
+        const shortSha = headSha.slice(0, 7)
+        let currentBranch
+        try {
+          currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath)
+          if (!currentBranch || currentBranch === 'HEAD') currentBranch = 'main'
+        } catch {
+          currentBranch = 'main'
+        }
+
+        // Defensive push origin <branch> — sync local commits that may have landed via parallel sessions
+        let pushed = false
+        try {
+          git(['push', 'origin', currentBranch], repoPath)
+          pushed = true
+        } catch (pushErr) {
+          if (/non-fast-forward|rejected|fetch first/.test(pushErr.message)) {
+            try {
+              git(['pull', '--rebase', 'origin', currentBranch], repoPath)
+              git(['push', 'origin', currentBranch], repoPath)
+              pushed = true
+            } catch (retryErr) {
+              logger.warn(`no_changes push failed after rebase — local commits intact`, { sessionId, error: retryErr.message })
+            }
+          } else {
+            logger.warn(`no_changes push failed — local commits intact`, { sessionId, error: pushErr.message })
+          }
+        }
+
+        await db`UPDATE cc_sessions SET commit_sha = ${shortSha}, deploy_status = 'deployed', pipeline_stage = 'complete' WHERE id = ${sessionId}`
+        logger.info(`no_changes branch: HEAD synced to ${shortSha}, pushed: ${pushed}`, { sessionId })
+        return { status: 'no_changes_head_synced', commit_sha: shortSha, branch: currentBranch, pushed }
+      } catch (syncErr) {
+        logger.warn(`no_changes HEAD sync failed — returning legacy status`, { sessionId, error: syncErr.message })
+        await db`UPDATE cc_sessions SET pipeline_stage = 'complete', deploy_status = 'deployed' WHERE id = ${sessionId}`
+        return { status: 'no_changes' }
+      }
     }
 
     git(['add', '-A'], repoPath)
