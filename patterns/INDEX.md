@@ -39,6 +39,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [neo4j-first-context-discipline.md](neo4j-first-context-discipline.md) | neo4j, context, orientation, restart, handoff, kv_store, stale-state, retrieval, memory, continuity, directive, decision, episode, cold-start, auto-wake, before-acting, after-directive, turn-open, turn-close |
 | [ocd-ambition-refuse-mediocrity.md](ocd-ambition-refuse-mediocrity.md) | quality, standard, mediocre, mediocrity, good-enough, ocd, ambition, unparalleled, refuse, bar, ecodia-bar, piercing-uniquity, generic-ai, self-review, polish, craftsmanship, highest-standard, push-boundaries |
 | [cancel-stale-schedules-when-work-resolves-early.md](cancel-stale-schedules-when-work-resolves-early.md) | schedule_delayed, scheduled-task, stale-schedule, review-checkpoint, review-factory, parallel-resolution, out-of-band-completion, os_scheduled_tasks, stale-review, symbolic-logging, logging-without-doing |
+| [factory-codebase-staleness-check-before-dispatch.md](factory-codebase-staleness-check-before-dispatch.md) | factory, factory-dispatch, start_cc_session, codebase-staleness, worktree-stale, behind-origin, divergent-base, fe-dispatch, frontend-factory, ecodiaos-frontend, rebase-conflict, unmergeable-commit, stale-clone, codebases-registry |
 
 ## Authoring rules
 
