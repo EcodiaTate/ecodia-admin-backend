@@ -1213,7 +1213,7 @@ async function _sendMessageImpl(content, opts = {}) {
     // CC Agent SDK supports Bedrock via CLAUDE_CODE_USE_BEDROCK=1
     sessionEnv.CLAUDE_CODE_USE_BEDROCK = '1'
     options.env = sessionEnv
-    options.model = env.BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-20251001'
+    options.model = env.BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6'
     delete options.resume
     emitOutput({ type: 'system', content: `⚡ Both Claude Max accounts exhausted — falling back to Bedrock (${options.model}).` })
   } else if (best.provider === 'claude_max_2') {

@@ -346,11 +346,6 @@ function _accountHealth(account) {
   const configDir = _getConfigDir(account)
   if (!hasLongLivedToken && !configDir) return { score: -100, reason: 'no_token_or_config_dir' }
 
-  // Tate's Claude Max subscription is paused — never route to acct1 when code token is live.
-  if (account === 'claude_max' && process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
-    return { score: -50, reason: 'tate_subscription_paused' }
-  }
-
   // Rejected = completely unusable UNLESS the reset time has passed.
   // Without this, once we mark an account rejected we stay on Bedrock forever.
   // When weeklyResetsAt is in the past, clear rejection and treat as unknown
