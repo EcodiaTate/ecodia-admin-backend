@@ -21,7 +21,7 @@ const path = require('path')
 const db = require('../config/db')
 const logger = require('../config/logger')
 const env = require('../config/env')
-const { broadcast } = require('../websocket/wsManager')
+const { broadcast, flushDeltasForTurnComplete, resetSessionSeq } = require('../websocket/wsManager')
 const secretSafety = require('./secretSafetyService')
 const usageEnergy = require('./usageEnergyService')
 const osIncident = require('./osIncidentService')
@@ -708,6 +708,8 @@ async function createOSSession() {
       'OS Session', now()
     ) RETURNING id, cc_cli_session_id, status
   `
+  // Pinnacle P1: reset WS seq counter so the frontend can detect a new event stream.
+  resetSessionSeq()
   return row
 }
 
@@ -1278,6 +1280,12 @@ async function _sendMessageImpl(content, opts = {}) {
   let newCcSessionId = ccSessionId
   let sawResultMessage = false  // SDK delivered a 'result' terminal message
 
+  // Pinnacle P1 - per-turn event fidelity tracking
+  let _assistantTurnStarted = false    // emitted assistant_message_starting this turn?
+  let _currentToolUseBlock = null      // { id, name, inputChunks[] } while streaming tool_use
+  let _turnModel = null                // model from system.init, for turn_complete telemetry
+  let _compactBoundaryTimer = null     // 60s safety timeout for stuck compact_boundary start
+
   // ─── Per-tool watchdog ─────────────────────────────────────────────────
   // An MCP server can crash mid-tool-call (stdio pipe breaks, process dies,
   // remote API hangs). When that happens the SDK sits waiting for a
@@ -1413,6 +1421,7 @@ async function _sendMessageImpl(content, opts = {}) {
     logger.info('OS Session: calling queryFn...', { promptLength: finalPrompt.length, suppressOutput, recovery: !!recoveryBlock })
     const q = queryFn({ prompt: finalPrompt, options })
     activeQuery = q
+    const _turnStartedAt = Date.now()  // for turn_complete duration_ms
     activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()
 
@@ -1450,6 +1459,7 @@ async function _sendMessageImpl(content, opts = {}) {
             if (msg.subtype === 'init') {
               // SDK reports the real model it locked in (including SDK default
               // when OS_SESSION_MODEL was unset). This is the ground truth.
+              _turnModel = msg.model || null  // captured for turn_complete telemetry
               logger.info('OS Session SDK init', {
                 model: msg.model || '(unknown)',
                 requestedModel: options.model || '(default)',
@@ -1464,6 +1474,10 @@ async function _sendMessageImpl(content, opts = {}) {
                   await updateOSSession(dbSessionId, { ccCliSessionId: ccSessionId, status: 'running' })
                 }
               }
+            } else if (!suppressOutput && msg.subtype) {
+              // Forward other system events (session_resumed, session_recovered, etc.)
+              // as inline banners so the frontend can surface them.
+              broadcast('os-session:output', { data: { type: 'session_event', subtype: msg.subtype } })
             }
             break
           }
@@ -1505,6 +1519,22 @@ async function _sendMessageImpl(content, opts = {}) {
                     tool_use_id: block.tool_use_id,
                     content: resultText || '(no output)',
                   })
+                  // Pinnacle P1: also emit typed tool_use_result or tool_use_error
+                  // so the frontend can distinguish success from failure without
+                  // parsing the content string.
+                  if (block.is_error) {
+                    emitOutput({
+                      type: 'tool_use_error',
+                      tool_use_id: block.tool_use_id,
+                      content: resultText || '(no output)',
+                    })
+                  } else {
+                    emitOutput({
+                      type: 'tool_use_result',
+                      tool_use_id: block.tool_use_id,
+                      content: resultText || '(no output)',
+                    })
+                  }
                 }
               }
             }
@@ -1596,18 +1626,56 @@ async function _sendMessageImpl(content, opts = {}) {
             break
           }
 
-          // ─── Streaming partial — real-time text + thinking deltas ──
+          // ─── Streaming partial — real-time text + thinking deltas + tool lifecycle ──
+          // Pinnacle P1: emits full event fidelity (assistant_message_starting,
+          // tool_use_starting, tool_use_input_complete) from streaming events
+          // before the full assistant message arrives.
           case 'stream_event': {
             const event = msg.event
             if (!event) break
 
-            if (!suppressOutput && event.type === 'content_block_delta' && event.delta) {
+            if (event.type === 'message_start') {
+              // New assistant message starting - emit banner before first text_delta
+              // so the frontend can show a "thinking" indicator immediately.
+              _assistantTurnStarted = true
+              if (!suppressOutput) {
+                emitOutput({ type: 'assistant_message_starting', ccSessionId: dbSessionId })
+              }
+            } else if (event.type === 'content_block_start') {
+              const block = event.content_block
+              if (block?.type === 'tool_use') {
+                // Tool use starting - name is known but input not yet finalized
+                _currentToolUseBlock = { id: block.id, name: block.name, inputChunks: [] }
+                if (!suppressOutput) {
+                  emitOutput({ type: 'tool_use_starting', id: block.id, name: block.name })
+                }
+              }
+            } else if (event.type === 'content_block_delta' && event.delta) {
               if (event.delta.type === 'text_delta' && event.delta.text) {
                 const safeText = secretSafety.scrubSecrets(event.delta.text)
-                emitOutput({ type: 'text_delta', content: safeText })
+                if (!suppressOutput) emitOutput({ type: 'text_delta', content: safeText })
               } else if (event.delta.type === 'thinking_delta' && event.delta.thinking) {
-                // Real-time thinking stream — shown in collapsible panel
-                emitOutput({ type: 'thinking_delta', content: event.delta.thinking })
+                // Real-time thinking stream - shown in collapsible panel
+                if (!suppressOutput) emitOutput({ type: 'thinking_delta', content: event.delta.thinking })
+              } else if (event.delta.type === 'input_json_delta' && _currentToolUseBlock) {
+                // Accumulate streaming tool input chunks
+                _currentToolUseBlock.inputChunks.push(event.delta.partial_json || '')
+              }
+            } else if (event.type === 'content_block_stop') {
+              if (_currentToolUseBlock) {
+                // Tool input fully assembled - emit tool_use_input_complete
+                const inputStr = _currentToolUseBlock.inputChunks.join('')
+                let parsedInput = null
+                try { parsedInput = JSON.parse(inputStr) } catch {}
+                if (!suppressOutput) {
+                  emitOutput({
+                    type: 'tool_use_input_complete',
+                    id: _currentToolUseBlock.id,
+                    name: _currentToolUseBlock.name,
+                    input: parsedInput !== null ? parsedInput : inputStr,
+                  })
+                }
+                _currentToolUseBlock = null
               }
             }
             break
@@ -1681,6 +1749,23 @@ async function _sendMessageImpl(content, opts = {}) {
                 total: totalTokens,
               })
             }
+            // Pinnacle P1: flush coalescer then emit turn_complete with full telemetry.
+            // Must happen after token broadcast so seq ordering is: tokens -> turn_complete.
+            if (!suppressOutput) {
+              flushDeltasForTurnComplete()
+              broadcast('os-session:output', {
+                data: {
+                  type: 'turn_complete',
+                  input_tokens: msg.usage?.input_tokens ?? sessionTokenUsage.input,
+                  output_tokens: msg.usage?.output_tokens ?? sessionTokenUsage.output,
+                  cache_read_tokens: msg.usage?.cache_read_input_tokens ?? 0,
+                  cache_write_tokens: msg.usage?.cache_creation_input_tokens ?? 0,
+                  model: _turnModel || env.OS_SESSION_MODEL || 'unknown',
+                  stop_reason: msg.stop_reason || null,
+                  duration_ms: Date.now() - _turnStartedAt,
+                },
+              })
+            }
             break
           }
 
@@ -1695,22 +1780,49 @@ async function _sendMessageImpl(content, opts = {}) {
             //   end                  -> compaction finished
             const boundaryType = msg.boundary_type || msg.type_detail || null
             if (boundaryType === 'end') {
+              if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
               if (isCompacting) {
                 isCompacting = false
-                if (!suppressOutput) emitStatus('streaming', { sessionId: dbSessionId })
+                if (!suppressOutput) {
+                  emitStatus('streaming', { sessionId: dbSessionId })
+                  broadcast('os-session:output', { data: { type: 'compact_boundary', phase: 'end' } })
+                }
               }
             } else {
               // start or unknown single marker - begin compacting
               if (!isCompacting) {
                 isCompacting = true
-                if (!suppressOutput) emitStatus('compacting', { sessionId: dbSessionId })
+                if (!suppressOutput) {
+                  emitStatus('compacting', { sessionId: dbSessionId })
+                  broadcast('os-session:output', { data: { type: 'compact_boundary', phase: 'start' } })
+                }
+                // Pinnacle P1: 60s safety timeout - if compact_boundary end never arrives,
+                // emit a synthetic end so the frontend doesn't stay stuck in compacting state.
+                if (_compactBoundaryTimer) clearTimeout(_compactBoundaryTimer)
+                _compactBoundaryTimer = setTimeout(() => {
+                  _compactBoundaryTimer = null
+                  if (isCompacting) {
+                    logger.warn('OS Session: compact_boundary end never arrived - emitting synthetic end')
+                    isCompacting = false
+                    if (!suppressOutput) {
+                      emitStatus('streaming', { sessionId: dbSessionId })
+                      broadcast('os-session:output', { data: { type: 'compact_boundary', phase: 'end', synthetic: true } })
+                    }
+                  }
+                }, 60_000)
               }
             }
             break
           }
 
           default:
-            // Other message types (user_replay, etc.) — ignore
+            // Pinnacle P1: forward unknown SDK event types so the frontend can
+            // observe new event shapes without a backend deploy.
+            if (!suppressOutput && msg.type) {
+              broadcast('os-session:output', {
+                data: { type: 'sdk_event_unknown', event_type: msg.type },
+              })
+            }
             break
         }
       } catch (msgErr) {
@@ -1722,6 +1834,7 @@ async function _sendMessageImpl(content, opts = {}) {
     // Session complete — clear timers and refresh real usage %
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     if (_toolWatchdog) clearTimeout(_toolWatchdog)
+    if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     activeQuery = null
 
     // If the loop ended due to inactivity timeout or a hung tool call,
@@ -1931,6 +2044,7 @@ async function _sendMessageImpl(content, opts = {}) {
   } catch (err) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     if (_toolWatchdog) clearTimeout(_toolWatchdog)
+    if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     activeQuery = null
 
     // ─── _accountRetry sentinel (thrown from result handler at line ~932) ───
