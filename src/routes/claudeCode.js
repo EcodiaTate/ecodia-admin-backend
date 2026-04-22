@@ -400,6 +400,7 @@ router.post('/sessions/:id/approve', async (req, res, next) => {
     const result = await oversight.runDeployFromOSApproval(req.params.id, {
       notes: req.body?.notes || '',
       confidence: req.body?.confidence ?? null,
+      force: req.body?.force === true,
     })
     res.json(result)
   } catch (err) { next(err) }
