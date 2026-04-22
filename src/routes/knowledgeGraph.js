@@ -178,4 +178,17 @@ router.get('/consolidation/stats', async (req, res, next) => {
   }
 })
 
+// POST /api/kg/extract-and-write — fire write-time edge extraction for a node
+router.post('/extract-and-write', async (req, res, next) => {
+  try {
+    const { nodeId, minConfidence, force } = req.body
+    if (!nodeId) return res.status(400).json({ error: 'Missing nodeId' })
+    const { extractAndWrite } = require('../services/neo4jEntityExtractor')
+    const result = await extractAndWrite(nodeId, { minConfidence, force })
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+})
+
 module.exports = router
