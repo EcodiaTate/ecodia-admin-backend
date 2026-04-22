@@ -5,6 +5,7 @@
 const express = require('express')
 const router = express.Router()
 const osSession = require('../services/osSessionService')
+const { getEventsSince } = require('../websocket/wsManager')
 const usageEnergy = require('../services/usageEnergyService')
 const { saveHandoffState } = require('../services/sessionHandoff')
 const { stampTateActive } = require('../services/tateActiveGate')
@@ -111,9 +112,19 @@ router.get('/tokens', (_req, res) => {
   res.json(usage)
 })
 
-// Recover missed response after tab close / disconnect
+// Recover missed response after tab close / disconnect.
+// Accepts either:
+//   ?since_seq=N  — Pinnacle P1: return events from in-memory ring buffer with seq > N
+//   ?since=<ts>   — legacy: return transcript from DB since timestamp
 router.get('/recover', async (req, res, next) => {
   try {
+    // Pinnacle P1: seq-based recovery from ring buffer (preferred)
+    if (req.query.since_seq != null) {
+      const sinceSeq = parseInt(req.query.since_seq, 10)
+      const events = getEventsSince(Number.isFinite(sinceSeq) ? sinceSeq : null)
+      return res.json({ events, count: events.length, seq_based: true })
+    }
+    // Legacy timestamp-based recovery
     const since = req.query.since || null
     const result = await osSession.recoverResponse(since)
     res.json(result)
