@@ -159,6 +159,10 @@ let _coalesceTimer = null
 // terminal turn events never leave text stranded in the coalescer buffer.
 const TERMINAL_EVENT_TYPES = new Set([
   'os-session:complete',
+  // Status transitions that mark turn boundaries — if the turn ends or
+  // errors out, any half-buffered text must ship first or it's lost.
+  // Filtered further by _isTerminalEvent based on the status value.
+  'os-session:status',
 ])
 
 // Output-inner-types that are terminal (carried inside os-session:output
@@ -166,6 +170,16 @@ const TERMINAL_EVENT_TYPES = new Set([
 // before the final text.
 const TERMINAL_OUTPUT_INNER_TYPES = new Set([
   'turn_complete',
+  'error',
+  'abort',
+])
+
+// Status values (emitted via os-session:status) that mark the end of a turn.
+// These force-flush pending deltas the same way os-session:complete does.
+const TERMINAL_STATUS_VALUES = new Set([
+  'complete',
+  'error',
+  'handover_complete',
 ])
 
 function _flushDeltas() {
@@ -203,7 +217,9 @@ function _isCoalescibleDelta(type, payload) {
 }
 
 function _isTerminalEvent(type, payload) {
-  if (TERMINAL_EVENT_TYPES.has(type)) return true
+  if (type === 'os-session:complete') return true
+  if (type === 'os-session:status' && payload?.status &&
+      TERMINAL_STATUS_VALUES.has(payload.status)) return true
   if (type === 'os-session:output' && payload?.data?.type &&
       TERMINAL_OUTPUT_INNER_TYPES.has(payload.data.type)) return true
   return false

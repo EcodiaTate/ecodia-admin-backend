@@ -1359,6 +1359,7 @@ async function _sendMessageImpl(content, opts = {}) {
   // silent spinner during long tool chains. Without this, the UI goes quiet
   // for 30-60s stretches and feels dead even when the OS is working hard.
   let _livenessTimer = null
+  let _livenessInitialTimer = null
   let _livenessTurnStartedAt = null
   const _livenessTick = () => {
     if (!_livenessTurnStartedAt) return
@@ -1398,16 +1399,20 @@ async function _sendMessageImpl(content, opts = {}) {
     }
   }
   const _startLiveness = () => {
-    if (_livenessTimer) return
+    if (_livenessTimer || _livenessInitialTimer) return
     _livenessTurnStartedAt = Date.now()
     // First tick at ~2s so the UI gets a signal quickly after send, then 5s cadence.
-    setTimeout(() => {
+    // Tracked so _stopLiveness can cancel the initial delay if the turn ends
+    // before it fires — otherwise the setInterval gets armed for a dead turn.
+    _livenessInitialTimer = setTimeout(() => {
+      _livenessInitialTimer = null
       if (!_livenessTurnStartedAt) return
       _livenessTick()
       _livenessTimer = setInterval(_livenessTick, 5000)
     }, 2000)
   }
   const _stopLiveness = () => {
+    if (_livenessInitialTimer) { clearTimeout(_livenessInitialTimer); _livenessInitialTimer = null }
     if (_livenessTimer) { clearInterval(_livenessTimer); _livenessTimer = null }
     _livenessTurnStartedAt = null
   }
@@ -1903,6 +1908,10 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     _stopLiveness()
     activeQuery = null
+    // If we exited the SDK loop while isCompacting was still true (the compact
+    // boundary 'end' never arrived but the stream ended anyway), the next turn
+    // would emitStatus('compacting') as its opening signal. Reset here.
+    if (isCompacting) isCompacting = false
 
     // If the loop ended due to inactivity timeout or a hung tool call,
     // treat it as a hang and try switching accounts. Direct-call
@@ -2114,6 +2123,11 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     _stopLiveness()
     activeQuery = null
+    // Module-level flags can leak here if we threw mid-compaction or mid-handover.
+    // Reset them so the next turn isn't stuck thinking a phase is still in flight.
+    if (isCompacting) isCompacting = false
+    // handoverInProgress is managed by autoHandover()'s own cleanup, but if the
+    // exception fires during handover's SDK call, the catch above may not run.
 
     // ─── _accountRetry sentinel (thrown from result handler at line ~932) ───
     // The result-message handler throws this when it detects usage exhaustion
@@ -2677,10 +2691,20 @@ async function abort() {
   // Clear the send queue so queued messages don't auto-fire
   _sendQueue = Promise.resolve()
 
+  // Clear module-level flags that would otherwise leak into the next turn if
+  // the abort fires while the SDK loop is inside a compaction or handover.
+  isCompacting = false
+  handoverInProgress = false
+
   const session = await getOSSession()
   if (session) {
     await updateOSSession(session.id, { status: 'complete' })
   }
+
+  // Flush any coalesced text_delta chunks BEFORE emitting the terminal event.
+  // Without this, the last 1–10ms of streamed text stays stranded in the
+  // coalescer and the frontend ends the turn with a truncated message.
+  try { flushDeltasForTurnComplete() } catch {}
 
   emitStatus('complete', { sessionId: session?.id, aborted: true })
   broadcast('os-session:complete', { sessionId: session?.id, code: 0, aborted: true })
