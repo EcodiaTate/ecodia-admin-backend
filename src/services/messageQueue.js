@@ -13,7 +13,6 @@
 
 const db = require('../config/db')
 const logger = require('../config/logger')
-const env = require('../config/env')
 
 // ── WS broadcast helper (lazy require to avoid circular init) ─────────────
 // Frontend listens for these and invalidates ['message-queue'] so the drawer
@@ -69,6 +68,12 @@ function ageSuffix(queuedAt) {
     return `queued ${Math.floor(ageMin / 60)}h ${ageMin % 60}m ago`
   }
   return `queued ${ageMin}m ago`
+}
+
+// Numbered list line for delivered/drained queues. Shared so the two callers
+// (deliverPending, drainIntoDirectMessage) render identical output.
+function formatQueuedItem(row, index) {
+  return `${index + 1}. ${row.body} (${ageSuffix(row.queued_at)})`
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -141,26 +146,37 @@ async function deliverPending({ summary = null, turn_id = null, ids = null } = {
     ? `[Queued by Tate, delivering now. I just finished: ${summary}]\n\n`
     : '[Queued messages from Tate, delivering now]\n\n'
 
-  const items = pending.map((row, i) =>
-    `${i + 1}. ${row.body} (${ageSuffix(row.queued_at)})`
-  )
+  const items = pending.map(formatQueuedItem)
+  const bodies = pending.map(r => r.body)
 
   const messageBody = intro + items.join('\n')
 
-  const port = env.PORT || 3001
+  // Broadcast BEFORE sending so the frontend paints user cards for each
+  // delivered message before the assistant response starts streaming.
+  // Without this, the drawer cards silently disappear and the chat flow
+  // has no cue that anything was sent.
+  broadcastQueueEvent('delivered', {
+    count: pending.length,
+    ids: pendingIds,
+    bodies,
+  })
+
+  // Call sendMessage DIRECTLY rather than round-tripping through POST
+  // /api/os-session/message. The HTTP handler re-runs drainIntoDirectMessage
+  // on the body, which would pick up any OTHER pending messages and prepend
+  // them — so promoting one message would fire all of them. Direct call
+  // bypasses that trap. sendMessage is fire-and-forget: errors surface via
+  // WS broadcasts, not the return value.
   try {
-    await fetch(`http://localhost:${port}/api/os-session/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: messageBody }),
-      signal: AbortSignal.timeout(5_000),
+    const osSession = require('./osSessionService')
+    osSession.sendMessage(messageBody, { priority: false }).catch(err => {
+      logger.warn('messageQueue.deliverPending: sendMessage failed', { error: err.message })
     })
   } catch (err) {
-    logger.warn(`messageQueue.deliverPending: OS session POST failed - ${err.message}`)
+    logger.warn('messageQueue.deliverPending: direct dispatch failed', { error: err.message })
   }
 
   logger.info(`messageQueue: delivered ${pending.length} queued message(s) to OS session`)
-  broadcastQueueEvent('delivered', { count: pending.length, ids: pendingIds })
   return { delivered: pending.length, ids: pendingIds }
 }
 
@@ -187,9 +203,7 @@ async function drainIntoDirectMessage(directBody) {
       WHERE id = ANY(${pendingIds}::uuid[])
     `
 
-    const items = pending.map((row, i) =>
-      `${i + 1}. ${row.body} (${ageSuffix(row.queued_at)})`
-    )
+    const items = pending.map(formatQueuedItem)
 
     const preamble = `[Pending queued messages delivered opportunistically]\n${items.join('\n')}\n---\n`
     logger.info(`messageQueue: drained ${pending.length} queued message(s) into direct send`)

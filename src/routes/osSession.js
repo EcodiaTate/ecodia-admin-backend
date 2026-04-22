@@ -4,6 +4,8 @@
  */
 const express = require('express')
 const router = express.Router()
+const env = require('../config/env')
+const logger = require('../config/logger')
 const osSession = require('../services/osSessionService')
 const { getEventsSince, getSessionEpoch } = require('../websocket/wsManager')
 const usageEnergy = require('../services/usageEnergyService')
@@ -47,7 +49,7 @@ router.post('/message', async (req, res, next) => {
     // Stamp Tate as active before queuing — crons stand down for 15 minutes.
     // Fire-and-forget: never block the response if this errors.
     stampTateActive().catch(err => {
-      console.error('[OS Session /message] stampTateActive error:', err.message)
+      logger.warn('OS Session /message: stampTateActive failed', { error: err.message })
     })
 
     // Drain any pending queued messages into this direct send (opportunistic delivery).
@@ -57,7 +59,7 @@ router.post('/message', async (req, res, next) => {
       const mq = require('../services/messageQueue')
       finalMessage = await mq.drainIntoDirectMessage(message)
     } catch (err) {
-      console.error('[OS Session /message] drain error:', err.message)
+      logger.warn('OS Session /message: drain error', { error: err.message })
     }
 
     // Return immediately — the real response streams via WebSocket
@@ -73,10 +75,10 @@ router.post('/message', async (req, res, next) => {
     // the cause of mid-turn session breaks where check-in messages aborted
     // long-running tool streams (logged as "Background error: write CONNECTION_ENDED").
     osSession.sendMessage(finalMessage, { priority: false }).catch(err => {
-      console.error('[OS Session /message] Background error:', err.message)
+      logger.error('OS Session /message: background sendMessage failed', { error: err.message, stack: err.stack })
     })
   } catch (err) {
-    console.error('[OS Session /message] Error:', err.message)
+    logger.error('OS Session /message: request handler error', { error: err.message })
     next(err)
   }
 })
@@ -149,7 +151,7 @@ router.post('/compact', async (req, res, next) => {
     const result = await osSession.compact(summary)
     res.json(result)
   } catch (err) {
-    console.error('[OS Session /compact] Error:', err.message)
+    logger.error('OS Session /compact: error', { error: err.message })
     next(err)
   }
 })
@@ -161,7 +163,7 @@ router.post('/handover', async (_req, res, next) => {
     const result = await osSession.autoHandover(null)
     res.json(result || { ok: true })
   } catch (err) {
-    console.error('[OS Session /handover] Error:', err.message)
+    logger.error('OS Session /handover: error', { error: err.message })
     next(err)
   }
 })
@@ -201,7 +203,6 @@ router.post('/upload', async (req, res, next) => {
       return res.status(400).json({ error: 'name and (base64 or text) are required' })
     }
 
-    const env = require('../config/env')
     if (!env.SUPABASE_URL || !(env.SUPABASE_SERVICE_KEY || env.SUPABASE_ANON_KEY)) {
       return res.status(503).json({ error: 'Supabase not configured' })
     }
@@ -225,7 +226,7 @@ router.post('/upload', async (req, res, next) => {
     await sb.storage.createBucket('os-attachments', { public: true }).catch(() => {})
     const { error } = await sb.storage.from('os-attachments').upload(slug, buffer, { contentType, upsert: true })
     if (error) {
-      console.error('[OS Upload] Supabase error:', error.message)
+      logger.error('OS Upload: Supabase storage error', { error: error.message, name })
       return res.status(500).json({ error: error.message })
     }
 
@@ -240,7 +241,7 @@ router.post('/abort', async (_req, res, next) => {
     const result = await osSession.abort()
     res.json(result)
   } catch (err) {
-    console.error('[OS Session /abort] Error:', err.message)
+    logger.error('OS Session /abort: error', { error: err.message })
     next(err)
   }
 })
@@ -252,7 +253,7 @@ router.post('/save-state', async (req, res, next) => {
     const state = await saveHandoffState({ current_work, active_plan, tate_last_direction, deliverables_status })
     res.json({ ok: true, saved_at: state.saved_at })
   } catch (err) {
-    console.error('[OS Session /save-state] Error:', err.message)
+    logger.error('OS Session /save-state: error', { error: err.message })
     next(err)
   }
 })
