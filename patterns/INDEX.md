@@ -42,6 +42,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [factory-codebase-staleness-check-before-dispatch.md](factory-codebase-staleness-check-before-dispatch.md) | factory, factory-dispatch, start_cc_session, codebase-staleness, worktree-stale, behind-origin, divergent-base, fe-dispatch, frontend-factory, ecodiaos-frontend, rebase-conflict, unmergeable-commit, stale-clone, codebases-registry |
 | [verify-monitoring-query-schema-before-declaring-broken.md](verify-monitoring-query-schema-before-declaring-broken.md) | monitoring, observability, telemetry, feature-verification, zero-results, extracted_at, extracted_by, write-time-extraction, tier-4a, tier-4b, tier-4c, kg-extraction, false-alarm, schema-drift, observer-bug, broken-feature, probe-first, neo4j-property-name |
 | [sms-segment-economics.md](sms-segment-economics.md) | sms, twilio, send_sms, mcp__sms__send_sms, sms-cost, segment, 160-chars, 70-chars, sms-concise, sms-to-tate, outbound-sms, text-tate, sms-length |
+| [authorised-branch-push-is-not-client-contact.md](authorised-branch-push-is-not-client-contact.md) | client-push, bitbucket-push, github-push, fireauditors1, ordit, client-repo, authorised-branch, pr-212, authorised-pr, client-contact-boundary, greenlight-scope, no-client-contact-without-tate-goahead, scope-envelope, delayed-push, symbolic-waiting |
 
 ## Authoring rules
 
