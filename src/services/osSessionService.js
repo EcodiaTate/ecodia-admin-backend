@@ -784,11 +784,11 @@ async function appendLog(sessionId, content) {
 // ── WebSocket broadcasting ──
 
 function emitOutput(data) {
-  broadcast('os-session:output', { data })
+  try { broadcast('os-session:output', { data }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
 }
 
 function emitStatus(status, meta = {}) {
-  broadcast('os-session:status', { status, ...meta })
+  try { broadcast('os-session:status', { status, ...meta }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
 }
 
 // ── Extract text from an assistant message's content blocks ──
@@ -1392,13 +1392,15 @@ async function _sendMessageImpl(content, opts = {}) {
       if (!oldestName) detail.name = oldestId || 'tool'
     }
     if (!suppressOutput) {
-      broadcast('os-session:status', {
-        status: 'live',
-        phase,
-        elapsedSec,
-        detail,
-        sessionId: dbSessionId,
-      })
+      try {
+        broadcast('os-session:status', {
+          status: 'live',
+          phase,
+          elapsedSec,
+          detail,
+          sessionId: dbSessionId,
+        })
+      } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
     }
   }
   const _startLiveness = () => {
@@ -2394,7 +2396,7 @@ async function sendMessage(content, opts = {}) {
     if (!wasSuppressed) {
       // Broadcast interrupt only for user-facing streams, so the frontend
       // can finalise whatever partial content was visible.
-      broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true })
+      try { broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
     }
   }
 
@@ -2402,6 +2404,14 @@ async function sendMessage(content, opts = {}) {
   // an in-flight turn (active query running + not priority + not a suppressed internal msg).
   if (activeQuery && !opts.priority && !opts.suppressOutput) {
     emitStatus('queued', { sessionId: null, queuedBehind: isCompacting ? 'compaction' : 'active_query' })
+  }
+
+  if (activeQuery && !opts.priority) {
+    logger.info('osSession: message queued behind active turn', {
+      contentLen: content?.length,
+      suppressed: !!opts.suppressOutput,
+      queue_depth: isCompacting ? 'compaction' : 'active_query',
+    })
   }
 
   const promise = _sendQueue.then(() => _sendMessageWithWatchdog(content, opts))
@@ -2651,7 +2661,7 @@ The handover is complete when you've read the docs and are ready to continue. Do
 
   } catch (err) {
     logger.error('OS Session: auto-handover failed', { error: err.message })
-    broadcast('os-session:handover', { phase: 'failed', error: err.message })
+    try { broadcast('os-session:handover', { phase: 'failed', error: err.message }) } catch (broadcastErr) { logger.warn('osSession: broadcast failed (non-fatal)', { error: broadcastErr.message }) }
     // Emit a terminal status so the frontend doesn't stay stuck on "handover_warming"
     try {
       emitStatus('error', { error: 'handover_failed' })
@@ -2733,8 +2743,8 @@ async function abort() {
   // coalescer and the frontend ends the turn with a truncated message.
   try { flushDeltasForTurnComplete() } catch {}
 
-  emitStatus('complete', { sessionId: session?.id, aborted: true })
-  broadcast('os-session:complete', { sessionId: session?.id, code: 0, aborted: true })
+  try { emitStatus('complete', { sessionId: session?.id, aborted: true }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
+  try { broadcast('os-session:complete', { sessionId: session?.id, code: 0, aborted: true }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
 
   logger.info('OS Session aborted by user')
   return { aborted: true }
