@@ -13,7 +13,7 @@
 const path = require('path')
 process.chdir(path.join(__dirname, '..'))
 
-const { getDriver, runQuery, runWrite } = require('./src/config/neo4j')
+const { getDriver, runQuery, runWrite } = require('../src/config/neo4j')
 
 async function main() {
   try {
