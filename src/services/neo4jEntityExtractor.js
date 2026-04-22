@@ -8,11 +8,15 @@
  */
 
 const axios = require('axios')
-const { runQuery } = require('../config/neo4j')
+const { runQuery, runWrite } = require('../config/neo4j')
 const env = require('../config/env')
 const logger = require('../config/logger')
 const db = require('../config/db')
 const neo4j = require('neo4j-driver')
+
+// Write-mode confidence gate. Extractor internally keeps candidates at >=0.78,
+// but only edges at >=WRITE_CONFIDENCE_THRESHOLD are materialised when writing.
+const WRITE_CONFIDENCE_THRESHOLD = 0.85
 
 // ─── RelType inference rules (source label + target label -> relType) ───────
 
@@ -328,4 +332,123 @@ async function extractEntitiesFromNode(nodeId) {
   return { nodeId, nodeLabel, nodeName, proposedEdges }
 }
 
-module.exports = { extractEntitiesFromNode }
+/**
+ * Materialise proposed edges from extractEntitiesFromNode into the graph.
+ *
+ * Feature-flagged and idempotent. Each edge carries:
+ *   - confidence (float, 0.85-1.0)
+ *   - evidence  (string, ~80-char excerpt)
+ *   - extracted_at (ISO datetime)
+ *   - extractor_version (string, bumped when extractor logic changes)
+ *
+ * Uses MERGE keyed on (source, target, relType) so re-running is safe.
+ *
+ * @param {object} extraction - result of extractEntitiesFromNode
+ * @param {object} opts
+ * @param {number} [opts.minConfidence=WRITE_CONFIDENCE_THRESHOLD] - edges below this are skipped
+ * @param {boolean} [opts.force=false] - bypass NEO4J_EXTRACTOR_WRITE_ENABLED feature flag
+ * @returns {Promise<{written: number, skipped_low_conf: number, skipped_disabled: number, errors: number, edges: Array}>}
+ */
+async function writeExtractedEdges(extraction, opts = {}) {
+  const minConfidence = opts.minConfidence ?? WRITE_CONFIDENCE_THRESHOLD
+  const enabled = opts.force === true || process.env.NEO4J_EXTRACTOR_WRITE_ENABLED === 'true'
+
+  const result = { written: 0, skipped_low_conf: 0, skipped_disabled: 0, errors: 0, edges: [] }
+
+  if (!extraction || !extraction.nodeId || !Array.isArray(extraction.proposedEdges)) {
+    return result
+  }
+
+  if (!enabled) {
+    result.skipped_disabled = extraction.proposedEdges.length
+    return result
+  }
+
+  const extractedAt = new Date().toISOString()
+  const extractorVersion = 'v1.0'
+
+  for (const edge of extraction.proposedEdges) {
+    if (edge.confidence < minConfidence) {
+      result.skipped_low_conf += 1
+      continue
+    }
+    try {
+      // Sanitise relType to uppercase alpha+underscore only
+      const relType = String(edge.relType || 'MENTIONS').replace(/[^A-Z_]/g, '') || 'MENTIONS'
+      const cypher = `
+        MATCH (src) WHERE elementId(src) = $srcId
+        MATCH (tgt) WHERE elementId(tgt) = $tgtId
+        MERGE (src)-[r:${relType}]->(tgt)
+        ON CREATE SET r.confidence = $confidence,
+                      r.evidence = $evidence,
+                      r.extracted_at = $extractedAt,
+                      r.extractor_version = $extractorVersion,
+                      r.created_at = datetime()
+        ON MATCH SET  r.confidence = CASE WHEN coalesce(r.confidence, 0) < $confidence THEN $confidence ELSE r.confidence END,
+                      r.evidence = coalesce(r.evidence, $evidence),
+                      r.extracted_at = $extractedAt,
+                      r.extractor_version = $extractorVersion
+        RETURN elementId(r) AS edgeId, type(r) AS relType
+      `
+      const records = await runWrite(cypher, {
+        srcId: extraction.nodeId,
+        tgtId: edge.targetId,
+        confidence: edge.confidence,
+        evidence: edge.evidence,
+        extractedAt,
+        extractorVersion,
+      })
+      if (records.length > 0) {
+        result.written += 1
+        result.edges.push({
+          edgeId: records[0].get('edgeId'),
+          relType: records[0].get('relType'),
+          targetName: edge.targetName,
+          confidence: edge.confidence,
+        })
+      }
+    } catch (err) {
+      result.errors += 1
+      logger.warn('neo4jEntityExtractor: edge write failed', {
+        srcId: extraction.nodeId,
+        tgtId: edge.targetId,
+        relType: edge.relType,
+        error: err.message,
+      })
+    }
+  }
+
+  logger.info('neo4jEntityExtractor: writeExtractedEdges completed', {
+    srcId: extraction.nodeId,
+    proposed: extraction.proposedEdges.length,
+    written: result.written,
+    skipped_low_conf: result.skipped_low_conf,
+    errors: result.errors,
+  })
+
+  return result
+}
+
+/**
+ * Convenience: extract + write in one call. Returns combined result.
+ *
+ * Use this from graph_merge_node or any write-time hook that wants to
+ * materialise edges immediately after a node is created or updated.
+ *
+ * @param {string} nodeId - Neo4j elementId
+ * @param {object} [opts] - Passed through to writeExtractedEdges
+ * @returns {Promise<{nodeId, nodeLabel, nodeName, proposedEdges, write: {written, skipped_low_conf, skipped_disabled, errors, edges}}>}
+ */
+async function extractAndWrite(nodeId, opts = {}) {
+  const extraction = await extractEntitiesFromNode(nodeId)
+  const write = await writeExtractedEdges(extraction, opts)
+  return { ...extraction, write }
+}
+
+module.exports = {
+  extractEntitiesFromNode,
+  writeExtractedEdges,
+  extractAndWrite,
+  // for tests / CLI
+  _internal: { WRITE_CONFIDENCE_THRESHOLD },
+}
