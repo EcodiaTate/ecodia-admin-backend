@@ -104,19 +104,29 @@ function _sendRaw(message) {
   }
 }
 
-// ─── Seq counter (per OS session) ───────────────────────────────────────────
+// ─── Seq counter + epoch (per OS session) ─────────────────────────────────
 // Monotonic integer stamped on every emitted WS message. Resets to 0 when a
-// new OS session begins. The frontend uses seq to detect out-of-order or
-// missed events and can request replay via the recover endpoint.
+// new OS session begins OR when the Node process restarts. Pair it with a
+// UUID epoch so the frontend can distinguish "new session, seq=0" from
+// "same session, process restarted mid-turn" — both look like seq going down
+// but only one warrants silent re-sync. (crypto already required at top.)
 let _sessionSeq = 0
+let _sessionEpoch = crypto.randomUUID()
 
 function resetSessionSeq() {
   _sessionSeq = 0
+  _sessionEpoch = crypto.randomUUID()
 }
 
-// ─── Event ring buffer (last 100 events for reconnect recovery) ─────────────
+function getSessionEpoch() {
+  return _sessionEpoch
+}
+
+// ─── Event ring buffer (last 500 events for reconnect recovery) ───────────
 // Populated by every broadcast call. Supports GET /api/os-session/recover?since_seq=N.
-const RING_BUFFER_SIZE = 100
+// Bumped from 100 to 500 — a tool-heavy turn can emit 40-60 events, so 100
+// aged out mid-conversation if a tab was backgrounded for more than a turn.
+const RING_BUFFER_SIZE = 500
 const _eventRing = []
 
 function _addToRing(envelope) {
@@ -130,20 +140,33 @@ function getEventsSince(sinceSeq) {
   return _eventRing.filter(e => e.seq > since)
 }
 
-// ─── Text-delta coalescer (20ms window) ─────────────────────────────────────
+// ─── Text-delta coalescer (10ms window) ─────────────────────────────────────
 // Every text_delta from the SDK used to go out as its own WS packet. At 100+
 // deltas per response over a high-latency network (mobile / Africa), each
 // packet is a separate RTT - streams felt stuttery and tripled the packet
 // count for no benefit.
 //
-// Coalescer: within a 20ms window, concatenate deltas for the same session.
+// Coalescer: within a 10ms window, concatenate deltas for the same session.
 // Flush on window expiry OR when any non-delta event arrives (to preserve
 // ordering - tool_use, status, complete must flush pending text first).
-// Call flushDeltasForTurnComplete() explicitly before emitting turn_complete
-// to ensure no deltas are stranded when the turn ends.
-const COALESCE_WINDOW_MS = 20
-let _pendingDeltas = null   // { extra, parts: [] }
+// Terminal events (turn_complete, os-session:complete) also flush via the
+// TERMINAL_EVENT_TYPES list below — no explicit flush call needed.
+const COALESCE_WINDOW_MS = 10
+let _pendingDeltas = null   // { extra, extraKey, parts: [] }
 let _coalesceTimer = null
+
+// Event types that must force-flush pending deltas before emission so
+// terminal turn events never leave text stranded in the coalescer buffer.
+const TERMINAL_EVENT_TYPES = new Set([
+  'os-session:complete',
+])
+
+// Output-inner-types that are terminal (carried inside os-session:output
+// envelopes). A turn_complete with buffered deltas would otherwise arrive
+// before the final text.
+const TERMINAL_OUTPUT_INNER_TYPES = new Set([
+  'turn_complete',
+])
 
 function _flushDeltas() {
   if (_coalesceTimer) { clearTimeout(_coalesceTimer); _coalesceTimer = null }
@@ -156,6 +179,7 @@ function _flushDeltas() {
   const envelope = {
     seq,
     ts,
+    epoch: _sessionEpoch,
     type: 'os-session:output',
     ...extra,
     data: { type: 'text_delta', content: combined },
@@ -164,8 +188,10 @@ function _flushDeltas() {
   _sendRaw(JSON.stringify(envelope))
 }
 
-// Force-flush the coalescer before turn_complete - ensures no text deltas are
-// stranded in the 20ms buffer when the turn ends. Called from osSessionService.
+// Force-flush the coalescer before turn_complete - retained for backwards
+// compat with callers that still invoke this explicitly. The broadcast()
+// function now force-flushes on terminal events automatically, so this is
+// effectively a no-op in current callers but remains safe to call.
 function flushDeltasForTurnComplete() {
   _flushDeltas()
 }
@@ -176,18 +202,24 @@ function _isCoalescibleDelta(type, payload) {
          typeof payload.data.content === 'string'
 }
 
+function _isTerminalEvent(type, payload) {
+  if (TERMINAL_EVENT_TYPES.has(type)) return true
+  if (type === 'os-session:output' && payload?.data?.type &&
+      TERMINAL_OUTPUT_INNER_TYPES.has(payload.data.type)) return true
+  return false
+}
+
 function broadcast(type, payload) {
   // Only text_delta output gets coalesced. All other events flush pending
   // deltas first so ordering across event types is preserved.
   if (_isCoalescibleDelta(type, payload)) {
     // Capture non-data fields (sessionId, etc.) so we can reattach on flush.
     const { data, ...extra } = payload
-    // If extra fields change mid-stream (e.g. session change - shouldn't happen
-    // in practice) flush what we have and start a new buffer.
-    const prevExtra = _pendingDeltas?.extra
-    const sameExtra = prevExtra && JSON.stringify(prevExtra) === JSON.stringify(extra)
-    if (_pendingDeltas && !sameExtra) _flushDeltas()
-    if (!_pendingDeltas) _pendingDeltas = { extra, parts: [] }
+    // Cache a stringified key of `extra` so we're not re-JSON-stringifying
+    // on every delta (these fire hundreds of times per turn).
+    const extraKey = JSON.stringify(extra)
+    if (_pendingDeltas && _pendingDeltas.extraKey !== extraKey) _flushDeltas()
+    if (!_pendingDeltas) _pendingDeltas = { extra, extraKey, parts: [] }
     _pendingDeltas.parts.push(data.content)
     if (!_coalesceTimer) {
       _coalesceTimer = setTimeout(_flushDeltas, COALESCE_WINDOW_MS)
@@ -196,13 +228,18 @@ function broadcast(type, payload) {
   }
 
   // Non-delta event - flush any pending deltas first to keep ordering sane.
+  // Terminal events additionally guarantee no text is stranded mid-turn.
   if (_pendingDeltas) _flushDeltas()
 
   const seq = ++_sessionSeq
   const ts = new Date().toISOString()
-  const envelope = { seq, ts, type, ...payload }
+  const envelope = { seq, ts, epoch: _sessionEpoch, type, ...payload }
   _addToRing(envelope)
   _sendRaw(JSON.stringify(envelope))
+
+  // If this was a terminal event, assert-flush afterwards too — catches the
+  // edge case where a late delta lands in the same tick but after us.
+  if (_isTerminalEvent(type, payload) && _pendingDeltas) _flushDeltas()
 }
 
 function broadcastToSession(sessionId, type, data) {
@@ -216,5 +253,6 @@ module.exports = {
   broadcastToSession,
   flushDeltasForTurnComplete,
   resetSessionSeq,
+  getSessionEpoch,
   getEventsSince,
 }
