@@ -9,6 +9,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../config/db')
 const mq = require('../services/messageQueue')
+const { broadcast } = require('../websocket/wsManager')
 
 // GET / — list pending messages
 router.get('/', async (req, res, next) => {
@@ -49,19 +50,30 @@ router.get('/:id', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// PATCH /:id — update body or max_age_hours (only while pending)
+// PATCH /:id — update body or max_age_hours (only while pending).
+// max_age_hours is clamped to [1, 168] to match the frontend edit form.
 router.patch('/:id', async (req, res, next) => {
   try {
     const { body, max_age_hours } = req.body || {}
+    let clampedAge = null
+    if (max_age_hours !== undefined) {
+      const n = parseInt(max_age_hours)
+      if (!Number.isFinite(n)) {
+        return res.status(400).json({ error: 'max_age_hours must be a number' })
+      }
+      clampedAge = Math.min(168, Math.max(1, n))
+    }
     const [row] = await db`
       UPDATE message_queue SET
         body            = COALESCE(${body !== undefined ? body : null}, body),
-        max_age_hours   = COALESCE(${max_age_hours !== undefined ? parseInt(max_age_hours) : null}, max_age_hours)
+        max_age_hours   = COALESCE(${clampedAge}, max_age_hours)
       WHERE id = ${req.params.id}
         AND delivered_at IS NULL AND cancelled_at IS NULL
       RETURNING *
     `
     if (!row) return res.status(404).json({ error: 'Not found or already delivered/cancelled' })
+    // Emit a WS event so any open drawer refetches without waiting for its poll.
+    broadcast('message_queue:updated', { id: row.id })
     res.json(row)
   } catch (err) { next(err) }
 })
