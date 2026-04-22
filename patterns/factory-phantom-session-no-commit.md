@@ -24,6 +24,8 @@ The downstream failure: `approve_factory_deploy` runs the deploy pipeline, finds
 
 **Mode 3 — State-drift (real work, broken tracking) (Apr 22, session 9dbf39ce):** Factory did the work correctly, made a real commit locally, triggered PM2 restart, live endpoints serve the fix — BUT cc_sessions.commit_sha/deploy_status never populated AND the commit was never pushed to origin. The deliverable is real; only the tracking row and the push step failed. This looks identical to Mode 1/2 on a quick scan of cc_sessions, so the disk/commit verification below is the only way to tell them apart.
 
+> **Mode 3 closed at source (Apr 22 2026, commit 818ca1e, Tier-4c session 47ca1767).** `src/services/deploymentService.js` `no_changes` branch now reads the current HEAD SHA, push-syncs the branch to origin, and `UPDATE cc_sessions SET commit_sha/deploy_status/pipeline_stage` on the no-changes path. The fix self-demonstrated on its own `approve_factory_deploy` call — 47ca1767 went through the fixed path and produced a valid commit_sha. Mode 3 should no longer occur for newly approved sessions; keep the manual-reconcile protocol (step 4) as a safety net for any pre-818ca1e session that still drifts, and in case of regression.
+
 ## Protocol
 
 Before EVERY `approve_factory_deploy` or `reject_factory_session` on a session against `ecodiaos-backend`:
