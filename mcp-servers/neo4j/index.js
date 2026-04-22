@@ -212,9 +212,22 @@ server.tool('graph_merge_node', 'Create a node if it does not exist, or update i
       `MERGE (n:\`${label}\` {${match_key}: $matchVal})
        ON CREATE SET n.created_at = datetime(), n += $props
        ON MATCH SET n.updated_at = datetime(), n += $props
-       RETURN n`,
+       RETURN n, elementId(n) AS nodeId`,
       { matchVal: match_value, props: properties || {} }
     )
+    const nodeId = result[0]?.nodeId
+    // Fire-and-forget write-time edge extraction (non-blocking, does NOT delay response)
+    if (process.env.NEO4J_WRITE_TIME_EXTRACTION_ENABLED === 'true' && nodeId) {
+      const apiUrl = process.env.ECODIA_API_URL || 'http://localhost:3001'
+      fetch(`${apiUrl}/api/kg/extract-and-write`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.MCP_INTERNAL_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ nodeId }),
+      }).catch(err => console.error('[graph_merge_node] extract-and-write failed:', err?.message))
+    }
     return { content: [{ type: 'text', text: JSON.stringify(result[0]?.n || {}, null, 2) }] }
   } catch (err) {
     if (isConnectionError(err)) {
