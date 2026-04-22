@@ -1308,7 +1308,8 @@ async function _sendMessageImpl(content, opts = {}) {
     const now = Date.now()
     let oldest = Infinity
     let oldestId = null
-    for (const [id, startedAt] of _toolStartedAt) {
+    for (const [id, info] of _toolStartedAt) {
+      const startedAt = typeof info === 'number' ? info : info.startedAt
       if (startedAt < oldest) { oldest = startedAt; oldestId = id }
     }
     const age = now - oldest
@@ -1322,9 +1323,11 @@ async function _sendMessageImpl(content, opts = {}) {
       _abortActiveQuery('tool_watchdog')
     }, remaining)
   }
-  const _markToolStarted = (id) => {
+  const _markToolStarted = (id, name) => {
     if (!id) return
-    _toolStartedAt.set(id, Date.now())
+    // Store as object so the liveness heartbeat can surface the tool name
+    // currently running, not just its id. Watchdog still reads startedAt.
+    _toolStartedAt.set(id, { startedAt: Date.now(), name: name || null })
     _scheduleToolWatchdog()
   }
   const _markToolCompleted = (id) => {
@@ -1348,6 +1351,65 @@ async function _sendMessageImpl(content, opts = {}) {
       _inactivityAborted = true
       _abortActiveQuery('inactivity_timeout')
     }, INACTIVITY_TIMEOUT_MS)
+  }
+
+  // ─── Liveness heartbeat (5s tick while the turn is in flight) ──────────
+  // The frontend expects `os-session:status` with status='live' every 5s so
+  // it can render "thinking — Ns" or "running tool X — Ns" instead of a
+  // silent spinner during long tool chains. Without this, the UI goes quiet
+  // for 30-60s stretches and feels dead even when the OS is working hard.
+  let _livenessTimer = null
+  let _livenessTurnStartedAt = null
+  const _livenessTick = () => {
+    if (!_livenessTurnStartedAt) return
+    const elapsedSec = Math.round((Date.now() - _livenessTurnStartedAt) / 1000)
+    // If a tool is outstanding, surface the oldest one + its age.
+    let phase = 'thinking'
+    let detail = null
+    if (_toolStartedAt.size > 0) {
+      phase = 'tool'
+      let oldest = Infinity
+      let oldestId = null
+      let oldestName = null
+      for (const [id, info] of _toolStartedAt) {
+        const startedAt = typeof info === 'number' ? info : info.startedAt
+        if (startedAt < oldest) {
+          oldest = startedAt
+          oldestId = id
+          oldestName = typeof info === 'object' ? info.name : null
+        }
+      }
+      detail = {
+        name: oldestName || 'tool',
+        runningSec: Math.round((Date.now() - oldest) / 1000),
+        outstanding: _toolStartedAt.size,
+      }
+      // name is opportunistic — _toolStartedAt may not have it for pre-P1 paths.
+      if (!oldestName) detail.name = oldestId || 'tool'
+    }
+    if (!suppressOutput) {
+      broadcast('os-session:status', {
+        status: 'live',
+        phase,
+        elapsedSec,
+        detail,
+        sessionId: dbSessionId,
+      })
+    }
+  }
+  const _startLiveness = () => {
+    if (_livenessTimer) return
+    _livenessTurnStartedAt = Date.now()
+    // First tick at ~2s so the UI gets a signal quickly after send, then 5s cadence.
+    setTimeout(() => {
+      if (!_livenessTurnStartedAt) return
+      _livenessTick()
+      _livenessTimer = setInterval(_livenessTick, 5000)
+    }, 2000)
+  }
+  const _stopLiveness = () => {
+    if (_livenessTimer) { clearInterval(_livenessTimer); _livenessTimer = null }
+    _livenessTurnStartedAt = null
   }
 
   // Stitch continuity blocks into the USER message (not the system prompt)
@@ -1424,6 +1486,7 @@ async function _sendMessageImpl(content, opts = {}) {
     const _turnStartedAt = Date.now()  // for turn_complete duration_ms
     activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()
+    _startLiveness()
 
     let _turnNo = 0
     try {
@@ -1574,7 +1637,7 @@ async function _sendMessageImpl(content, opts = {}) {
             // of suppressOutput — we still want to protect against MCP hangs
             // on background turns.
             const toolUses = blocks.filter(b => b.type === 'tool_use')
-            for (const t of toolUses) _markToolStarted(t.id)
+            for (const t of toolUses) _markToolStarted(t.id, t.name)
 
             if (!suppressOutput) {
               // Also broadcast tool_use blocks so frontend knows about tool calls
@@ -1646,6 +1709,9 @@ async function _sendMessageImpl(content, opts = {}) {
               if (block?.type === 'tool_use') {
                 // Tool use starting - name is known but input not yet finalized
                 _currentToolUseBlock = { id: block.id, name: block.name, inputChunks: [] }
+                // Start tracking now (not on full assistant message) so the
+                // liveness heartbeat can surface the tool name while it runs.
+                _markToolStarted(block.id, block.name)
                 if (!suppressOutput) {
                   emitOutput({ type: 'tool_use_starting', id: block.id, name: block.name })
                 }
@@ -1835,6 +1901,7 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     if (_toolWatchdog) clearTimeout(_toolWatchdog)
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
+    _stopLiveness()
     activeQuery = null
 
     // If the loop ended due to inactivity timeout or a hung tool call,
@@ -2045,6 +2112,7 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     if (_toolWatchdog) clearTimeout(_toolWatchdog)
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
+    _stopLiveness()
     activeQuery = null
 
     // ─── _accountRetry sentinel (thrown from result handler at line ~932) ───

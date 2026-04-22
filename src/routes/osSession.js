@@ -5,7 +5,7 @@
 const express = require('express')
 const router = express.Router()
 const osSession = require('../services/osSessionService')
-const { getEventsSince } = require('../websocket/wsManager')
+const { getEventsSince, getSessionEpoch } = require('../websocket/wsManager')
 const usageEnergy = require('../services/usageEnergyService')
 const { saveHandoffState } = require('../services/sessionHandoff')
 const { stampTateActive } = require('../services/tateActiveGate')
@@ -118,11 +118,18 @@ router.get('/tokens', (_req, res) => {
 //   ?since=<ts>   — legacy: return transcript from DB since timestamp
 router.get('/recover', async (req, res, next) => {
   try {
-    // Pinnacle P1: seq-based recovery from ring buffer (preferred)
+    // Pinnacle P1: seq-based recovery from ring buffer (preferred).
+    // Stamp the current epoch so clients can detect a process restart /
+    // new session and clear their lastSeenSeq when the epoch changes.
     if (req.query.since_seq != null) {
       const sinceSeq = parseInt(req.query.since_seq, 10)
       const events = getEventsSince(Number.isFinite(sinceSeq) ? sinceSeq : null)
-      return res.json({ events, count: events.length, seq_based: true })
+      return res.json({
+        events,
+        count: events.length,
+        seq_based: true,
+        epoch: getSessionEpoch(),
+      })
     }
     // Legacy timestamp-based recovery
     const since = req.query.since || null
