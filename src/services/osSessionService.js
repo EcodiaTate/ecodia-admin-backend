@@ -739,12 +739,22 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
 
     // 2s hard cap - never block the user turn on retrieval
     const t0 = Date.now()
+    const useFused = env.OS_MEMORY_FUSED_ENABLED !== 'false'
     const useNeighborhood = env.OS_MEMORY_NEIGHBORHOOD_ENABLED !== 'false'
-    const searchFn = useNeighborhood
-      ? neo4jRetrieval.semanticSearchWithNeighborhood
-      : neo4jRetrieval.semanticSearch
+    let searchFn
+    let searchOpts
+    if (useFused) {
+      searchFn = neo4jRetrieval.fusedSearch
+      searchOpts = { limit: 5 }
+    } else if (useNeighborhood) {
+      searchFn = neo4jRetrieval.semanticSearchWithNeighborhood
+      searchOpts = { limit: 3 }
+    } else {
+      searchFn = neo4jRetrieval.semanticSearch
+      searchOpts = { limit: 3 }
+    }
     const results = await Promise.race([
-      searchFn(queryText, { limit: 3 }),
+      searchFn(queryText, searchOpts),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('neo4j retrieval timeout')), 2000)
       ),
@@ -754,6 +764,7 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
       query_len: queryText.length,
       hits: results ? results.length : 0,
       top_score: results && results[0] ? results[0].score ?? null : null,
+      fused: useFused,
       neighborhood: useNeighborhood,
       elapsed_ms: Date.now() - t0,
     })
@@ -762,7 +773,10 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
 
     const lines = results.map((r, i) => {
       const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim()}` : ''
-      const head = `${i + 1}. [${r.label}] ${r.name}${desc}`
+      const sig = r.signals
+        ? ` (sig: v=${r.signals.vector != null ? r.signals.vector.toFixed(2) : '-'}, k=${r.signals.keyword ?? '-'})`
+        : ''
+      const head = `${i + 1}. [${r.label}] ${r.name}${sig}${desc}`
       if (!r.neighbours || r.neighbours.length === 0) return head
       const edges = r.neighbours.map(n => {
         const nDesc = n.description ? `: ${n.description.replace(/\s+/g, ' ').trim()}` : ''
@@ -774,6 +788,42 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
     return `<relevant_memory>\n${lines.join('\n')}\n</relevant_memory>`
   } catch (err) {
     logger.warn('OS Session: relevant memory injection failed (skipping)', { error: err.message })
+    return null
+  }
+}
+
+// Injects <recent_doctrine> block: the most recent high-priority Decisions /
+// Episodes / Patterns. Unlike _injectRelevantMemory this is UNQUERIED - it
+// surfaces recent doctrine regardless of whether the current turn matches it
+// semantically. This fixes the class of failure where a Decision written
+// minutes ago never surfaces on the next turn because the user phrasing is
+// colloquial and vector similarity is low.
+//
+// Hard 2s timeout. Fail-open - returns null on any error.
+async function _injectRecentDoctrine() {
+  if (env.OS_RECENT_DOCTRINE_ENABLED === 'false') return null
+  try {
+    const t0 = Date.now()
+    const results = await Promise.race([
+      neo4jRetrieval.getRecentHighPriorityNodes({ days: 14, limit: 5 }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('neo4j doctrine timeout')), 2000)
+      ),
+    ])
+    logger.info('OS Session: recent doctrine', {
+      hits: results ? results.length : 0,
+      elapsed_ms: Date.now() - t0,
+    })
+    if (!results || results.length === 0) return null
+    const lines = results.map((r, i) => {
+      const when = r.date ? r.date.slice(0, 10) : ''
+      const prio = r.priority ? ` [${r.priority}]` : ''
+      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim().slice(0, 280)}` : ''
+      return `${i + 1}. ${when} ${r.label}${prio} ${r.name}${desc}`
+    })
+    return `<recent_doctrine>\n${lines.join('\n')}\n</recent_doctrine>`
+  } catch (err) {
+    logger.warn('OS Session: recent doctrine injection failed (skipping)', { error: err.message })
     return null
   }
 }
@@ -1226,6 +1276,7 @@ async function _sendMessageImpl(content, opts = {}) {
   // "current context" before any session recovery state.
   // Fire and forget the lookup while the rest of the options build.
   const _memoryBlockPromise = _injectRelevantMemory(content, _lastAssistantTail)
+  const _doctrineBlockPromise = _injectRecentDoctrine()
 
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
@@ -1239,20 +1290,25 @@ async function _sendMessageImpl(content, opts = {}) {
     continuityParts.push(`<last_turn_breadcrumb>\n${breadcrumbBlock}\n</last_turn_breadcrumb>`)
   }
 
-  // Await memory result and splice after <now>, before restart_recovery
+  // Await memory + doctrine results and splice after <now>, before restart_recovery
+  // Order: <now> (idx 0), <recent_doctrine>, <relevant_memory>, <restart_recovery>, <recent_exchanges>
+  // Splice in reverse so the later insertions push earlier ones down correctly.
   let _memoryBlock = null
-  try {
-    _memoryBlock = await _memoryBlockPromise
-  } catch {}
+  let _doctrineBlock = null
+  try { _memoryBlock = await _memoryBlockPromise } catch {}
+  try { _doctrineBlock = await _doctrineBlockPromise } catch {}
   if (_memoryBlock) {
-    // Insert at index 1 (after <now> which is at index 0)
     continuityParts.splice(1, 0, _memoryBlock)
+  }
+  if (_doctrineBlock) {
+    continuityParts.splice(1, 0, _doctrineBlock)
   }
 
   if (continuityParts.length > 0) {
     finalPrompt = `${continuityParts.join('\n\n')}\n\n${promptWithMemory}`
     logger.info('OS Session: stitching continuity blocks into user message', {
       now: true,
+      recent_doctrine: !!_doctrineBlock,
       memory: !!_memoryBlock,
       restart_recovery: !!recoveryBlock,
       recent_exchanges: !!recentExchangeBlock,
