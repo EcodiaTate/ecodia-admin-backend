@@ -220,7 +220,7 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().default(''),
   AWS_SECRET_ACCESS_KEY: z.string().default(''),
   AWS_REGION: z.string().default('us-east-1'),
-  BEDROCK_MODEL: z.string().default('us.anthropic.claude-sonnet-4-6-20251001'),  // Bedrock fallback: Sonnet 4.6 (cheaper than Opus, Opus 4.5 is stale)
+  BEDROCK_MODEL: z.string().default('us.anthropic.claude-sonnet-4-6'),  // Bedrock fallback: Sonnet 4.6 cross-region inference profile (no date suffix — dated form doesn't exist)
   // Supabase Storage
   SUPABASE_URL: z.string().default(''),
   SUPABASE_ANON_KEY: z.string().default(''),
