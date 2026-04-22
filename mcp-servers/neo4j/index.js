@@ -201,22 +201,54 @@ server.tool('graph_context', 'Get the neighborhood of a node - everything connec
 
 // ── Merge: Upsert a node (create or update) ──
 
-server.tool('graph_merge_node', 'Create a node if it does not exist, or update it if it does. Use for dedup.', {
+server.tool('graph_merge_node', 'Create a node if it does not exist, or update it if it does. Use for dedup. Pass properties.supersedes = "prior node name" to soft-invalidate a superseded doctrine node.', {
   label: z.string().describe('Primary label'),
   match_key: z.string().describe('Property to match on (e.g. "name")'),
   match_value: z.string().describe('Value to match'),
-  properties: z.record(z.any()).optional().describe('Properties to set/update'),
+  properties: z.record(z.any()).optional().describe('Properties to set/update. Pass supersedes: "old node name" to invalidate a prior Decision/Pattern/Strategic_Direction when writing a replacement.'),
 }, async ({ label, match_key, match_value, properties }) => {
   try {
+    // Extract the supersedes hint before writing props so it is not stored as a literal property
+    const rawProps = properties || {}
+    const supersededName = typeof rawProps.supersedes === 'string' && rawProps.supersedes.trim()
+      ? rawProps.supersedes.trim()
+      : null
+    const props = { ...rawProps }
+    delete props.supersedes
+
     const result = await run(
       `MERGE (n:\`${label}\` {${match_key}: $matchVal})
        ON CREATE SET n.created_at = datetime(), n += $props
        ON MATCH SET n.updated_at = datetime(), n += $props
        RETURN n, elementId(n) AS nodeId`,
-      { matchVal: match_value, props: properties || {} }
+      { matchVal: match_value, props }
     )
     const nodeId = result[0]?.nodeId
-    // Fire-and-forget write-time edge extraction (non-blocking, does NOT delay response)
+
+    // Supersession: soft-invalidate the named prior doctrine node (runs before Tier-4a extraction)
+    let supersessionResult = []
+    if (supersededName && nodeId) {
+      try {
+        const superseded = await run(
+          `MATCH (old { name: $supersededName })
+           WHERE (old:Decision OR old:Pattern OR old:Strategic_Direction)
+             AND old.t_invalid_from IS NULL
+             AND elementId(old) <> $newNodeId
+           SET old.t_invalid_from = datetime(),
+               old.superseded_by_id = $newNodeId
+           RETURN old.name AS invalidated_name, elementId(old) AS invalidated_id`,
+          { supersededName, newNodeId: nodeId }
+        )
+        supersessionResult = superseded.map(r => r.invalidated_name).filter(Boolean)
+        if (supersessionResult.length === 0) {
+          console.warn(`[graph_merge_node] supersedes hint "${supersededName}" matched no eligible nodes`)
+        }
+      } catch (supErr) {
+        console.warn(`[graph_merge_node] supersession failed for "${supersededName}":`, supErr?.message)
+      }
+    }
+
+    // Fire-and-forget write-time edge extraction / Tier-4a (non-blocking, does NOT delay response)
     if (process.env.NEO4J_WRITE_TIME_EXTRACTION_ENABLED === 'true' && nodeId) {
       const apiUrl = process.env.ECODIA_API_URL || 'http://localhost:3001'
       fetch(`${apiUrl}/api/kg/extract-and-write`, {
@@ -228,7 +260,13 @@ server.tool('graph_merge_node', 'Create a node if it does not exist, or update i
         body: JSON.stringify({ nodeId }),
       }).catch(err => console.error('[graph_merge_node] extract-and-write failed:', err?.message))
     }
-    return { content: [{ type: 'text', text: JSON.stringify(result[0]?.n || {}, null, 2) }] }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ node: result[0]?.n || {}, supersedes: supersessionResult }, null, 2),
+      }],
+    }
   } catch (err) {
     if (isConnectionError(err)) {
       await bufferWrite('graph_merge_node', { label, match_key, match_value, properties }, err.message)

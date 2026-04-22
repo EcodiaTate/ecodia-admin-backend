@@ -17,6 +17,11 @@ const neo4j = require('neo4j-driver')
 // Labels we want to retrieve (noise labels excluded)
 const DEFAULT_LABELS = ['Pattern', 'Decision', 'Episode', 'Strategic_Direction', 'Reflection']
 
+// Bi-temporal filter for current-only retrieval. Excludes superseded nodes.
+// Nodes without t_invalid_from (Episode, Reflection, etc.) evaluate to NULL IS NULL = true,
+// so non-doctrine labels are never filtered out.
+const CURRENT_ONLY_CLAUSE = '(n.t_invalid_from IS NULL OR n.t_invalid_from > datetime())'
+
 /**
  * Embed a text string via OpenAI text-embedding-3-small.
  * Returns null if embedding fails.
@@ -55,6 +60,9 @@ async function semanticSearch(query, opts = {}) {
   const limit = opts.limit ?? 3
   const minScore = opts.minScore ?? 0.70
   const labels = opts.labels ?? DEFAULT_LABELS
+  const onlyCurrent = opts.onlyCurrent !== false
+  // Vector query uses `node` as the variable name; adapt the clause accordingly
+  const currentFilter = onlyCurrent ? `AND ${CURRENT_ONLY_CLAUSE.replace(/\bn\./g, 'node.')}` : ''
 
   const embedding = await embedText(query)
   if (!embedding) return []
@@ -68,6 +76,7 @@ async function semanticSearch(query, opts = {}) {
       `CALL db.index.vector.queryNodes('node_embeddings', $k, $queryVector) YIELD node, score
        WHERE any(lbl IN labels(node) WHERE lbl IN $labels)
          AND score >= $minScore
+         ${currentFilter}
        RETURN node, labels(node) AS lbls, score
        ORDER BY score DESC
        LIMIT $limit`,
@@ -169,6 +178,8 @@ async function keywordSearch(query, opts = {}) {
   if (!env.NEO4J_URI) return []
   const limit = opts.limit ?? 10
   const labels = opts.labels ?? DEFAULT_LABELS
+  const onlyCurrent = opts.onlyCurrent !== false
+  const currentFilter = onlyCurrent ? `AND ${CURRENT_ONLY_CLAUSE}` : ''
 
   // Tokenise: lowercase, split on non-alphanumeric, drop stopwords and tokens <3 chars
   const STOPWORDS = new Set([
@@ -189,6 +200,7 @@ async function keywordSearch(query, opts = {}) {
       `MATCH (n)
        WHERE any(lbl IN labels(n) WHERE lbl IN $labels)
          AND n.name IS NOT NULL
+         ${currentFilter}
        WITH n, labels(n) AS lbls,
             toLower(coalesce(n.name, '') + ' ' + coalesce(n.description, '')) AS hay
        WITH n, lbls, hay,
@@ -296,10 +308,11 @@ async function fusedSearch(query, opts = {}) {
   const halflife = opts.recencyHalflifeDays ?? 14
   const vectorK = opts.vectorK ?? 15
   const keywordK = opts.keywordK ?? 15
+  const onlyCurrent = opts.onlyCurrent !== false
 
   const [vectorHits, keywordHits] = await Promise.all([
-    semanticSearch(query, { limit: vectorK, minScore: opts.minScore ?? 0.55, labels }),
-    keywordSearch(query, { limit: keywordK, labels }),
+    semanticSearch(query, { limit: vectorK, minScore: opts.minScore ?? 0.55, labels, onlyCurrent }),
+    keywordSearch(query, { limit: keywordK, labels, onlyCurrent }),
   ])
 
   // Build a union map of all hits
@@ -389,6 +402,8 @@ async function getRecentHighPriorityNodes(opts = {}) {
   const limit = opts.limit ?? 10
   const labels = opts.labels ?? ['Decision', 'Episode', 'Pattern']
   const priorityFilter = opts.priorityFilter ?? null
+  const onlyCurrent = opts.onlyCurrent !== false
+  const currentFilter = onlyCurrent ? `AND ${CURRENT_ONLY_CLAUSE}` : ''
 
   try {
     const records = await runQuery(
@@ -400,6 +415,7 @@ async function getRecentHighPriorityNodes(opts = {}) {
            OR (n.created_at IS NOT NULL AND n.created_at > datetime() - duration({days: $days}))
          )
          AND ($priorityFilter IS NULL OR n.priority = $priorityFilter)
+         ${currentFilter}
        RETURN n AS node, labels(n) AS lbls,
               coalesce(n.date, n.created_at) AS when,
               coalesce(n.priority, '') AS priority
