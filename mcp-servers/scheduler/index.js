@@ -152,6 +152,28 @@ server.tool('schedule_run_now', 'Fire a task immediately', {
   return { content: [{ type: 'text', text: `Task "${task.name}" fired.` }] }
 })
 
+server.tool(
+  'os_signal_handoff',
+  'Signal that the OS is at a handoff point and ready to receive queued messages from Tate. Delivers all pending queued messages as a single synthesised turn. Call this when you finish a thread and are ready for new input.',
+  {
+    summary: z.string().optional().describe('One-line description of the thread just completed. Prepended to the delivered queue batch for context.'),
+  },
+  async ({ summary }) => {
+    try {
+      const res = await fetch(`http://127.0.0.1:${API_PORT}/api/message-queue/signal-handoff`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: summary || null }),
+        signal: AbortSignal.timeout(10_000),
+      })
+      const data = await res.json().catch(() => ({}))
+      return { content: [{ type: 'text', text: JSON.stringify(data) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `signal-handoff failed: ${err.message}` }] }
+    }
+  }
+)
+
 // ── Fire a task - POST to OS session ──
 
 async function fireTask(task) {
