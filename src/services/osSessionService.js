@@ -29,7 +29,10 @@ const sessionMemory = require('./sessionMemoryService')
 const osConversationLog = require('./osConversationLog')
 const neo4jRetrieval = require('./neo4jRetrieval')
 
-// Fire quota-checks for BOTH accounts on startup to get real usage % immediately
+// Fire quota-checks for BOTH accounts on startup to get real usage % immediately.
+// Log failure — if both accounts are misconfigured, the first user message fails
+// with an opaque error. Knowing this at boot is the difference between 10s
+// diagnosis and reading PM2 logs.
 usageEnergy.refreshAllAccounts()
   .then(() => usageEnergy.getEnergy())
   .then(e => logger.info('Claude energy on startup', {
@@ -37,7 +40,7 @@ usageEnergy.refreshAllAccounts()
     recommended: e.recommendedProvider, reason: e.providerReason,
     acct1: e.accounts?.claude_max?.pctUsed, acct2: e.accounts?.claude_max_2?.pctUsed,
   }))
-  .catch(() => {})
+  .catch(err => logger.warn('Claude energy startup refresh failed', { error: err.message }))
 
 
 // ─── Conductor Architecture ─────────────────────────────────────────────────
@@ -1460,10 +1463,17 @@ async function _sendMessageImpl(content, opts = {}) {
   // Await memory + doctrine results and splice after <now>, before restart_recovery
   // Order: <now> (idx 0), <recent_doctrine>, <relevant_memory>, <restart_recovery>, <recent_exchanges>
   // Splice in reverse so the later insertions push earlier ones down correctly.
+  // Log failures at debug — these fail silently on Neo4j flakiness and the
+  // turn proceeds without injected context, but we want a breadcrumb for
+  // "why was the OS responding without its usual memory" post-hoc analysis.
   let _memoryBlock = null
   let _doctrineBlock = null
-  try { _memoryBlock = await _memoryBlockPromise } catch {}
-  try { _doctrineBlock = await _doctrineBlockPromise } catch {}
+  try { _memoryBlock = await _memoryBlockPromise } catch (err) {
+    logger.debug('OS Session: memory injection failed', { error: err.message })
+  }
+  try { _doctrineBlock = await _doctrineBlockPromise } catch (err) {
+    logger.debug('OS Session: doctrine injection failed', { error: err.message })
+  }
   if (_memoryBlock) {
     continuityParts.splice(1, 0, _memoryBlock)
   }
@@ -2085,6 +2095,23 @@ async function _sendMessageImpl(content, opts = {}) {
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
+    }
+
+    // Auto-deliver any pending queued messages now that the turn is done.
+    // Fire-and-forget: deliverPending is idempotent (no-op when queue empty)
+    // and its sendMessage call goes through _sendQueue, so it waits behind any
+    // other in-flight work. Only runs for user-visible turns — background
+    // turns (handover brief generation, heartbeats) must not drain the queue
+    // since that would trigger mid-handover delivery loops.
+    if (!suppressOutput) {
+      try {
+        const mq = require('./messageQueue')
+        mq.deliverPending({ summary: null }).catch(err => {
+          logger.debug('OS Session: post-turn queue drain failed', { error: err.message })
+        })
+      } catch (err) {
+        logger.debug('OS Session: post-turn queue drain skipped', { error: err.message })
+      }
     }
 
     // Quota check fires in background for both accounts — updates energy state from real headers
