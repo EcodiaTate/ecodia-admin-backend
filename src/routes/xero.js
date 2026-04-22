@@ -7,8 +7,12 @@ const env = require('../config/env')
 const router = Router()
 router.use(auth)
 
+// Public router - no auth required (for OAuth callback)
+const publicRouter = Router()
+
 const XERO_AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize'
 const XERO_SCOPE = 'openid profile email accounting.transactions accounting.contacts accounting.settings offline_access'
+const STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 
 // ── Status ──
 
@@ -22,15 +26,53 @@ router.get('/status', async (_req, res, next) => {
 
 // ── OAuth connect URL ──
 
-router.get('/connect', (_req, res) => {
-  const state = crypto.randomBytes(16).toString('hex')
-  const url = new URL(XERO_AUTHORIZE_URL)
-  url.searchParams.set('response_type', 'code')
-  url.searchParams.set('client_id', env.XERO_CLIENT_ID)
-  url.searchParams.set('redirect_uri', env.XERO_REDIRECT_URI)
-  url.searchParams.set('scope', XERO_SCOPE)
-  url.searchParams.set('state', state)
-  res.json({ authorize_url: url.toString() })
+router.get('/connect', async (_req, res, next) => {
+  try {
+    const state = crypto.randomBytes(16).toString('hex')
+    const url = new URL(XERO_AUTHORIZE_URL)
+    url.searchParams.set('response_type', 'code')
+    url.searchParams.set('client_id', env.XERO_CLIENT_ID)
+    url.searchParams.set('redirect_uri', env.XERO_REDIRECT_URI)
+    url.searchParams.set('scope', XERO_SCOPE)
+    url.searchParams.set('state', state)
+
+    await db`
+      INSERT INTO kv_store (key, value)
+      VALUES (${`xero.oauth_state.${state}`}, ${JSON.stringify({ issued_at: new Date().toISOString() })})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `
+
+    res.json({ authorize_url: url.toString() })
+  } catch (err) { next(err) }
+})
+
+// ── OAuth callback (public - no auth) ──
+
+publicRouter.get('/callback', async (req, res, next) => {
+  try {
+    const { code, state, error } = req.query
+    if (error) return res.status(400).send(`Xero returned error: ${error}`)
+    if (!code || !state) return res.status(400).send('Missing code or state')
+
+    const [row] = await db`SELECT value FROM kv_store WHERE key = ${`xero.oauth_state.${state}`}`
+    if (!row) return res.status(400).send('Invalid or expired state - please retry connecting from the app.')
+
+    let payload
+    try { payload = JSON.parse(row.value) } catch { payload = null }
+
+    if (!payload?.issued_at || Date.now() - new Date(payload.issued_at).getTime() > STATE_TTL_MS) {
+      await db`DELETE FROM kv_store WHERE key = ${`xero.oauth_state.${state}`}`
+      return res.status(400).send('State expired - please retry connecting from the app.')
+    }
+
+    const xeroService = require('../services/xeroService')
+    await xeroService.exchangeCode(code)
+
+    // Consume the nonce so it cannot be replayed
+    await db`DELETE FROM kv_store WHERE key = ${`xero.oauth_state.${state}`}`
+
+    res.send('Xero connected successfully. You can close this window.')
+  } catch (err) { next(err) }
 })
 
 // ── Transactions (from our DB, not live Xero) ──
@@ -112,3 +154,4 @@ router.get('/contacts', async (req, res, next) => {
 })
 
 module.exports = router
+module.exports.publicRouter = publicRouter
