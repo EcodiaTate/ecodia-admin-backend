@@ -228,7 +228,99 @@ function buildProgrammaticHooks() {
   // and graph_create_relationship in active sessions). Local d:/.code/EcodiaOS/.mcp.json
   // is drifted and missing neo4j; the VPS copy is authoritative. If you edit
   // the local .mcp.json, scp to VPS or copy from VPS before pushing.
+  // Per-session dedup: tracks injected node keys so the same node isn't
+  // surfaced more than once per session. Map<sessionId, Set<nodeKey>>.
+  // Cap per session at 100 entries; evict oldest on overflow.
+  const _preToolSeenKeys = new Map()
+
+  function _getSeenKeys(sessionId) {
+    if (!_preToolSeenKeys.has(sessionId)) {
+      _preToolSeenKeys.set(sessionId, [])
+    }
+    return _preToolSeenKeys.get(sessionId)
+  }
+
+  function _recordSeen(sessionId, keys) {
+    const seen = _getSeenKeys(sessionId)
+    for (const k of keys) {
+      seen.push(k)
+    }
+    // Evict oldest if over cap
+    if (seen.length > 100) {
+      seen.splice(0, seen.length - 100)
+    }
+  }
+
   return {
+    PreToolUse: [
+      // Context injection before high-leverage tools — runs fusedSearch against
+      // Neo4j and surfaces the top 3 relevant Patterns/Decisions/Episodes before
+      // the tool call so the model sees them in the tool-result area.
+      {
+        matcher: 'mcp__factory__start_cc_session|mcp__google-workspace__gmail_send|mcp__google-workspace__gmail_reply|mcp__stripe__create_invoice',
+        hooks: [async (input) => {
+          try {
+            const toolName = input.tool_name || ''
+            const toolInput = input.tool_input || {}
+            const sessionId = input.session_id || 'default'
+
+            // Derive search query from tool-specific fields
+            let query = ''
+            if (toolName === 'mcp__factory__start_cc_session') {
+              query = `${(toolInput.prompt || '').slice(0, 500)} ${toolInput.codebaseName || ''}`.trim()
+            } else if (toolName === 'mcp__google-workspace__gmail_send' || toolName === 'mcp__google-workspace__gmail_reply') {
+              query = `${toolInput.to || ''} ${toolInput.subject || ''}`.trim()
+            } else if (toolName === 'mcp__stripe__create_invoice') {
+              query = `${toolInput.customer_email || toolInput.customer || ''} stripe invoice`.trim()
+            }
+
+            if (!query) return {}
+
+            const results = await Promise.race([
+              neo4jRetrieval.fusedSearch(query, { limit: 3, labels: ['Pattern', 'Decision', 'Episode'] }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('PreToolUse hook timeout')), 4000)),
+            ])
+
+            if (!results || results.length === 0) return {}
+
+            // Filter already-seen nodes for this session
+            const seen = _getSeenKeys(sessionId)
+            const seenSet = new Set(seen)
+            const fresh = results.filter(r => {
+              const key = `${r.label || r.labels?.[0] || ''}|${r.name || ''}`
+              return !seenSet.has(key)
+            })
+
+            if (fresh.length === 0) return {}
+
+            // Record injected keys
+            _recordSeen(sessionId, fresh.map(r => `${r.label || r.labels?.[0] || ''}|${r.name || ''}`))
+
+            // Format context block
+            const lines = fresh.map((r, i) => {
+              const label = r.label || (Array.isArray(r.labels) ? r.labels[0] : '') || 'Node'
+              const name = r.name || '(unnamed)'
+              const desc = (r.description || r.content || '').slice(0, 180)
+              return `${i + 1}. [${label}] ${name}${desc ? ` - ${desc}...` : ''}`
+            })
+
+            const additionalContext = `<retrieval>\nRelevant Patterns/Decisions/Episodes for this tool call (Neo4j fusedSearch):\n${lines.join('\n')}\n</retrieval>`
+
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                additionalContext,
+              },
+            }
+          } catch (err) {
+            logger.warn('PreToolUse hook: retrieval failed (non-blocking)', { error: err.message })
+            return {}
+          }
+        }],
+        timeout: 4,
+      },
+    ],
+
     PostToolUse: [
       // Factory dispatch oversight — fires only when Factory session is kicked off
       {
