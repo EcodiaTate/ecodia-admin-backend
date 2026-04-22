@@ -15,6 +15,20 @@ const db = require('../config/db')
 const logger = require('../config/logger')
 const env = require('../config/env')
 
+// ── WS broadcast helper (lazy require to avoid circular init) ─────────────
+// Frontend listens for these and invalidates ['message-queue'] so the drawer
+// and pill refresh in real time instead of waiting for the next poll tick.
+function broadcastQueueEvent(kind, payload) {
+  try {
+    const { broadcast } = require('../websocket/wsManager')
+    broadcast(`message_queue:${kind}`, payload || {})
+  } catch (err) {
+    // WS manager can fail to load in tests / early boot. Queue mutations
+    // must never be blocked by a broadcast issue.
+    logger.debug(`messageQueue: broadcast failed (${kind}): ${err.message}`)
+  }
+}
+
 // ── Context snapshot ─────────────────────────────────────────────────────
 
 async function buildContextSnapshot() {
@@ -69,6 +83,7 @@ async function enqueueMessage({ body, source = 'tate', mode = 'queue', max_age_h
   `
 
   logger.info(`messageQueue: enqueued ${row.id} (source=${source}, max_age=${max_age_hours}h)`)
+  broadcastQueueEvent('enqueued', { id: row.id, queued_at: row.queued_at, source })
   return row
 }
 
@@ -145,6 +160,7 @@ async function deliverPending({ summary = null, turn_id = null, ids = null } = {
   }
 
   logger.info(`messageQueue: delivered ${pending.length} queued message(s) to OS session`)
+  broadcastQueueEvent('delivered', { count: pending.length, ids: pendingIds })
   return { delivered: pending.length, ids: pendingIds }
 }
 
@@ -177,6 +193,7 @@ async function drainIntoDirectMessage(directBody) {
 
     const preamble = `[Pending queued messages delivered opportunistically]\n${items.join('\n')}\n---\n`
     logger.info(`messageQueue: drained ${pending.length} queued message(s) into direct send`)
+    broadcastQueueEvent('delivered', { count: pending.length, ids: pendingIds, reason: 'drained_into_direct' })
     return preamble + directBody
   })
 }
@@ -187,11 +204,14 @@ async function cancelMessage(id) {
     WHERE id = ${id} AND delivered_at IS NULL AND cancelled_at IS NULL
     RETURNING id
   `
+  if (row) broadcastQueueEvent('cancelled', { id: row.id })
   return row || null
 }
 
 /**
  * Promote a specific message: mark promoted_at and deliver immediately.
+ * deliverPending() fires its own 'delivered' broadcast, so we only emit
+ * 'promoted' here for the mark-promoted state change.
  */
 async function promoteNow(id) {
   const [row] = await db`
@@ -200,6 +220,7 @@ async function promoteNow(id) {
     RETURNING id
   `
   if (!row) return { promoted: false, delivered: 0 }
+  broadcastQueueEvent('promoted', { id: row.id })
   return deliverPending({ ids: [id] })
 }
 
@@ -222,6 +243,8 @@ async function sweepAged() {
     UPDATE message_queue SET promoted_at = now()
     WHERE id = ANY(${agedIds}::uuid[]) AND promoted_at IS NULL
   `
+
+  broadcastQueueEvent('swept', { count: agedIds.length, ids: agedIds })
 
   const result = await deliverPending({
     summary: 'age sweep - messages past their max_age_hours',
