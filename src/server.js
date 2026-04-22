@@ -60,6 +60,11 @@ async function gracefulShutdown(signal) {
   } catch {}
 
   try {
+    const messageQueue = require('./services/messageQueue')
+    messageQueue.stopSweepPoller()
+  } catch {}
+
+  try {
     const tokenRefresh = require('./services/claudeTokenRefreshService')
     tokenRefresh.stop()
   } catch {}
@@ -286,6 +291,16 @@ server.listen(env.PORT, async () => {
     schedulerPoller.start()
   } catch (err) {
     logger.warn('Scheduler poller failed to start', { error: err.message })
+  }
+
+  // ── Boot: Message Queue Sweep ─────────────────────────────────────
+  // Promotes and delivers any messages that have exceeded their max_age_hours.
+  // Runs every 30 minutes in-process (backend-internal, does not require OS session).
+  try {
+    const messageQueue = require('./services/messageQueue')
+    messageQueue.startSweepPoller()
+  } catch (err) {
+    logger.warn('Message queue sweep poller failed to start', { error: err.message })
   }
 
   // ── Boot: OS Heartbeat ────────────────────────────────────────────

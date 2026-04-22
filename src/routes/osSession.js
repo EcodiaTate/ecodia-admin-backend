@@ -17,17 +17,48 @@ const { stampTateActive } = require('../services/tateActiveGate')
 //   2. User unable to send follow-up messages while previous is processing
 //   3. "Connection error: Network Error" when HTTP times out on long sessions
 // The frontend relies on WebSocket for the actual conversation flow.
+//
+// Optional field: mode
+//   "direct" (default) — send immediately, draining any pending queued messages first
+//   "queue"            — hold until os_signal_handoff fires or max_age_hours elapses
 router.post('/message', async (req, res, next) => {
   try {
-    const { message } = req.body
+    const { message, mode, source } = req.body
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'message is required' })
     }
+
+    // queue mode: hold the message, don't wake the OS
+    if (mode === 'queue') {
+      const mq = require('../services/messageQueue')
+      const row = await mq.enqueueMessage({
+        body: message,
+        source: source || 'tate',
+        mode: 'queue',
+      })
+      return res.status(202).json({ queued_id: row.id, queued_at: row.queued_at })
+    }
+
+    if (mode && mode !== 'direct') {
+      return res.status(400).json({ error: 'mode must be "direct" or "queue"' })
+    }
+
     // Stamp Tate as active before queuing — crons stand down for 15 minutes.
     // Fire-and-forget: never block the response if this errors.
     stampTateActive().catch(err => {
       console.error('[OS Session /message] stampTateActive error:', err.message)
     })
+
+    // Drain any pending queued messages into this direct send (opportunistic delivery).
+    // Runs before returning so DB marks are atomic with the outgoing send.
+    let finalMessage = message
+    try {
+      const mq = require('../services/messageQueue')
+      finalMessage = await mq.drainIntoDirectMessage(message)
+    } catch (err) {
+      console.error('[OS Session /message] drain error:', err.message)
+    }
+
     // Return immediately — the real response streams via WebSocket
     res.json({ accepted: true, status: 'streaming' })
 
@@ -40,7 +71,7 @@ router.post('/message', async (req, res, next) => {
     // Never flip priority:true here without explicit Tate sign-off - it was
     // the cause of mid-turn session breaks where check-in messages aborted
     // long-running tool streams (logged as "Background error: write CONNECTION_ENDED").
-    osSession.sendMessage(message, { priority: false }).catch(err => {
+    osSession.sendMessage(finalMessage, { priority: false }).catch(err => {
       console.error('[OS Session /message] Background error:', err.message)
     })
   } catch (err) {
