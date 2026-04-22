@@ -44,6 +44,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [sms-segment-economics.md](sms-segment-economics.md) | sms, twilio, send_sms, mcp__sms__send_sms, sms-cost, segment, 160-chars, 70-chars, sms-concise, sms-to-tate, outbound-sms, text-tate, sms-length |
 | [authorised-branch-push-is-not-client-contact.md](authorised-branch-push-is-not-client-contact.md) | client-push, bitbucket-push, github-push, fireauditors1, ordit, client-repo, authorised-branch, pr-212, authorised-pr, client-contact-boundary, greenlight-scope, no-client-contact-without-tate-goahead, scope-envelope, delayed-push, symbolic-waiting |
 | [prefer-hooks-over-written-discipline.md](prefer-hooks-over-written-discipline.md) | hook, settings.json, discipline, surfacing, pre-commit, pre-push, remember-to, before-each, every-time, enforcement |
+| [corazon-puppeteer-first-use.md](corazon-puppeteer-first-use.md) | corazon, tailscale, puppeteer, browser, laptop-agent, screenshot, visual-verification, dashboard, admin-ui, oauth-flow, signup-flow, persistent-login, multi-step-web, 100.114.219.69, eos-laptop-agent, mac-agent, sy094, visual-monitoring, curl-alternative, headless-browser |
 
 ## Authoring rules
 
