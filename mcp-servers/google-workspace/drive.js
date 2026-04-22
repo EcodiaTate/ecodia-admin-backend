@@ -4,6 +4,28 @@
 import { z } from 'zod'
 import { getDriveClient, primaryAccount } from './auth.js'
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors 35cdb2e (numeric) and 0bec7dd (object).
+// On malformed JSON the raw value is passed through so z.array rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const arrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).describe(description)
+
+const optionalArrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return v
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).optional().describe(description)
+
 export function registerDriveTools(server) {
 
   // ── Drive: files & folders ──
@@ -139,7 +161,7 @@ export function registerDriveTools(server) {
 
   server.tool('drive_create_sheet',
     'Create a new Google Spreadsheet.',
-    { title: z.string(), sheetNames: z.array(z.string()).optional().describe('Sheet tab names (default: ["Sheet1"])'), folderId: z.string().optional(), account: z.string().optional() },
+    { title: z.string(), sheetNames: optionalArrayParam(z.string(), 'Sheet tab names (default: ["Sheet1"])'), folderId: z.string().optional(), account: z.string().optional() },
     async ({ title, sheetNames, folderId, account }) => {
       const { sheets, drive } = getDriveClient(account || primaryAccount)
       const sheetProps = (sheetNames || ['Sheet1']).map(name => ({ properties: { title: name } }))
@@ -169,7 +191,7 @@ export function registerDriveTools(server) {
 
   server.tool('drive_update_sheet',
     'Write data to a Google Sheet.',
-    { spreadsheetId: z.string(), range: z.string().describe('A1 notation range to write to'), values: z.array(z.array(z.string())).describe('2D array of values'), account: z.string().optional() },
+    { spreadsheetId: z.string(), range: z.string().describe('A1 notation range to write to'), values: arrayParam(z.array(z.string()), '2D array of values'), account: z.string().optional() },
     async ({ spreadsheetId, range, values, account }) => {
       const { sheets } = getDriveClient(account || primaryAccount)
       const res = await sheets.spreadsheets.values.update({ spreadsheetId, range, valueInputOption: 'USER_ENTERED', requestBody: { values } })
@@ -179,7 +201,7 @@ export function registerDriveTools(server) {
 
   server.tool('drive_append_sheet',
     'Append rows to the end of a Google Sheet.',
-    { spreadsheetId: z.string(), range: z.string().default('Sheet1').describe('Sheet name or range to append to'), values: z.array(z.array(z.string())).describe('Rows to append (2D array)'), account: z.string().optional() },
+    { spreadsheetId: z.string(), range: z.string().default('Sheet1').describe('Sheet name or range to append to'), values: arrayParam(z.array(z.string()), 'Rows to append (2D array)'), account: z.string().optional() },
     async ({ spreadsheetId, range, values, account }) => {
       const { sheets } = getDriveClient(account || primaryAccount)
       const res = await sheets.spreadsheets.values.append({ spreadsheetId, range, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', requestBody: { values } })

@@ -4,6 +4,19 @@
 import { z } from 'zod'
 import { getCalendarClient, primaryAccount } from './auth.js'
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors 35cdb2e (numeric) and 0bec7dd (object).
+// On malformed JSON the raw value is passed through so z.array rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const optionalArrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return v
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).optional().describe(description)
+
 export function registerCalendarTools(server) {
 
   server.tool('calendar_list_events',
@@ -30,7 +43,7 @@ export function registerCalendarTools(server) {
 
   server.tool('calendar_create_event',
     'Create a new calendar event.',
-    { summary: z.string(), start: z.string().describe('ISO 8601 dateTime or date'), end: z.string().describe('ISO 8601 dateTime or date'), description: z.string().optional(), location: z.string().optional(), attendees: z.array(z.string()).optional().describe('Attendee emails'), calendarId: z.string().default('primary'), account: z.string().optional() },
+    { summary: z.string(), start: z.string().describe('ISO 8601 dateTime or date'), end: z.string().describe('ISO 8601 dateTime or date'), description: z.string().optional(), location: z.string().optional(), attendees: optionalArrayParam(z.string(), 'Attendee emails'), calendarId: z.string().default('primary'), account: z.string().optional() },
     async ({ summary, start, end, description, location, attendees, calendarId, account }) => {
       const cal = getCalendarClient(account || primaryAccount)
       const isAllDay = !start.includes('T')

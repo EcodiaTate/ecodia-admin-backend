@@ -4,6 +4,28 @@
 import { z } from 'zod'
 import { getGmailClient, primaryAccount } from './auth.js'
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors 35cdb2e (numeric) and 0bec7dd (object).
+// On malformed JSON the raw value is passed through so z.array rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const arrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).describe(description)
+
+const optionalArrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return v
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).optional().describe(description)
+
 const INTERNAL_DOMAIN = 'ecodia.au'
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -217,7 +239,7 @@ export function registerGmailTools(server) {
 
   server.tool('gmail_modify_labels',
     'Add or remove labels from a message.',
-    { messageId: z.string().describe('Message ID'), addLabels: z.array(z.string()).optional().describe('Label IDs to add'), removeLabels: z.array(z.string()).optional().describe('Label IDs to remove'), inbox: z.string().optional().describe('Email account') },
+    { messageId: z.string().describe('Message ID'), addLabels: optionalArrayParam(z.string(), 'Label IDs to add'), removeLabels: optionalArrayParam(z.string(), 'Label IDs to remove'), inbox: z.string().optional().describe('Email account') },
     async ({ messageId, addLabels, removeLabels, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       await gmail.users.messages.modify({ userId: 'me', id: messageId, requestBody: { addLabelIds: addLabels || [], removeLabelIds: removeLabels || [] } })
@@ -227,7 +249,7 @@ export function registerGmailTools(server) {
 
   server.tool('gmail_archive',
     'Archive one or more messages (removes INBOX label).',
-    { messageIds: z.array(z.string()).describe('Message IDs to archive'), inbox: z.string().optional().describe('Email account') },
+    { messageIds: arrayParam(z.string(), 'Message IDs to archive'), inbox: z.string().optional().describe('Email account') },
     async ({ messageIds, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       for (const id of messageIds) {
@@ -275,7 +297,7 @@ export function registerGmailTools(server) {
 
   server.tool('gmail_trash',
     'Move messages to trash.',
-    { messageIds: z.array(z.string()).describe('Message IDs to trash'), inbox: z.string().optional() },
+    { messageIds: arrayParam(z.string(), 'Message IDs to trash'), inbox: z.string().optional() },
     async ({ messageIds, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       for (const id of messageIds) {
@@ -287,7 +309,7 @@ export function registerGmailTools(server) {
 
   server.tool('gmail_mark_read',
     'Mark messages as read.',
-    { messageIds: z.array(z.string()).describe('Message IDs'), inbox: z.string().optional() },
+    { messageIds: arrayParam(z.string(), 'Message IDs'), inbox: z.string().optional() },
     async ({ messageIds, inbox }) => {
       const gmail = getGmailClient(inbox || primaryAccount)
       for (const id of messageIds) {

@@ -5,6 +5,28 @@
  */
 import { z } from 'zod'
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors 35cdb2e (numeric) and 0bec7dd (object).
+// On malformed JSON the raw value is passed through so z.array rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const arrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).describe(description)
+
+const optionalArrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return v
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).optional().describe(description)
+
 const ZERNIO_API_KEY = process.env.ZERNIO_API_KEY || ''
 const BASE = 'https://zernio.com/api/v1'
 
@@ -35,13 +57,13 @@ export function registerZernioTools(server) {
     'Create and publish/schedule a post across one or more social platforms via Zernio.',
     {
       content: z.string().describe('Post text content'),
-      platforms: z.array(z.object({
+      platforms: arrayParam(z.object({
         platform: z.string().describe('Platform name: twitter, instagram, facebook, linkedin, tiktok, youtube, pinterest, reddit, bluesky, threads, telegram, whatsapp'),
         accountId: z.string().describe('Account ID from zernio_list_accounts'),
-      })).describe('Array of {platform, accountId} objects. Get accountIds from zernio_list_accounts.'),
+      }), 'Array of {platform, accountId} objects. Get accountIds from zernio_list_accounts.'),
       scheduledFor: z.string().optional().describe('ISO datetime to schedule (optional — publishes immediately if omitted)'),
       timezone: z.string().optional().describe('Timezone for scheduling (default: Australia/Sydney)'),
-      mediaUrls: z.array(z.string()).optional().describe('Array of media URLs to attach (optional)'),
+      mediaUrls: optionalArrayParam(z.string(), 'Array of media URLs to attach (optional)'),
     },
     async ({ content, platforms, scheduledFor, timezone, mediaUrls }) => {
       const body = { content, platforms, timezone: timezone || 'Australia/Sydney' }

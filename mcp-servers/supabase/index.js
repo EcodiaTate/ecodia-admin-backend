@@ -11,6 +11,18 @@ import { createClient } from '@supabase/supabase-js'
 import fs from 'fs'
 import path from 'path'
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors 35cdb2e (numeric) and 0bec7dd (object).
+// On malformed JSON the raw value is passed through so z.array rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const arrayParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.array(inner)
+  ).describe(description)
+
 const db = postgres(process.env.DATABASE_URL, {
   max: 5,
   idle_timeout: 30,
@@ -181,7 +193,7 @@ server.tool('storage_list', 'List files in a Supabase Storage bucket folder.', {
 
 server.tool('storage_delete', 'Delete one or more files from a Supabase Storage bucket.', {
   bucket: z.string().describe('Bucket name'),
-  paths: z.array(z.string()).describe('Array of file paths to delete'),
+  paths: arrayParam(z.string(), 'Array of file paths to delete'),
 }, async ({ bucket, paths }) => {
   if (!supabase) return { content: [{ type: 'text', text: 'Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not configured.' }] }
   try {
