@@ -88,7 +88,7 @@ async function enqueueMessage({ body, source = 'tate', mode = 'queue', max_age_h
   `
 
   logger.info(`messageQueue: enqueued ${row.id} (source=${source}, max_age=${max_age_hours}h)`)
-  broadcastQueueEvent('enqueued', { id: row.id, queued_at: row.queued_at, source })
+  try { broadcastQueueEvent('enqueued', { id: row.id, queued_at: row.queued_at, source }) } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) }
   return row
 }
 
@@ -155,11 +155,13 @@ async function deliverPending({ summary = null, turn_id = null, ids = null } = {
   // delivered message before the assistant response starts streaming.
   // Without this, the drawer cards silently disappear and the chat flow
   // has no cue that anything was sent.
-  broadcastQueueEvent('delivered', {
-    count: pending.length,
-    ids: pendingIds,
-    bodies,
-  })
+  try {
+    broadcastQueueEvent('delivered', {
+      count: pending.length,
+      ids: pendingIds,
+      bodies,
+    })
+  } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) }
 
   // Call sendMessage DIRECTLY rather than round-tripping through POST
   // /api/os-session/message. The HTTP handler re-runs drainIntoDirectMessage
@@ -207,7 +209,7 @@ async function drainIntoDirectMessage(directBody) {
 
     const preamble = `[Pending queued messages delivered opportunistically]\n${items.join('\n')}\n---\n`
     logger.info(`messageQueue: drained ${pending.length} queued message(s) into direct send`)
-    broadcastQueueEvent('delivered', { count: pending.length, ids: pendingIds, reason: 'drained_into_direct' })
+    try { broadcastQueueEvent('delivered', { count: pending.length, ids: pendingIds, reason: 'drained_into_direct' }) } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) }
     return preamble + directBody
   })
 }
@@ -218,7 +220,7 @@ async function cancelMessage(id) {
     WHERE id = ${id} AND delivered_at IS NULL AND cancelled_at IS NULL
     RETURNING id
   `
-  if (row) broadcastQueueEvent('cancelled', { id: row.id })
+  if (row) { try { broadcastQueueEvent('cancelled', { id: row.id }) } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) } }
   return row || null
 }
 
@@ -234,7 +236,7 @@ async function promoteNow(id) {
     RETURNING id
   `
   if (!row) return { promoted: false, delivered: 0 }
-  broadcastQueueEvent('promoted', { id: row.id })
+  try { broadcastQueueEvent('promoted', { id: row.id }) } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) }
   return deliverPending({ ids: [id] })
 }
 
@@ -258,7 +260,7 @@ async function sweepAged() {
     WHERE id = ANY(${agedIds}::uuid[]) AND promoted_at IS NULL
   `
 
-  broadcastQueueEvent('swept', { count: agedIds.length, ids: agedIds })
+  try { broadcastQueueEvent('swept', { count: agedIds.length, ids: agedIds }) } catch (err) { logger.warn('messageQueue: broadcast failed (non-fatal)', { error: err.message }) }
 
   const result = await deliverPending({
     summary: 'age sweep - messages past their max_age_hours',
