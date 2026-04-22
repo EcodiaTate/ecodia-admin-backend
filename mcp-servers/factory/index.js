@@ -206,10 +206,12 @@ server.tool(
   {
     sessionId: z.string().describe('CC session UUID to deploy'),
     notes: z.string().optional().describe('Why you approved this — recorded as a learning for future sessions'),
+    force: z.boolean().optional().describe('Bypass task-diff alignment gate. Use only when the diff intentionally diverges from the stated task (e.g. narrative-heavy prompt vs terse filenames).'),
   },
-  async ({ sessionId, notes }) => {
+  async ({ sessionId, notes, force }) => {
     const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/approve`, {
       notes: notes || '',
+      force: force === true,
     })
     if (!success) return apiErr(status, data, 'Approval failed')
     return ok(data)
