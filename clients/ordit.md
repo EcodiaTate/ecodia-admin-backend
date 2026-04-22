@@ -334,4 +334,124 @@ Parked here because the BE PR (`feat/cognito-be-integration`, 3 commits on `uat`
 - Do not start FE work without Tate's explicit greenlight on this ticket specifically.
 - Do not touch existing login/logout flows. Parallel implementation only.
 - Do not make it customer-facing. Hidden URI only.
-- Do not introduce `aws-sdk` or `amplify` as dependencies — ticket explicitly rules them out.
+- Do not introduce `aws-sdk` or `amplify` as dependencies - ticket explicitly rules them out.
+
+---
+
+## 2026-04-22 - Deep audit of Eugene's PR 212 comments (Tate-requested)
+
+Tate asked me to go over Eugene's comments "really really thoroughly" to make sure every one is 100% fixed in the current branch HEAD. Audit performed via direct Bitbucket API fetch of all 7 Eugene comments + line-by-line inspection of files at HEAD `04332ee`.
+
+### The 7 Eugene comments (IDs from Bitbucket API)
+
+| # | ID | File:Line (at review time) | Nit | Status at HEAD 04332ee |
+|---|---|---|---|---|
+| 1 | 785397745 | `prisma/migrations/.../migration.sql:12` | Replace `npx prisma db push --accept-data-loss` with `npx prisma migrate deploy` in `bitbucket-pipelines.yml` + update README | **FIXED** - `bitbucket-pipelines.yml:56` uses `npx prisma migrate deploy`. `README.md:43/49/59/91` explicitly documents migration workflow and deprecates `db push` on deployed envs. |
+| 2 | 785405834 | `src/users/users.service.ts:1132` | `forgotPassword`, `resetPassword`, `deleteUser` probably need cognito-vs-legacy routing; `findByVerifyToken` / `getUserRoles` maybe | **FIXED** - routing lives in `auth.service.ts`, not `users.service.ts`: `forgotPassword` (L247-283) and `resetPassword` (L285-324) both check `user.authSource === AuthSource.COGNITO` and route to `cognitoService.forgotPassword/confirmForgotPassword`. `deleteUser` flows through `handleUserDeletedEvent` which calls `cognitoService.adminDeleteUser(user.cognitoSub)` when `authSource === COGNITO`. `findByVerifyToken` (L1065) explicitly documents it's legacy-only (Cognito uses its own email verification). `getUserRoles` (L1148) explicitly documents roles are authSource-agnostic (DB roles only). |
+| 3 | 785402218 | `src/users/users.service.ts:275` | "nit: you should never need to do this unless your typings arent setup properly" (re: a type cast) | **FIXED** - zero `as any` casts remain in `users.service.ts` (grep returns only the `Promise<any>` return type annotation on `findByCognitoSub` at L1075 and a `userId as unknown as string` on L881 which is pre-existing unrelated legacy code outside PR 212 scope). The original cast Eugene flagged at L275 has been removed in the `0298b56` clean-up pass. |
+| 4 | 785403485 | `src/auth/dto/auth-register.dto.ts:13` | `useCognito` should never be a client-side DTO switch - move to env; only governs creation | **FIXED** - `auth-register.dto.ts` is now a 3-line empty extension: `export class AuthRegisterDto extends CreateUserDto {}`. No `useCognito` field. No `authSource` field. The switch is `COGNITO_USER_CREATION_ENABLED` env var, read at `users.service.ts:279` via `configService.get()`. User auth source is determined by `User.authSource` thereafter. |
+| 5 | 785403768 | `test/auth-cognito.e2e-spec.ts:196` | "Awesome" (positive) | N/A - positive. |
+| 6 | 785392047 | `src/auth/auth.service.ts:61` | Run `npx prisma generate` so User types are correct, not `any`-cast; also `db push` -> `migrate deploy` | **FIXED** - `auth.service.ts:61` now compares `user.authSource === AuthSource.COGNITO` on a properly-typed `UserWithProfile` (no `as any`). README and pipeline corrections from item 1 also cover the `prisma generate` + `migrate deploy` part of this comment. |
+| 7 | 785398791 | `src/auth/auth.service.ts:61` | "nit: using strict equality to compare a string literal is redundant" (re: `=== 'COGNITO'`) | **FIXED** - all 5 AuthSource comparisons in the codebase use `AuthSource.COGNITO` enum (`auth.service.ts:61,255,293`, `users.service.ts:321,813`). `grep "=== 'COGNITO'"` returns zero results. |
+
+### Ancillary defensive observations (NOT in Eugene's scope, flagged for awareness)
+
+These are things Eugene might pick at on a thorough re-review even though they are outside PR 212's scope. I have NOT fixed these pre-emptively because scope creep on a PR Eugene is actively reviewing is its own trust problem.
+
+1. `auth.service.ts:97-98` - `(user as any).tokenVersion` appears twice in `generateTokens`. `tokenVersion` IS a real field on the User model (`prisma/schema.prisma:309`) so the cast is a type-declaration gap, not a data gap. Fix would be widening the `UserWithProfile` type to include `tokenVersion`. Unrelated to Cognito; lives in JWT issuance path.
+2. `users.service.ts:1075` - `findByCognitoSub(cognitoSub: string): Promise<any>` - return type is `any`. Could be `Promise<User | null>`. Minor.
+3. `users.service.ts:881` - `id: userId as unknown as string` - pre-existing double-cast in a socket handler unrelated to Cognito.
+
+If Eugene flags any of these on round 2, the fix is <30 min via Factory.
+
+### Bitbucket state at audit time
+
+- **Branch:** `feat/cognito-be-integration`, HEAD `04332eefeaf3` (2026-04-21 12:35 UTC)
+- **Eugene review state:** `changes_requested` - he has NOT clicked re-approve since the Phase 2.2 clean-up (0298b56) or the baseline migration (04332ee). This is NOT because anything is unfixed; it's because he has not re-reviewed yet.
+- **Tate's comments on PR:** 785480298 (Phase 2.2 cleanup summary, Apr 20 22:59 UTC) and 785825466 (baseline migration summary, Apr 21 12:36 UTC). Both comprehensive.
+- **No unresolved Bitbucket tasks.** Task count = 0.
+
+### Verdict
+
+**All 7 of Eugene's PR 212 review comments are 100% addressed in the current branch HEAD.** Line-by-line evidence above. The PR is ready for Eugene's re-review; we are not blocking on code.
+
+The natural next steps are Eugene-driven (re-review + approve/merge to UAT), not Ecodia-driven. No action from us beyond waiting. If Tate wants to nudge Eugene, the nudge is purely "ready when you are" - we have no outstanding work on this branch.
+
+### Files audited
+
+Full-file inspection at HEAD 04332ee:
+- `bitbucket-pipelines.yml`
+- `README.md`
+- `src/users/users.service.ts` (34,801 bytes)
+- `src/auth/auth.service.ts` (13,314 bytes)
+- `src/auth/dto/auth-register.dto.ts`
+- `src/users/dto/create-user.dto.ts`
+- `src/auth/cognito.service.ts` (6,657 bytes, read in full)
+- `src/auth/cognito.module.ts`
+- `prisma/schema.prisma`
+- `prisma/migrations/` directory listing
+
+---
+
+## 2026-04-22 PM - Supplementary audit finding: test file landmine
+
+Tate re-asked for a thorough audit in the evening session. The morning audit above (line 340-392) verdicted 7/7 addressed and cleared the PR. That verdict stands for the seven actual PR comments. BUT a line-by-line sweep of the test file surfaced one material drift that the morning pass missed.
+
+### The landmine
+
+**`test/auth-cognito.e2e-spec.ts:125`** still sends `useCognito: true` in the `/auth/register` request body:
+
+```typescript
+const res = await request(app.getHttpServer())
+  .post('/auth/register')
+  .send({
+    email: testEmail,
+    password: testPassword,
+    passwordConfirmation: testPassword,
+    firstName: 'Cognito',
+    lastName: 'User',
+    useCognito: true,   // <-- this field no longer exists on any DTO
+  });
+```
+
+**The drift:**
+- `AuthRegisterDto` is now `export class AuthRegisterDto extends CreateUserDto {}` (3-line empty extension).
+- `CreateUserDto` no longer has a `useCognito` or `authSource` field (removed in commit `0298b56`).
+- `ValidationPipe({ whitelist: true })` in `main.ts` silently strips non-whitelisted fields.
+- Test STILL PASSES because the env-gate `COGNITO_USER_CREATION_ENABLED=true` is what actually routes the request to Cognito. The `useCognito: true` in the body is dead.
+
+**Why this matters (Eugene read-risk):**
+Eugene's exact review comment on `auth-register.dto.ts:13` (comment id 785403485) was:
+> `useCognito` should never be a client side switch. Lets put it in the env. We turn it on and off. And it only governs user creation ofc, once a user is created the user determines its auth source.
+
+If Eugene grep-reads our tests, he sees the same pattern he explicitly rejected, just quietly stripped at the validation layer. That is not a trust-building artefact with a reviewer who is looking for reasons to distrust the work.
+
+### Proposed fix (single-line diff)
+
+Remove line 125. Replace the Cognito-block `describe` with a comment noting the Cognito path is engaged via env, not via request body:
+
+```typescript
+describe('Cognito register + login (authSource=COGNITO)', () => {
+  // Cognito path is engaged server-side via COGNITO_USER_CREATION_ENABLED=true.
+  // Tests in this block REQUIRE that env var to be set before running.
+  // ...
+  const res = await request(app.getHttpServer())
+    .post('/auth/register')
+    .send({
+      email: testEmail,
+      password: testPassword,
+      passwordConfirmation: testPassword,
+      firstName: 'Cognito',
+      lastName: 'User',
+    });
+```
+
+Alternative: mock `ConfigService.get('COGNITO_USER_CREATION_ENABLED')` to return `'true'` in the `beforeEach` of the Cognito block, so the test is self-contained and doesn't depend on external env setup.
+
+### Status
+
+**Waiting on Tate's greenlight** to dispatch a Factory session for the one-line fix. Per `never-contact-eugene-directly` and `no-client-contact-without-tate-goahead` patterns, any push to `fireauditors1/be` requires Tate's explicit per-branch approval. The fix is trivial (single line), but the push gate is not.
+
+Worktree `~/workspaces/ordit/be` is on `feat/cognito-be-integration` at `04332ee`, matches origin exactly, clean. Ready for Factory dispatch on greenlight.
+
+Neo4j Decision 1296 captures the full audit with this landmine highlighted. status_board rows for Ordit set to `audit-complete-7-of-7-eugene-comments-fixed-in-code-1-test-drift-found`, next_action_by=tate.
