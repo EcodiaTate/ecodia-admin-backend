@@ -112,11 +112,34 @@ async function patchBufferRow(id, fields) {
 const BUFFERED_OK = { content: [{ type: 'text', text: JSON.stringify({ buffered: true, message: 'Neo4j unreachable — queued to graph_write_buffer for replay' }) }] }
 const unavailable = (reason) => ({ content: [{ type: 'text', text: JSON.stringify({ unavailable: true, reason }) }] })
 
+// Parse JSON-if-string, pass-through otherwise. Mirrors commit 35cdb2e's z.coerce fix
+// but for object params - MCP harness occasionally stringifies nested objects in transit.
+// On malformed JSON the raw value is passed through so z.record rejects it as a Zod error
+// rather than throwing a raw SyntaxError that would crash the MCP server.
+const objectParam = (description) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.record(z.any())
+  ).describe(description)
+
+const optionalObjectParam = (description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return undefined
+      if (typeof v !== 'string') return v
+      try { return JSON.parse(v) } catch { return v }
+    },
+    z.record(z.any()).optional()
+  ).describe(description)
+
 // ── Core: Create a node ──
 
 server.tool('graph_create_node', 'Create a node with any labels and properties. Free-form schema.', {
   labels: z.array(z.string()).describe('Node labels (e.g. ["Person", "Client"])'),
-  properties: z.record(z.any()).describe('Any properties as key-value pairs'),
+  properties: objectParam('Any properties as key-value pairs'),
 }, async ({ labels, properties }) => {
   const labelStr = labels.map(l => '`' + l + '`').join(':')
   const result = await run(
@@ -134,7 +157,7 @@ server.tool('graph_create_relationship', 'Create a relationship between two node
   to_match: z.string().describe('Cypher match clause for target node'),
   to_label: z.string().describe('Label of target node'),
   rel_type: z.string().describe('Relationship type (e.g. "WORKS_WITH", "FEELS_ABOUT", "LEARNED_FROM")'),
-  properties: z.record(z.any()).optional().describe('Optional relationship properties'),
+  properties: optionalObjectParam('Optional relationship properties'),
 }, async ({ from_match, from_label, to_match, to_label, rel_type, properties }) => {
   try {
     const props = properties ? ' SET r += $props' : ''
@@ -159,7 +182,7 @@ server.tool('graph_create_relationship', 'Create a relationship between two node
 
 server.tool('graph_query', 'Run any Cypher query. Full power, full responsibility.', {
   cypher: z.string().describe('Cypher query to execute'),
-  params: z.record(z.any()).optional().describe('Query parameters'),
+  params: optionalObjectParam('Query parameters'),
 }, async ({ cypher, params }) => {
   try {
     const result = await run(cypher, params || {})
@@ -205,7 +228,7 @@ server.tool('graph_merge_node', 'Create a node if it does not exist, or update i
   label: z.string().describe('Primary label'),
   match_key: z.string().describe('Property to match on (e.g. "name")'),
   match_value: z.string().describe('Value to match'),
-  properties: z.record(z.any()).optional().describe('Properties to set/update. Pass supersedes: "old node name" to invalidate a prior Decision/Pattern/Strategic_Direction when writing a replacement.'),
+  properties: optionalObjectParam('Properties to set/update. Pass supersedes: "old node name" to invalidate a prior Decision/Pattern/Strategic_Direction when writing a replacement.'),
 }, async ({ label, match_key, match_value, properties }) => {
   try {
     // Extract the supersedes hint before writing props so it is not stored as a literal property
