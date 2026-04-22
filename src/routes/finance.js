@@ -67,18 +67,4 @@ router.get('/summary', async (req, res, next) => {
   }
 })
 
-// GET /api/finance/xero/callback — OAuth2 callback
-router.get('/xero/callback', async (req, res, next) => {
-  try {
-    const { code } = req.query
-    if (!code) return res.status(400).json({ error: 'Missing authorization code' })
-
-    const xeroService = require('../services/xeroService')
-    await xeroService.exchangeCode(code)
-    res.send('Xero connected successfully. You can close this window.')
-  } catch (err) {
-    next(err)
-  }
-})
-
 module.exports = router
