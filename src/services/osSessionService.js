@@ -345,6 +345,10 @@ let _currentProvider = 'claude_max'  // tracks which provider the current sessio
 // each other's queries. Each sendMessage waits for the previous one to finish.
 let _sendQueue = Promise.resolve()
 
+// Tracks whether the SDK is currently performing a compaction (context rotation).
+// Set to true on compact_boundary start, false on end or next assistant/result message.
+let isCompacting = false
+
 // Consecutive-failure tracking. At 3 in a row, auto-restart ecodia-api (Tate's
 // direction Apr 21 2026: "instead of just texting/emailing me that 3 consecutive
 // calls to the chat have failed ... It should just automatically run pm2 restart
@@ -1361,6 +1365,13 @@ async function _sendMessageImpl(content, opts = {}) {
 
           // ─── Full assistant message — extract text, broadcast ─
           case 'assistant': {
+            // If compaction was in-flight and we received the next assistant turn,
+            // treat that as an implicit compaction-end signal (singular boundary case).
+            if (isCompacting) {
+              isCompacting = false
+              if (!suppressOutput) emitStatus('streaming', { sessionId: dbSessionId })
+            }
+
             const blocks = msg.message?.content || []
 
             if (!suppressOutput) {
@@ -1457,6 +1468,11 @@ async function _sendMessageImpl(content, opts = {}) {
           // ─── Result — session complete, capture final usage ───
           case 'result': {
             sawResultMessage = true
+            // Compaction must be done by the time a result arrives.
+            if (isCompacting) {
+              isCompacting = false
+              if (!suppressOutput) emitStatus('streaming', { sessionId: dbSessionId })
+            }
             if (msg.usage) {
               // result.usage is cumulative — use only for the threshold/compaction check,
               // not for logging (individual turns already logged in 'assistant' case above)
@@ -1520,8 +1536,33 @@ async function _sendMessageImpl(content, opts = {}) {
             break
           }
 
+          case 'compact_boundary': {
+            // SDK emits compact_boundary during context compaction (summarisation + rotation).
+            // Log full payload on first receipt so we can see the shape in production logs.
+            logger.info('OS Session: compact_boundary received', { msg: JSON.stringify(msg).slice(0, 500) })
+
+            // compact_boundary events may come as a start/end pair or as a single marker.
+            // The `boundary_type` field (if present) distinguishes them. We treat:
+            //   start (or undefined) -> compaction underway
+            //   end                  -> compaction finished
+            const boundaryType = msg.boundary_type || msg.type_detail || null
+            if (boundaryType === 'end') {
+              if (isCompacting) {
+                isCompacting = false
+                if (!suppressOutput) emitStatus('streaming', { sessionId: dbSessionId })
+              }
+            } else {
+              // start or unknown single marker - begin compacting
+              if (!isCompacting) {
+                isCompacting = true
+                if (!suppressOutput) emitStatus('compacting', { sessionId: dbSessionId })
+              }
+            }
+            break
+          }
+
           default:
-            // Other message types (user replay, compact_boundary, etc.) — ignore
+            // Other message types (user_replay, etc.) — ignore
             break
         }
       } catch (msgErr) {
@@ -1984,6 +2025,12 @@ async function sendMessage(content, opts = {}) {
       // can finalise whatever partial content was visible.
       broadcast('os-session:complete', { sessionId: null, code: 0, interrupted: true })
     }
+  }
+
+  // Acknowledge to the frontend when a user-visible message is about to queue behind
+  // an in-flight turn (active query running + not priority + not a suppressed internal msg).
+  if (activeQuery && !opts.priority && !opts.suppressOutput) {
+    emitStatus('queued', { sessionId: null, queuedBehind: isCompacting ? 'compaction' : 'active_query' })
   }
 
   const promise = _sendQueue.then(() => _sendMessageWithWatchdog(content, opts))
