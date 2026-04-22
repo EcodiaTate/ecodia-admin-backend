@@ -76,7 +76,7 @@ async function triggerAutoWakeIfNeeded() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: `⚡ Back. Handoff state from ${ageMinutes} minutes ago is in your system prompt. Carry on with whatever's most valuable right now. If external blockers are all that's active, default to self-evolution, research, or creative work per CLAUDE.md — don't idle waiting for Tate.`,
+          message: `⚡ Back. Handoff state from ${ageMinutes} minutes ago is in your system prompt. Carry on with whatever's most valuable right now. If external blockers are all that's active, default to self-evolution, research, or creative work per CLAUDE.md - don't idle waiting for Tate.`,
         }),
       })
     } catch (fetchErr) {
