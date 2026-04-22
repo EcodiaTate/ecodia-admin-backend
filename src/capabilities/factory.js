@@ -219,12 +219,14 @@ registry.registerMany([
       sessionId: { type: 'string', required: true, description: 'CC session UUID to deploy' },
       notes: { type: 'string', required: false, description: 'Notes about why this was approved' },
       confidence: { type: 'number', required: false, description: 'Confidence score 0.0-1.0 (uses validation score if omitted)' },
+      force: { type: 'boolean', required: false, description: 'Bypass task-diff mismatch gate. Use only when the diff intentionally diverges from the stated task (e.g. session pivoted mid-flight).' },
     },
     handler: async (params) => {
       const oversight = require('../services/factoryOversightService')
       return oversight.runDeployFromOSApproval(params.sessionId, {
         notes: params.notes || '',
         confidence: params.confidence ?? null,
+        force: params.force === true,
       })
     },
   },

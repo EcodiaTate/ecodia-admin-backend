@@ -1463,6 +1463,9 @@ async function prepareReviewContext(sessionId) {
   await db`UPDATE cc_sessions SET pipeline_stage = 'awaiting_review' WHERE id = ${sessionId}`
   broadcastToSession(sessionId, 'cc:stage', { stage: 'awaiting_review', progress: 0.5 })
 
+  const { computeTaskDiffAlignment } = require('./taskDiffAlignment')
+  const taskDiffAlignment = computeTaskDiffAlignment(session.initial_prompt, filesChanged)
+
   return {
     sessionId,
     codebaseName: session.codebase_name,
@@ -1474,10 +1477,11 @@ async function prepareReviewContext(sessionId) {
     diff: diff.slice(0, 6000),
     learnings,
     repoPath: cwd,
+    taskDiffAlignment,
   }
 }
 
-async function runDeployFromOSApproval(sessionId, { notes = '', confidence = null } = {}) {
+async function runDeployFromOSApproval(sessionId, { notes = '', confidence = null, force = false } = {}) {
   const [session] = await db`
     SELECT cs.*, cb.name AS codebase_name, cb.repo_path, cb.meta AS codebase_meta
     FROM cc_sessions cs LEFT JOIN codebases cb ON cs.codebase_id = cb.id
@@ -1485,6 +1489,15 @@ async function runDeployFromOSApproval(sessionId, { notes = '', confidence = nul
   `
   if (!session) throw new Error(`Session not found: ${sessionId}`)
   if (session.pipeline_stage === 'deployed') return { alreadyDeployed: true }
+
+  // Task-diff alignment gate — catch sessions where the diff is unrelated to the stated task
+  if (!force) {
+    const { computeTaskDiffAlignment } = require('./taskDiffAlignment')
+    const alignment = computeTaskDiffAlignment(session.initial_prompt, session.files_changed)
+    if (alignment.flagged) {
+      throw new Error(`Task-diff mismatch: ${alignment.reason}. Re-dispatch with corrected prompt, or pass { force: true } to override.`)
+    }
+  }
 
   const finalConfidence = confidence ?? session.confidence_score ?? 0.8
   await db`UPDATE cc_sessions SET confidence_score = ${finalConfidence}, pipeline_stage = 'deploying' WHERE id = ${sessionId}`
