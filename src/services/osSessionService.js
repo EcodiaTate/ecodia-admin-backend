@@ -926,9 +926,10 @@ async function _injectRecentDoctrine() {
 }
 
 async function _sendMessageImpl(content, opts = {}) {
+  console.log("[DBG] IMPL-ENTER");
   const { suppressOutput = false } = opts
   const retryDepth = opts._retryDepth || 0
-  const queryFn = await getQuery()
+  const queryFn = await getQuery(); console.log("[DBG] POST-GETQUERY")
 
   // Kill any active query — SDK query() is one-shot, so each message needs a new call.
   // Session continuity is maintained via options.resume + ccSessionId.
@@ -938,7 +939,7 @@ async function _sendMessageImpl(content, opts = {}) {
   // IMPORTANT: Reuse existing rows even when cc_cli_session_id is missing.
   // Previously this created a new row when session ID was cleared (by stale retry,
   // provider switch, etc.), orphaning the old row and losing all context.
-  let session = await getOSSession()
+  let session = await getOSSession(); console.log("[DBG] POST-GETSESSION")
   let isResume = false
 
   if (session?.cc_cli_session_id) {
@@ -950,13 +951,14 @@ async function _sendMessageImpl(content, opts = {}) {
     await updateOSSession(session.id, { status: 'running' })
   } else {
     // No OS session row at all — create one
-    session = await createOSSession()
+    session = await createOSSession(); console.log("[DBG] POST-CREATE")
   }
 
   const dbSessionId = session.id
   if (!suppressOutput) {
     emitStatus('streaming', { sessionId: dbSessionId })
 
+<<<<<<< Updated upstream
     // Emit current energy level so frontend knows if thinking mode is active.
     // FIRE-AND-FORGET — must never block turn startup. Production incident
     // 2026-04-23: an Anthropic headers probe inside getEnergy() stalled
@@ -967,6 +969,13 @@ async function _sendMessageImpl(content, opts = {}) {
     usageEnergy.getEnergy()
       .then(energyNow => { try { broadcast('os-session:energy', energyNow) } catch {} })
       .catch(err => logger.debug('OS Session: energy emit failed (non-fatal)', { error: err.message }))
+=======
+    // Emit current energy level so frontend knows if thinking mode is active
+    try {
+      console.log("[DBG] PRE-ENERGY"); const energyNow = await usageEnergy.getEnergy(); console.log("[DBG] POST-ENERGY")
+      broadcast('os-session:energy', energyNow)
+    } catch {}
+>>>>>>> Stashed changes
   }
 
   // cwd must contain .mcp.json and CLAUDE.md
@@ -2300,6 +2309,7 @@ const TURN_WATCHDOG_USER_MS = 15 * 60 * 1000
 const TURN_WATCHDOG_BG_MS = 8 * 60 * 1000
 
 async function _sendMessageWithWatchdog(content, opts) {
+  console.log("[DBG] WATCHDOG-ENTER");
   const isBackground = !!opts.suppressOutput
   const timeoutMs = isBackground ? TURN_WATCHDOG_BG_MS : TURN_WATCHDOG_USER_MS
   let watchdogFired = false
@@ -2376,6 +2386,7 @@ async function _sendMessageWithWatchdog(content, opts) {
 // they abort the active query, flush the queue, and send immediately.
 // The CC session resumes via session_id so no context is lost.
 async function sendMessage(content, opts = {}) {
+  console.log("[DBG] SM-ENTER priority="+!!opts.priority+" activeQuery="+!!activeQuery);
   // Input size guard — reject pathologically huge prompts at the door. The
   // SDK technically accepts them but they cause unpredictable tool/CLI
   // behaviour and make debugging "it just froze" nearly impossible. 200KB
