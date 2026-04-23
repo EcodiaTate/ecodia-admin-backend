@@ -2133,7 +2133,7 @@ async function _sendMessageImpl(content, opts = {}) {
     // Auto-handover: when conversation exceeds threshold, generate a handover brief
     // and start a fresh session. Prevents unbounded context growth which multiplies
     // token cost on every subsequent turn (resume re-sends full history).
-    const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '250000', 10)
+    const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '800000', 10)
     if (totalTokens > handoverThreshold && !suppressOutput) {
       logger.info('OS Session: triggering auto-handover', { totalTokens, threshold: handoverThreshold })
       autoHandover().catch(err => logger.error('Auto-handover failed', { error: err.message }))
