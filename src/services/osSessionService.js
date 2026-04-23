@@ -2292,17 +2292,23 @@ async function _sendMessageImpl(content, opts = {}) {
 }
 
 // Safe swap helper — atomically takes the current activeQuery, nulls the ref,
-// then attempts close(). Prevents the orphan-reference bug where a close() throw
-// leaves activeQuery pointing at a dead query, so the NEXT turn thinks a query
-// is still running and double-closes.
+// then attempts close() in the background. Prevents the orphan-reference bug
+// where a close() throw leaves activeQuery pointing at a dead query, so the
+// NEXT turn thinks a query is still running and double-closes.
+//
+// close() is fire-and-forget: if the SDK's close() returns a promise that
+// hangs, or throws async, we still proceed immediately. The caller only cares
+// that activeQuery is nulled — the actual shutdown of the SDK query is best-
+// effort and must never block the next turn from starting.
 function _abortActiveQuery(reason) {
   const q = activeQuery
   activeQuery = null
   activeQuerySuppressed = false
   if (q) {
-    try { q.close() } catch (err) {
-      logger.debug('activeQuery.close() threw (ignored)', { reason, error: err?.message })
-    }
+    // Wrap sync-throw AND async-throw paths; both get swallowed.
+    Promise.resolve()
+      .then(() => q.close())
+      .catch(err => logger.debug('activeQuery.close() rejected (ignored)', { reason, error: err?.message }))
   }
 }
 
@@ -2326,48 +2332,57 @@ async function _sendMessageWithWatchdog(content, opts) {
   let watchdogTimer = null
 
   const watchdogPromise = new Promise((resolve) => {
-    watchdogTimer = setTimeout(async () => {
+    watchdogTimer = setTimeout(() => {
       watchdogFired = true
       logger.error('OS Session: global turn watchdog fired — force-aborting', {
         timeoutMs, isBackground, contentLen: content?.length,
       })
-      try {
-        osIncident.log({
-          kind: 'tool_hung',
-          severity: 'error',
-          component: 'os_session',
-          message: `global turn watchdog fired after ${Math.round(timeoutMs / 1000)}s`,
-          context: { isBackground, contentLen: content?.length || 0 },
-        })
-      } catch {}
       _abortActiveQuery('turn_watchdog')
-      if (!isBackground) {
-        try {
-          emitOutput({ type: 'error', content: `Turn timed out after ${Math.round(timeoutMs / 60000)} min. The OS has been force-reset and will accept new messages.` })
-          emitStatus('error', { error: 'turn_watchdog' })
-          broadcast('os-session:complete', { sessionId: null, code: 1, watchdogged: true })
-        } catch {}
-      }
-      // Write a failure-path breadcrumb so auto-wake can rehydrate if this
-      // immediately precedes a restart.
-      try {
-        const TAIL_CHARS = 600
-        const userTail = content && content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : (content || '')
-        await db`
-          INSERT INTO kv_store (key, value)
-          VALUES ('session.last_breadcrumb', ${JSON.stringify({
-            ts: Date.now(),
-            user_tail: userTail,
-            assistant_tail: '[turn_watchdog — global timeout fired, turn force-aborted]',
-            provider: _currentProvider,
-            failed: true,
-          })})
-          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-        `
-      } catch (bcErr) {
-        logger.warn('watchdog breadcrumb write failed', { error: bcErr.message })
-      }
+
+      // RESOLVE IMMEDIATELY so the outer Promise.race unblocks and _sendQueue
+      // advances — even if the cleanup awaits below hang (e.g., DB contention,
+      // logger backpressure). Prior version awaited a DB breadcrumb write
+      // BEFORE resolving; when Postgres got contended, the watchdog itself
+      // wedged and the queue locked forever (2026-04-23 incident).
       resolve({ sessionId: null, ccCliSessionId: null, code: 1, text: 'Error: turn watchdog timeout', watchdogged: true })
+
+      // Fire-and-forget cleanup — runs in the background, never blocks the
+      // queue's forward progress.
+      ;(async () => {
+        try {
+          osIncident.log({
+            kind: 'tool_hung',
+            severity: 'error',
+            component: 'os_session',
+            message: `global turn watchdog fired after ${Math.round(timeoutMs / 1000)}s`,
+            context: { isBackground, contentLen: content?.length || 0 },
+          })
+        } catch {}
+        if (!isBackground) {
+          try {
+            emitOutput({ type: 'error', content: `Turn timed out after ${Math.round(timeoutMs / 60000)} min. The OS has been force-reset and will accept new messages.` })
+            emitStatus('error', { error: 'turn_watchdog' })
+            broadcast('os-session:complete', { sessionId: null, code: 1, watchdogged: true })
+          } catch {}
+        }
+        try {
+          const TAIL_CHARS = 600
+          const userTail = content && content.length > TAIL_CHARS ? '…' + content.slice(-TAIL_CHARS) : (content || '')
+          await db`
+            INSERT INTO kv_store (key, value)
+            VALUES ('session.last_breadcrumb', ${JSON.stringify({
+              ts: Date.now(),
+              user_tail: userTail,
+              assistant_tail: '[turn_watchdog — global timeout fired, turn force-aborted]',
+              provider: _currentProvider,
+              failed: true,
+            })})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+          `
+        } catch (bcErr) {
+          logger.warn('watchdog breadcrumb write failed', { error: bcErr.message })
+        }
+      })()
     }, timeoutMs)
     watchdogTimer.unref?.()
   })
@@ -2446,10 +2461,42 @@ async function sendMessage(content, opts = {}) {
 }
 
 // ── Get current session status ──
+//
+// Auto-heals zombie sessions: if the DB row says `running` but no activeQuery
+// is set in memory (process restarted mid-turn, or watchdog fired but DB was
+// contended), mark the row complete so the UI doesn't report a ghost turn
+// forever. Runs opportunistically per status call — no dedicated cron needed.
+const ZOMBIE_SESSION_MAX_AGE_MS = 20 * 60 * 1000 // 20 min — past the 15-min user watchdog
 
 async function getStatus() {
   const session = await getOSSession()
   const provider = _currentProvider
+
+  // Zombie-session auto-heal: stale `running` row + no in-memory activeQuery.
+  if (session && session.status === 'running' && !activeQuery && session.started_at) {
+    const ageMs = Date.now() - new Date(session.started_at).getTime()
+    if (ageMs > ZOMBIE_SESSION_MAX_AGE_MS) {
+      logger.warn('OS Session: zombie session auto-healed (marking complete)', {
+        sessionId: session.id,
+        ageMs,
+        startedAt: session.started_at,
+      })
+      // Fire-and-forget — never block status reply on a DB write
+      updateOSSession(session.id, { status: 'complete' }).catch(err => {
+        logger.debug('OS Session: zombie auto-heal DB update failed', { error: err.message })
+      })
+      // Return the expected post-heal shape so callers don't see the zombie
+      return {
+        active: false,
+        sessionId: session.id,
+        ccCliSessionId: session.cc_cli_session_id || null,
+        status: 'complete',
+        startedAt: session.started_at,
+        provider,
+      }
+    }
+  }
+
   return {
     active: !!activeQuery,
     sessionId: session?.id || null,

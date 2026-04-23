@@ -9,22 +9,42 @@ const env = require('./env')
 // Uses a lazy require + fire-and-forget to avoid circular dependency issues
 // and to never block the logger.
 
+// Rate-limit + fire-and-forget hardening — 2026-04-23 incident:
+// A flood of git-error logs (from factoryOversightService aborting non-
+// existent cherry-picks) saturated this transport. Its setImmediate() queue
+// backed up to the point where winston's backpressure wedged every subsequent
+// logger.info call — which froze every new OS turn because "OS Session
+// starting" couldn't log. That hung the entire queue indefinitely.
+//
+// Hardening:
+//   1. callback() fires SYNCHRONOUSLY so winston never blocks on this transport
+//   2. Rate limiter drops excess writes rather than queueing unbounded setImmediates
+//   3. DB insert and WS broadcast are both fire-and-forget with internal timeouts
+//   4. wsManager broadcast wrapped so it can never throw sync
+const DB_TRANSPORT_RATE_LIMIT = 10     // max writes per window
+const DB_TRANSPORT_RATE_WINDOW_MS = 1_000
+const DB_TRANSPORT_INSERT_TIMEOUT_MS = 2_000
+
 class DBErrorTransport extends Transport {
   constructor(opts) {
     super(opts)
     this.name = 'db-error'
     this._ready = false
     this._queue = []
-    this._retryQueue = [] // errors that failed to write to DB
+    this._retryQueue = []
     this._retryTimer = null
+    // Rate-limit bookkeeping
+    this._rateWindowStart = Date.now()
+    this._rateCount = 0
+    this._rateDropped = 0
 
     // Defer DB require until after module graph is fully loaded
     setImmediate(() => {
       try {
         this._db = require('./db')
         this._ready = true
-        // Flush any queued writes
-        for (const info of this._queue) this._write(info)
+        // Flush any queued writes (honours rate limit)
+        for (const info of this._queue) this._dispatch(info)
         this._queue = []
       } catch {
         // DB unavailable — degrade silently
@@ -33,14 +53,45 @@ class DBErrorTransport extends Transport {
   }
 
   log(info, callback) {
+    // ALWAYS call callback synchronously. Winston uses this to know the
+    // transport has accepted the log — any delay here accumulates backpressure
+    // across every transport on every logger call.
+    if (callback) callback()
+
+    // Actual work happens on the next tick so we never block the caller.
     setImmediate(() => {
       if (!this._ready) {
-        this._queue.push(info)
-      } else {
-        this._write(info)
+        // Bounded buffer — early boot only
+        if (this._queue.length < 100) this._queue.push(info)
+        return
       }
+      this._dispatch(info)
     })
-    callback()
+  }
+
+  _checkRate() {
+    const now = Date.now()
+    if (now - this._rateWindowStart >= DB_TRANSPORT_RATE_WINDOW_MS) {
+      if (this._rateDropped > 0) {
+        // Emit a summary log (via console.warn — never recurse through winston)
+        // eslint-disable-next-line no-console
+        console.warn(`[logger] DBErrorTransport dropped ${this._rateDropped} log(s) in last ${DB_TRANSPORT_RATE_WINDOW_MS}ms (rate limit ${DB_TRANSPORT_RATE_LIMIT}/window)`)
+      }
+      this._rateWindowStart = now
+      this._rateCount = 0
+      this._rateDropped = 0
+    }
+    if (this._rateCount >= DB_TRANSPORT_RATE_LIMIT) {
+      this._rateDropped++
+      return false
+    }
+    this._rateCount++
+    return true
+  }
+
+  _dispatch(info) {
+    if (!this._checkRate()) return
+    this._write(info)
   }
 
   _write(info) {
@@ -56,52 +107,44 @@ class DBErrorTransport extends Transport {
       delete meta.service
       delete meta.stack
 
-      db`
-        INSERT INTO app_errors (level, message, service, module, path, method, stack, meta)
-        VALUES (
-          ${info.level || 'error'},
-          ${(info.message || '').slice(0, 2000)},
-          ${info.service || null},
-          ${info.module || meta.domain || null},
-          ${info.path || null},
-          ${info.method || null},
-          ${info.stack ? String(info.stack).slice(0, 5000) : null},
-          ${JSON.stringify(meta)}
-        )
-      `.catch(() => {
-          // DB write failed — queue for retry (keep last 50 to avoid unbounded growth)
-          if (this._retryQueue.length < 50) {
-            this._retryQueue.push(info)
-            this._scheduleRetry()
-          }
-        })
+      // Fire-and-forget with a hard timeout so a contended pool never wedges
+      // anything. If the insert doesn't complete in 2s, we drop the entry
+      // rather than retry (retry-queueing was the 2026-04-23 backpressure bug).
+      Promise.race([
+        db`
+          INSERT INTO app_errors (level, message, service, module, path, method, stack, meta)
+          VALUES (
+            ${info.level || 'error'},
+            ${(info.message || '').slice(0, 2000)},
+            ${info.service || null},
+            ${info.module || meta.domain || null},
+            ${info.path || null},
+            ${info.method || null},
+            ${info.stack ? String(info.stack).slice(0, 5000) : null},
+            ${JSON.stringify(meta)}
+          )
+        `,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('db insert timeout')), DB_TRANSPORT_INSERT_TIMEOUT_MS)),
+      ]).catch(() => { /* drop silently — never recurse through winston */ })
 
-      // Broadcast error to WebSocket so Cortex sees it immediately,
-      // not on the next 15-min maintenance worker poll cycle.
-      try {
-        const wsManager = require('../websocket/wsManager')
-        wsManager.broadcast('app:error', {
-          level: info.level || 'error',
-          message: (info.message || '').slice(0, 500),
-          module: info.module || meta.domain || null,
-          service: info.service || null,
-          timestamp: info.timestamp || new Date().toISOString(),
-        })
-      } catch {
-        // WebSocket may not be initialised yet during startup
-      }
+      // Broadcast error to WS (also fire-and-forget, also guarded)
+      setImmediate(() => {
+        try {
+          const wsManager = require('../websocket/wsManager')
+          wsManager.broadcast('app:error', {
+            level: info.level || 'error',
+            message: (info.message || '').slice(0, 500),
+            module: info.module || meta.domain || null,
+            service: info.service || null,
+            timestamp: info.timestamp || new Date().toISOString(),
+          })
+        } catch {
+          // WebSocket not initialised, or broadcast threw — ignore
+        }
+      })
     } catch {
       // absolutely never throw from a logger
     }
-  }
-
-  _scheduleRetry() {
-    if (this._retryTimer) return
-    this._retryTimer = setTimeout(() => {
-      this._retryTimer = null
-      const batch = this._retryQueue.splice(0)
-      for (const info of batch) this._write(info)
-    }, 30_000) // retry after 30s
   }
 }
 

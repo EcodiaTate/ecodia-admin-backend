@@ -34,17 +34,34 @@ const retry = require('../utils/retry')
 // sit uncommitted and cause merge conflicts when the repo is pulled.
 function cleanWorkingDir(repoPath) {
   if (!repoPath) return
+  // Default stderr behaviour on execFileSync is to INHERIT the parent's stderr,
+  // so git's "error: no cherry-pick or revert in progress" floods the PM2
+  // error log every time cleanup runs (which is most sessions). Explicitly
+  // pipe stdio so stderr is captured in the thrown error instead.
+  const quiet = { cwd: repoPath, encoding: 'utf-8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }
   try {
-    // Abort any in-progress rebase/merge/cherry-pick that could block cleanup
-    for (const op of ['rebase', 'merge', 'cherry-pick']) {
-      try { execFileSync('git', [op, '--abort'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 }) } catch {}
+    // Only abort operations that are actually in progress — skips the noisy
+    // "no X in progress" throw-and-swallow loop we used to do for every op.
+    const fs = require('fs')
+    const path = require('path')
+    const gitDir = path.join(repoPath, '.git')
+    const inProgress = {
+      rebase: fs.existsSync(path.join(gitDir, 'rebase-apply')) || fs.existsSync(path.join(gitDir, 'rebase-merge')),
+      merge: fs.existsSync(path.join(gitDir, 'MERGE_HEAD')),
+      'cherry-pick': fs.existsSync(path.join(gitDir, 'CHERRY_PICK_HEAD')),
+    }
+    for (const [op, active] of Object.entries(inProgress)) {
+      if (!active) continue
+      try { execFileSync('git', [op, '--abort'], quiet) } catch (err) {
+        logger.debug(`git ${op} --abort failed (ignored)`, { error: err.message, repoPath })
+      }
     }
     // Reset staged changes, discard working dir edits, remove untracked files
-    execFileSync('git', ['reset', 'HEAD', '--'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
-    execFileSync('git', ['checkout', '.'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
-    execFileSync('git', ['clean', '-fd'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 })
+    execFileSync('git', ['reset', 'HEAD', '--'], quiet)
+    execFileSync('git', ['checkout', '.'], quiet)
+    execFileSync('git', ['clean', '-fd'], quiet)
     // Drop any leftover stash entries from failed syncs
-    try { execFileSync('git', ['stash', 'clear'], { cwd: repoPath, encoding: 'utf-8', timeout: 10_000 }) } catch {}
+    try { execFileSync('git', ['stash', 'clear'], quiet) } catch {}
     logger.info(`Cleaned working directory after rejected session`, { repoPath })
   } catch (err) {
     logger.warn(`Failed to clean working directory`, { repoPath, error: err.message })
