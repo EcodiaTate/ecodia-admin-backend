@@ -25,7 +25,6 @@ const { stampTateActive } = require('../services/tateActiveGate')
 //   "direct" (default) — send immediately, draining any pending queued messages first
 //   "queue"            — hold until os_signal_handoff fires or max_age_hours elapses
 router.post('/message', async (req, res, next) => {
-    console.log('[DBG-POST]', JSON.stringify({ mode: req.body?.mode, len: req.body?.message?.length, ip: req.ip }))
   try {
     const { message, mode, source } = req.body
     if (!message || typeof message !== 'string') {
@@ -75,7 +74,7 @@ router.post('/message', async (req, res, next) => {
     // Never flip priority:true here without explicit Tate sign-off - it was
     // the cause of mid-turn session breaks where check-in messages aborted
     // long-running tool streams (logged as "Background error: write CONNECTION_ENDED").
-    console.log("[DBG] CALLING-SM len="+finalMessage.length); osSession.sendMessage(finalMessage, { priority: false }).catch(err => {
+    osSession.sendMessage(finalMessage, { priority: false }).catch(err => {
       logger.error('OS Session /message: background sendMessage failed', { error: err.message, stack: err.stack })
     })
   } catch (err) {

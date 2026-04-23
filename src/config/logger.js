@@ -53,12 +53,16 @@ class DBErrorTransport extends Transport {
   }
 
   log(info, callback) {
+<<<<<<< Updated upstream
     // ALWAYS call callback synchronously. Winston uses this to know the
     // transport has accepted the log — any delay here accumulates backpressure
     // across every transport on every logger call.
     if (callback) callback()
 
     // Actual work happens on the next tick so we never block the caller.
+=======
+    /* DBG-DISABLED */ if (callback) callback(); return;
+>>>>>>> Stashed changes
     setImmediate(() => {
       if (!this._ready) {
         // Bounded buffer — early boot only
