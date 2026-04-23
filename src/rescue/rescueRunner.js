@@ -104,7 +104,7 @@ function _buildOptions() {
     allowDangerouslySkipPermissions: true,
     includePartialMessages: true,
     systemPrompt: RESCUE_SYSTEM_PROMPT,
-    model: process.env.RESCUE_MODEL || 'claude-sonnet-4-6', // Sonnet default: fast, cheap, capable enough for surgical fixes
+    model: process.env.RESCUE_MODEL || 'claude-opus-4-7', // Opus 4.7 — rescue gets the strongest reasoning. Runs rarely, cost is not the constraint here; correctness under pressure is.
     thinking: { type: 'enabled', budget_tokens: 8000 },
     // No MCP servers — rescue uses only built-in CC tools (Bash, Read, Edit,
     // Write, Grep, Glob, WebFetch). This is intentional; MCP servers are the
