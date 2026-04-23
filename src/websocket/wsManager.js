@@ -35,6 +35,44 @@ const wsTickets = new Map()
 // All active WS connections
 const clients = new Set()
 
+// In-process subscribers — listeners that receive broadcast events without a WS connection.
+// Map<eventType, Set<handler>>. Populated via subscribe(). Zero impact on existing WS path.
+const _inProcessSubscribers = new Map()
+
+/**
+ * Subscribe an in-process handler to one or more event types.
+ * handler(envelope) is called synchronously after each matching broadcast.
+ * Returns an unsubscribe function.
+ */
+function subscribe(types, handler) {
+  const typeArr = Array.isArray(types) ? types : [types]
+  for (const t of typeArr) {
+    if (!_inProcessSubscribers.has(t)) _inProcessSubscribers.set(t, new Set())
+    _inProcessSubscribers.get(t).add(handler)
+  }
+  return function unsubscribe() {
+    for (const t of typeArr) {
+      const set = _inProcessSubscribers.get(t)
+      if (set) set.delete(handler)
+    }
+  }
+}
+
+function _fanOut(type, envelope) {
+  const subs = _inProcessSubscribers.get(type)
+  if (!subs || subs.size === 0) return
+  for (const handler of subs) {
+    try {
+      const result = handler(envelope)
+      if (result && typeof result.then === 'function') {
+        result.catch(err => logger.warn('wsManager: in-process subscriber async threw', { error: err.message, type }))
+      }
+    } catch (err) {
+      logger.warn('wsManager: in-process subscriber threw', { error: err.message, type })
+    }
+  }
+}
+
 function initWS(app, server) {
   expressWs(app, server)
 
@@ -200,6 +238,7 @@ function _flushDeltas() {
   }
   _addToRing(envelope)
   _sendRaw(JSON.stringify(envelope))
+  _fanOut('os-session:output', envelope)
 }
 
 // Force-flush the coalescer before turn_complete - retained for backwards
@@ -252,6 +291,7 @@ function broadcast(type, payload) {
   const envelope = { seq, ts, epoch: _sessionEpoch, type, ...payload }
   _addToRing(envelope)
   _sendRaw(JSON.stringify(envelope))
+  _fanOut(type, envelope)
 
   // If this was a terminal event, assert-flush afterwards too — catches the
   // edge case where a late delta lands in the same tick but after us.
@@ -271,4 +311,5 @@ module.exports = {
   resetSessionSeq,
   getSessionEpoch,
   getEventsSince,
+  subscribe,
 }

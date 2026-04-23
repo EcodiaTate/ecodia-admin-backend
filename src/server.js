@@ -429,6 +429,18 @@ server.listen(env.PORT, async () => {
   } catch (err) {
     logger.warn('Session auto-wake setup failed (non-fatal)', { error: err.message })
   }
+
+  // ── Boot: Listener Subsystem ──────────────────────────────────────
+  // Always-on in-process Haiku agents that read the WS event stream
+  // and handle bookkeeping, memory capture, etc. without interrupting
+  // the main OS Opus context. Failure is non-fatal — server stays up.
+  try {
+    require('./services/listeners').startListenerSubsystem().catch(err => {
+      logger.warn('Listener subsystem async boot failed', { error: err.message })
+    })
+  } catch (err) {
+    logger.warn('Listener subsystem failed to start', { error: err.message })
+  }
 })
 
 // ── Boot: Conditional Auto-wake OS Session ───────────────────────────
