@@ -31,6 +31,16 @@ Apr 23 2026, Ordit PR acceptance tooling session.
 
 The stale file (`REVIEWER_PERSONA_PROMPT.md`) was committed in `e99b410` BEFORE either session was dispatched, so it shouldn't have appeared in either session's `filesChanged` at all. Whatever Factory uses to compute that list pulled in a stale reference.
 
+## Addendum - concurrent-Factory commit bundling
+
+Both sessions were dispatched in parallel against `ecodiaos-backend` (despite the "never dispatch parallel on same codebase" rule - my mistake). This produced a second downstream anomaly:
+
+- Scope-check session committed itself cleanly at `25246cf` (package.json + tools/scope-check.js) BEFORE I called `approve_factory_deploy`.
+- When I then called `approve_factory_deploy(a02c83bb)`, it created a SECOND commit `ecf1c01` that snapshot-committed the full worktree state - which by then contained the semgrep session's 10 files + REVIEWER_PERSONA_PROMPT.md. So the scope-check approve accidentally bundled the semgrep rulepack.
+- The subsequent `approve_factory_deploy(f94a86e9)` returned `{success: true}` with no `commitSha` because there was nothing new to commit.
+
+Lesson: when you realise mid-session that you dispatched two Factory jobs in parallel on the same codebase, expect the first approve to snowball everything uncommitted. Check `git log -p` on the snowball commit to confirm nothing unintended shipped. Do NOT trust the approve response alone - cross-check what actually landed in the commit.
+
 ## Related patterns
 - `factory-codebase-staleness-check-before-dispatch.md` - prevention side (clean worktree before dispatch)
 - `factory-phantom-session-no-commit.md` - when Factory reports work that produced no commit
