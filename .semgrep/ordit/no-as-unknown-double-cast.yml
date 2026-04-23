@@ -1,0 +1,9 @@
+rules:
+  - id: no-as-unknown-double-cast
+    message: >
+      Double casts (`as unknown as X`) usually indicate a type-declaration gap.
+      Fix the type instead of casting through unknown.
+      See clients/ordit/HOUSE_STYLE.md - "No `as unknown as X` double casts."
+    severity: ERROR
+    languages: [typescript]
+    pattern: ($X as unknown as $TYPE)

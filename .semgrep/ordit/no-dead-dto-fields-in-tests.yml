@@ -1,0 +1,19 @@
+rules:
+  - id: no-dead-dto-fields-in-tests
+    message: >
+      Test request body contains a field that no longer exists on the DTO.
+      ValidationPipe({ whitelist: true }) silently strips it, so the test passes - but the reviewer
+      sees a rejected pattern surviving in tests. This is a trust hit with Eugene.
+      Remove the dead field from the .send({}) call.
+      See clients/ordit/HOUSE_STYLE.md - "Do not send dead fields in test request bodies."
+    severity: WARNING
+    languages: [typescript]
+    paths:
+      include:
+        - "**/*.spec.ts"
+        - "**/*.e2e-spec.ts"
+        - "**/*.test.ts"
+    pattern-either:
+      - pattern: "$REQ.send({..., useCognito: $VAL, ...})"
+      - pattern: "$REQ.send({..., authSource: $VAL, ...})"
+      - pattern: "$REQ.send({..., auth_source: $VAL, ...})"

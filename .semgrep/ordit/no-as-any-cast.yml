@@ -1,0 +1,10 @@
+rules:
+  - id: no-as-any-cast
+    message: >
+      Avoid `as any`. Fix the type declaration instead.
+      If this is pre-existing code you did not touch, leave it (do not fix or remove pre-existing casts).
+      If you introduced it, fix the types.
+      See clients/ordit/HOUSE_STYLE.md - "No `as any` casts anywhere in production code."
+    severity: ERROR
+    languages: [typescript]
+    pattern: ($X as any)

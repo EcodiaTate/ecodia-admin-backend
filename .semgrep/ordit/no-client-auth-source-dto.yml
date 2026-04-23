@@ -1,0 +1,52 @@
+rules:
+  - id: no-client-auth-source-dto
+    message: >
+      Auth source / creation mode is server-decided via env config. Never expose it as a client-supplied DTO field.
+      The `User.authSource` entity field records the OUTCOME of the server's decision - it is not an input.
+      Remove this field from the DTO. Use `COGNITO_USER_CREATION_ENABLED` env var server-side.
+      See clients/ordit/HOUSE_STYLE.md - "Creation switches belong in env, not on the DTO."
+    severity: ERROR
+    languages: [typescript]
+    # Scoped to DTO files to reduce noise. If you see this in a non-DTO file, it may still be wrong.
+    paths:
+      include:
+        - "**/*.dto.ts"
+    pattern-either:
+      # Class property declarations (with or without decorators)
+      - pattern: |
+          class $CLASS {
+            ...
+            authSource: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            useCognito: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            auth_source: $TYPE
+            ...
+          }
+      # Optional properties
+      - pattern: |
+          class $CLASS {
+            ...
+            authSource?: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            useCognito?: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            auth_source?: $TYPE
+            ...
+          }

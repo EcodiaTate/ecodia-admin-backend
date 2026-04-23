@@ -1,0 +1,17 @@
+rules:
+  - id: no-db-push-in-pipelines
+    message: >
+      prisma db push in pipeline is the current platform posture for this codebase.
+      Do not swap to `prisma migrate deploy` inside a feature PR - it is a separate platform PR
+      with its own rollout plan (prisma migrate resolve --applied on UAT + prod before the pipeline swap).
+      If you see this in a diff and it is being changed to migrate deploy, stop and carve it off.
+      See clients/ordit/HOUSE_STYLE.md - "This codebase uses prisma db push, not prisma migrate deploy."
+    severity: INFO
+    languages: [generic]
+    paths:
+      include:
+        - "**/*.yml"
+        - "**/*.yaml"
+    pattern-either:
+      - pattern: prisma db push
+      - pattern: npx prisma db push
