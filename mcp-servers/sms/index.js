@@ -26,8 +26,14 @@ const server = new McpServer({ name: 'sms', version: '1.0.0' })
 
 server.tool(
   'send_sms',
-  'Send an SMS message to any phone number. Use E.164 format (+61404247153).',
-  { to: z.string().describe('Recipient phone number in E.164 format'), body: z.string().describe('Message text (max 1600 chars)') },
+  [
+    'Send an SMS. E.164 format (+61404247153).',
+    'BREVITY RULE (Tate 2026-04-23): every 160 chars = 1 billed segment (70 chars on unicode/emoji). Target ONE segment. Hard cap: 320 chars unless the content truly cannot compress.',
+    'CUT: greetings, signoffs, "just wanted to", "heads up that", narration of what you are about to do, emojis (downgrades to 70-char segments), thank-yous, apologies, reassurance.',
+    'KEEP: the delta, the number, the link, the decision requested. Tate can infer context from the status_board; do NOT restate it.',
+    'Full doctrine: ~/ecodiaos/patterns/sms-segment-economics.md ($0.05/segment AUD, 160 GSM / 70 UCS-2).',
+  ].join(' '),
+  { to: z.string().describe('Recipient phone number in E.164 format'), body: z.string().describe('Message text. Target <=160 chars, cap 320. Every 160 = 1 segment = $. Unicode/emoji drops to 70. Be ruthless.') },
   async ({ to, body }) => {
     try {
       const msg = await client.messages.create({
