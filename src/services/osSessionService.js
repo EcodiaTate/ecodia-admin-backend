@@ -957,11 +957,16 @@ async function _sendMessageImpl(content, opts = {}) {
   if (!suppressOutput) {
     emitStatus('streaming', { sessionId: dbSessionId })
 
-    // Emit current energy level so frontend knows if thinking mode is active
-    try {
-      const energyNow = await usageEnergy.getEnergy()
-      broadcast('os-session:energy', energyNow)
-    } catch {}
+    // Emit current energy level so frontend knows if thinking mode is active.
+    // FIRE-AND-FORGET — must never block turn startup. Production incident
+    // 2026-04-23: an Anthropic headers probe inside getEnergy() stalled
+    // indefinitely and froze the whole OS between the "streaming" status emit
+    // and the first logger.info("OS Session starting") line, so the UI saw
+    // only a thinking pulse and the backend produced zero further logs until
+    // restart. Energy is advisory telemetry; the turn must proceed regardless.
+    usageEnergy.getEnergy()
+      .then(energyNow => { try { broadcast('os-session:energy', energyNow) } catch {} })
+      .catch(err => logger.debug('OS Session: energy emit failed (non-fatal)', { error: err.message }))
   }
 
   // cwd must contain .mcp.json and CLAUDE.md
