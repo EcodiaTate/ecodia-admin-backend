@@ -509,3 +509,62 @@ Added `patterns/client-push-pre-submission-pipeline.md`. Before every push to `f
 7. Push, then watch PR activity
 
 Pipeline and schema changes never ship in a feature PR, regardless of who asked inline.
+
+---
+
+## 2026-04-23 - E2E suite is broken at config level (do not ship our auth-cognito.e2e-spec.ts as "validated")
+
+### Finding
+
+`yarn test:e2e` fails on the Ordit backend before any test runs. Both the pre-existing `test/app.e2e-spec.ts` AND our added `test/auth-cognito.e2e-spec.ts` fail to load with:
+
+```
+Cannot find module '@/utils/convert-to-plural' from '../src/base/base.service.ts'
+```
+
+### Root cause
+
+`test/jest-e2e.json` has no `moduleNameMapper`. The repo's `tsconfig.json` defines `"paths": { "@/*": ["src/*"] }`, but `ts-jest` does not honour tsconfig paths unless the jest config maps them explicitly. The fix would be adding:
+
+```json
+"moduleNameMapper": {
+  "^@/(.*)$": "<rootDir>/../src/$1"
+}
+```
+
+### Why nobody has noticed
+
+`bitbucket-pipelines.yml` runs `yarn test` (unit tests) on PR validation. It does NOT run `yarn test:e2e`. The broken e2e suite has likely been non-functional for the entire lifetime of the `@/*` path-alias refactor. Eugene has not flagged it because his CI does not exercise it.
+
+### Implications for PR 212
+
+Our `test/auth-cognito.e2e-spec.ts` was written against the assumption that the e2e harness works. It does not. So the file is decorative in its current state: cannot execute, cannot fail, cannot validate. On the plus side: it also cannot regress anything, because Ordit's CI never loads it.
+
+**Do NOT represent PR 212 as "e2e-validated" to Eugene.** The unit tests pass. The e2e spec is shipped-but-inert.
+
+### Options (none are action-now)
+
+1. **Leave it.** Eugene has never run e2e. The spec costs nothing in their CI. When Ordit gets e2e infra later, they pick up our spec for free.
+2. **Pull the spec out of PR 212.** Shipping a dead test file is light noise. Defensible to remove until e2e infra exists.
+3. **Propose separate PR fixing e2e harness.** Not in scope of PR 212 per `client-push-pre-submission-pipeline.md` Step 4. Would need Tate sign-off + Eugene buy-in as a separate ticket. Likely low priority for Craige.
+
+Default position: leave it. Do not represent it. If Eugene asks about e2e coverage on PR 212, answer truthfully.
+
+### What "full e2e capability" actually requires (for future client work)
+
+For Ordit specifically:
+- AWS Cognito env vars: already set in `.env` (AWS_COGNITO_USER_POOL_ID, CLIENT_ID, CLIENT_SECRET, REGION, ACCESS_KEY, SECRET). SDK is mocked in the spec so no real AWS calls.
+- MySQL: `ordit-mysql` Docker container on localhost:3307 already running (verified Apr 23).
+- `DATABASE_URL=mysql://admin:ordit_local_dev@localhost:3307/ordit` already set.
+- The ONLY missing piece: `moduleNameMapper` in `test/jest-e2e.json`.
+
+For future client work the reusable pattern is: before any push, audit whether the client's e2e config actually loads. Run `yarn test:e2e -- --listTests` (or equivalent) locally. If the suite cannot even enumerate its tests, flag as config gap and do not claim e2e coverage.
+
+### Local-only patch option (internal gate, do not push)
+
+If we want to run Ordit e2e locally for OUR own pre-push validation without modifying their repo:
+1. Patch `test/jest-e2e.json` with the moduleNameMapper above.
+2. Run `yarn test:e2e`.
+3. `git checkout test/jest-e2e.json` to discard the patch before pushing.
+
+Cost: minor git hygiene friction. Benefit: real e2e gate on our side. Worth doing next time we're changing anything in `src/auth/` or `src/users/`.
