@@ -455,3 +455,57 @@ Alternative: mock `ConfigService.get('COGNITO_USER_CREATION_ENABLED')` to return
 Worktree `~/workspaces/ordit/be` is on `feat/cognito-be-integration` at `04332ee`, matches origin exactly, clean. Ready for Factory dispatch on greenlight.
 
 Neo4j Decision 1296 captures the full audit with this landmine highlighted. status_board rows for Ordit set to `audit-complete-7-of-7-eugene-comments-fixed-in-code-1-test-drift-found`, next_action_by=tate.
+
+---
+
+## 2026-04-23 - Eugene 180 on pipeline/migration change, revert shipped
+
+Summary: Eugene asked for the `prisma db push` -> `prisma migrate deploy` swap in his own inline PR comment on Apr 20. We shipped it (with a baseline migration tested against a UAT clone for P3005). On Apr 23 he reversed his position and called the changes "unplanned, unreviewed infrastructure changes that were not part of this task." Ball was on us either way, so we reverted.
+
+### Receipts (pulled from Bitbucket API)
+
+- **Apr 20 18:26 UTC, comment 785397745** (inline on the migration SQL file):
+  > "To add this migrations support (Which is a good idea), you would need to also: Replace `npx prisma db push --accept-data-loss` with `npx prisma migrate deploy` in file `bitbucket-pipelines.yml`. Please also update the `README.md` file."
+- **Apr 21 12:36 UTC, comment 785825466** (Tate): documented baseline migration fix `04332ee` specifically to unblock Eugene's pipeline swap, including the P3005 failure mode and the test-against-clone. Eugene silent for 2 days.
+- **Apr 23 04:19 UTC, comment 786876526** (Eugene): "This PR cannot be merged. The AI agent has introduced unplanned, unreviewed infrastructure changes that were not part of this task."
+
+### Revert
+
+Commit `24ab453` on `feat/cognito-be-integration`. Dropped:
+- `prisma/migrations/00000000000000_baseline/` (directory + migration.sql + README)
+- `prisma/migrations/20260419000000_add_auth_source_to_user/` (directory + migration.sql)
+- Restored `bitbucket-pipelines.yml` to `npx prisma db push --accept-data-loss` (was `npx prisma migrate deploy`)
+- Restored `README.md` to UAT baseline, re-inserted only the Cognito env-var section Eugene saw without objection
+
+Pushed Apr 23 ~14:34 AEST. No new Eugene comment since push at time of write.
+
+### Operational truth
+
+Eugene's framing is dishonest about provenance, but his revised position is operationally correct. Flipping a live-prod pipeline from `db push` to `migrate deploy` in a feature PR is not a drop-in change. It needs a coordinated `prisma migrate resolve --applied 00000000000000_baseline` on UAT and prod before the pipeline swap lands. That is staged rollout, not a PR merge. The baseline-migration approach was tested on a clone, not the live DB.
+
+Correct future response to "also add a migration and swap the pipeline" on a feature PR review: "Good call, separate PR with a rollout plan." The feature PR ships narrow. See `patterns/client-push-pre-submission-pipeline.md`.
+
+### Rollout plan (deferred ticket)
+
+If and when the client actually wants the migrate-deploy swap:
+1. Open a new PR touching ONLY `bitbucket-pipelines.yml` + `prisma/migrations/` + `README.md`.
+2. In advance of merge, run against UAT: `prisma migrate resolve --applied 00000000000000_baseline` (DB owner's shell, not CI).
+3. Verify `_prisma_migrations` has the baseline row, no pending migrations.
+4. Merge + deploy to UAT. Observe one full deploy cycle.
+5. Repeat steps 2-4 against prod.
+6. Done. From that point, new schema changes go as `prisma migrate dev` locally -> commit the migration dir -> pipeline runs `migrate deploy`.
+
+This is Eugene's or the DB owner's call, not ours to push through. Do not reintroduce until they ask explicitly AND the rollout plan is written into the PR description.
+
+### Process change
+
+Added `patterns/client-push-pre-submission-pipeline.md`. Before every push to `fireauditors1/*` (or any client repo), run the 7-step pipeline:
+1. Scope gate per changed file
+2. Risk classification (code/config/test/docs/pipeline/db-schema/infra)
+3. Provenance note per surprising change
+4. Rollout plan for pipeline/db-schema/infra (else carve off)
+5. Em-dash sweep
+6. Hostile-reviewer filter
+7. Push, then watch PR activity
+
+Pipeline and schema changes never ship in a feature PR, regardless of who asked inline.
