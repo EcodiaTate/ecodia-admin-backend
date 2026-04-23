@@ -2399,6 +2399,12 @@ function _abortActiveQuery(reason) {
 // Not scheduled for 'new_turn_starting' or 'priority_preempt' — those abort
 // one query only to immediately start the next, so lingering in _abortInProgress
 // would be wrong. All watchdog/manual aborts DO schedule the timer.
+//
+// 2026-04-23 hot-fix: default the actual process.exit OFF. Empty-SDK-stream
+// failures (see os_incidents) were tripping abort on otherwise-recoverable
+// turns, and the grace timer then killed live chat sessions every 3-14 min.
+// Set SDK_ABORT_GRACE_EXIT_ENABLED=true to re-enable process recycling once
+// abort-propagation root cause is fixed. Log-only mode preserves diagnostics.
 function _scheduleAbortGraceTimer(reason) {
   if (reason === 'new_turn_starting' || reason === 'priority_preempt' || reason === 'compact_deprecated') return
   if (abortGraceTimer) { clearTimeout(abortGraceTimer); abortGraceTimer = null }
@@ -2406,8 +2412,15 @@ function _scheduleAbortGraceTimer(reason) {
   abortGraceTimer = setTimeout(() => {
     abortGraceTimer = null
     if (_abortInProgress) {
-      logger.error('SDK_ABORT_GRACE_EXPIRED — process exit for PM2 respawn', { reason })
-      process.exit(1)
+      const exitEnabled = (process.env.SDK_ABORT_GRACE_EXIT_ENABLED || 'false').toLowerCase() === 'true'
+      if (exitEnabled) {
+        logger.error('SDK_ABORT_GRACE_EXPIRED — process exit for PM2 respawn', { reason })
+        process.exit(1)
+      } else {
+        logger.warn('SDK_ABORT_GRACE_EXPIRED — exit suppressed (SDK_ABORT_GRACE_EXIT_ENABLED=false)', { reason })
+        // Clear the in-progress flag so subsequent turns can proceed.
+        _abortInProgress = false
+      }
     }
   }, 30 * 1000)
   abortGraceTimer.unref?.()
