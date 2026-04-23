@@ -1,0 +1,18 @@
+rules:
+  - id: no-string-enum-comparison
+    message: >
+      String literal used in AuthSource comparison. Use the Prisma-generated enum:
+      AuthSource.COGNITO not 'COGNITO', AuthSource.LEGACY not 'LEGACY'.
+      Enum comparisons are typo-safe, rename-safe, and refactor-safe.
+      See clients/ordit/HOUSE_STYLE.md - "Use generated enums in comparisons, never string literals."
+    severity: ERROR
+    languages: [typescript]
+    pattern-either:
+      - pattern: $X === 'COGNITO'
+      - pattern: $X !== 'COGNITO'
+      - pattern: $X == 'COGNITO'
+      - pattern: $X != 'COGNITO'
+      - pattern: $X === 'LEGACY'
+      - pattern: $X !== 'LEGACY'
+      - pattern: $X == 'LEGACY'
+      - pattern: $X != 'LEGACY'

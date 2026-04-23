@@ -1,0 +1,13 @@
+rules:
+  - id: no-promise-any-return
+    message: >
+      Promise<any> as a return type is a type-declaration gap.
+      Type the return explicitly - Promise<User | null> is almost always right.
+      If this is pre-existing code you did not touch, leave it.
+      See clients/ordit/HOUSE_STYLE.md - "`Promise<any>` is a type-declaration gap."
+    severity: WARNING
+    languages: [typescript]
+    # Conservative: matches Promise<any> wherever it appears in TypeScript source.
+    # Intended to catch return type annotations. Will also fire on variable types - judge by context.
+    # TODO: tighten to function/method return type positions if false-positive rate is high.
+    pattern: Promise<any>

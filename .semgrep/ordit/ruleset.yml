@@ -1,0 +1,161 @@
+# Ordit semgrep rulepack - combined ruleset
+#
+# Run with: semgrep --config .semgrep/ordit/ruleset.yml <path>
+#
+# Individual rule files live alongside this one and can be run standalone.
+# This file is the compiled bundle - keep it in sync with the individual files.
+
+rules:
+
+  # ─── Enums and casts ────────────────────────────────────────────────
+
+  - id: no-string-enum-comparison
+    message: >
+      String literal used in AuthSource comparison. Use the Prisma-generated enum:
+      AuthSource.COGNITO not 'COGNITO', AuthSource.LEGACY not 'LEGACY'.
+      Enum comparisons are typo-safe, rename-safe, and refactor-safe.
+      See clients/ordit/HOUSE_STYLE.md - "Use generated enums in comparisons, never string literals."
+    severity: ERROR
+    languages: [typescript]
+    pattern-either:
+      - pattern: $X === 'COGNITO'
+      - pattern: $X !== 'COGNITO'
+      - pattern: $X == 'COGNITO'
+      - pattern: $X != 'COGNITO'
+      - pattern: $X === 'LEGACY'
+      - pattern: $X !== 'LEGACY'
+      - pattern: $X == 'LEGACY'
+      - pattern: $X != 'LEGACY'
+
+  - id: no-as-any-cast
+    message: >
+      Avoid `as any`. Fix the type declaration instead.
+      If this is pre-existing code you did not touch, leave it (do not fix or remove pre-existing casts).
+      If you introduced it, fix the types.
+      See clients/ordit/HOUSE_STYLE.md - "No `as any` casts anywhere in production code."
+    severity: ERROR
+    languages: [typescript]
+    pattern: ($X as any)
+
+  - id: no-as-unknown-double-cast
+    message: >
+      Double casts (`as unknown as X`) usually indicate a type-declaration gap.
+      Fix the type instead of casting through unknown.
+      See clients/ordit/HOUSE_STYLE.md - "No `as unknown as X` double casts."
+    severity: ERROR
+    languages: [typescript]
+    pattern: ($X as unknown as $TYPE)
+
+  - id: no-promise-any-return
+    message: >
+      Promise<any> as a return type is a type-declaration gap.
+      Type the return explicitly - Promise<User | null> is almost always right.
+      If this is pre-existing code you did not touch, leave it.
+      See clients/ordit/HOUSE_STYLE.md - "`Promise<any>` is a type-declaration gap."
+    severity: WARNING
+    languages: [typescript]
+    # Conservative: matches Promise<any> wherever it appears in TypeScript source.
+    # TODO: tighten to function/method return type positions if false-positive rate is high.
+    pattern: Promise<any>
+
+  # ─── DTOs ────────────────────────────────────────────────────────────
+
+  - id: no-client-auth-source-dto
+    message: >
+      Auth source / creation mode is server-decided via env config. Never expose it as a client-supplied DTO field.
+      The `User.authSource` entity field records the OUTCOME of the server's decision - it is not an input.
+      Remove this field from the DTO. Use `COGNITO_USER_CREATION_ENABLED` env var server-side.
+      See clients/ordit/HOUSE_STYLE.md - "Creation switches belong in env, not on the DTO."
+    severity: ERROR
+    languages: [typescript]
+    paths:
+      include:
+        - "**/*.dto.ts"
+    pattern-either:
+      - pattern: |
+          class $CLASS {
+            ...
+            authSource: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            useCognito: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            auth_source: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            authSource?: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            useCognito?: $TYPE
+            ...
+          }
+      - pattern: |
+          class $CLASS {
+            ...
+            auth_source?: $TYPE
+            ...
+          }
+
+  # ─── Prisma and pipelines ────────────────────────────────────────────
+
+  - id: no-db-push-in-pipelines
+    message: >
+      prisma db push in pipeline is the current platform posture for this codebase.
+      Do not swap to `prisma migrate deploy` inside a feature PR - it is a separate platform PR
+      with its own rollout plan (prisma migrate resolve --applied on UAT + prod before the pipeline swap).
+      If you see this in a diff and it is being changed to migrate deploy, stop and carve it off.
+      See clients/ordit/HOUSE_STYLE.md - "This codebase uses prisma db push, not prisma migrate deploy."
+    severity: INFO
+    languages: [generic]
+    paths:
+      include:
+        - "**/*.yml"
+        - "**/*.yaml"
+    pattern-either:
+      - pattern: prisma db push
+      - pattern: npx prisma db push
+
+  # ─── Tests ───────────────────────────────────────────────────────────
+
+  - id: no-dead-dto-fields-in-tests
+    message: >
+      Test request body contains a field that no longer exists on the DTO.
+      ValidationPipe({ whitelist: true }) silently strips it, so the test passes - but the reviewer
+      sees a rejected pattern surviving in tests. This is a trust hit with Eugene.
+      Remove the dead field from the .send({}) call.
+      See clients/ordit/HOUSE_STYLE.md - "Do not send dead fields in test request bodies."
+    severity: WARNING
+    languages: [typescript]
+    paths:
+      include:
+        - "**/*.spec.ts"
+        - "**/*.e2e-spec.ts"
+        - "**/*.test.ts"
+    pattern-either:
+      - pattern: "$REQ.send({..., useCognito: $VAL, ...})"
+      - pattern: "$REQ.send({..., authSource: $VAL, ...})"
+      - pattern: "$REQ.send({..., auth_source: $VAL, ...})"
+
+  # ─── Style ───────────────────────────────────────────────────────────
+
+  - id: no-new-console-log
+    message: >
+      New console.log in Ordit code. If this was pre-existing in surrounding code you did not touch, leave it.
+      If you introduced it, remove it before pushing.
+      See clients/ordit/HOUSE_STYLE.md - "No `console.log` left behind."
+    severity: WARNING
+    languages: [typescript]
+    pattern: console.log(...)

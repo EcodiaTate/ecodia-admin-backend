@@ -1,0 +1,9 @@
+rules:
+  - id: no-new-console-log
+    message: >
+      New console.log in Ordit code. If this was pre-existing in surrounding code you did not touch, leave it.
+      If you introduced it, remove it before pushing.
+      See clients/ordit/HOUSE_STYLE.md - "No `console.log` left behind."
+    severity: WARNING
+    languages: [typescript]
+    pattern: console.log(...)
