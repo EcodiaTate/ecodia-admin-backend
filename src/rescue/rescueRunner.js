@@ -39,12 +39,48 @@ const bridge = require('../services/rescueBridge')
 const SESSION_IDLE_TIMEOUT_MS = parseInt(process.env.RESCUE_IDLE_TIMEOUT_MS || (60 * 60 * 1000).toString(), 10)
 
 // ─── Auth selection ──────────────────────────────────────────────────
-function _pickOAuthToken() {
-  return process.env.CLAUDE_CODE_OAUTH_TOKEN_RESCUE
-      || process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE
-      || process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE
-      || process.env.CLAUDE_CODE_OAUTH_TOKEN
-      || null
+// Rescue picks an account per-turn based on real-time usage health. If a
+// dedicated rescue token is set, use it unconditionally. Otherwise ask
+// usageEnergy which of Tate/Code has headroom right now — reusing the
+// same provider selector main OS uses, so rescue doesn't blindly pick
+// the exhausted account. On `out of extra usage` errors we retry on the
+// other account once before giving up.
+//
+// Returns { token, provider: 'rescue' | 'claude_max' | 'claude_max_2' }
+// or null if nothing is available.
+function _pickAuth(excludeProviders = []) {
+  // Dedicated rescue token wins if present (not subject to account-level exhaustion).
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN_RESCUE && !excludeProviders.includes('rescue')) {
+    return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN_RESCUE, provider: 'rescue' }
+  }
+
+  // Use the same smart selector main OS uses. Lazy-require so rescue doesn't
+  // break at boot if usageEnergy has a parse error.
+  try {
+    const usageEnergy = require('../services/usageEnergyService')
+    const best = usageEnergy.getBestProvider()
+    if (best.provider === 'claude_max' && !excludeProviders.includes('claude_max') && process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE) {
+      return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE, provider: 'claude_max', reason: best.reason }
+    }
+    if (best.provider === 'claude_max_2' && !excludeProviders.includes('claude_max_2') && process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+      return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE, provider: 'claude_max_2', reason: best.reason }
+    }
+  } catch (err) {
+    logger.warn('rescueRunner: usageEnergy.getBestProvider failed, falling back to raw env', { error: err.message })
+  }
+
+  // Fallback: whichever of the two accounts we haven't excluded.
+  if (!excludeProviders.includes('claude_max') && process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE) {
+    return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE, provider: 'claude_max', reason: 'fallback_tate' }
+  }
+  if (!excludeProviders.includes('claude_max_2') && process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+    return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE, provider: 'claude_max_2', reason: 'fallback_code' }
+  }
+  // Last resort — generic token.
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && !excludeProviders.includes('generic')) {
+    return { token: process.env.CLAUDE_CODE_OAUTH_TOKEN, provider: 'generic', reason: 'fallback_generic' }
+  }
+  return null
 }
 
 // ─── Lazy SDK import ──────────────────────────────────────────────────
@@ -110,7 +146,17 @@ function _abortActive(reason) {
   bridge.publishStatus('idle', { abortReason: reason })
 }
 
-function _buildOptions() {
+function _buildOptions(auth) {
+  const sessionEnv = { ...process.env }
+  // CRITICAL: strip ANTHROPIC_API_KEY on OAuth paths, otherwise the CLI
+  // silently prefers it and bills the wrong wallet. Mirrors osSessionService.
+  delete sessionEnv.ANTHROPIC_API_KEY
+  if (auth && auth.token) {
+    sessionEnv.CLAUDE_CODE_OAUTH_TOKEN = auth.token
+    // Ensure we don't leak a CONFIG_DIR from a stray env var and bypass the token.
+    delete sessionEnv.CLAUDE_CONFIG_DIR
+  }
+
   const options = {
     cwd: process.env.RESCUE_REPO_PATH || '/home/tate/ecodiaos',
     permissionMode: 'bypassPermissions',
@@ -119,6 +165,7 @@ function _buildOptions() {
     systemPrompt: RESCUE_SYSTEM_PROMPT,
     model: process.env.RESCUE_MODEL || 'claude-opus-4-7',
     thinking: { type: 'enabled', budget_tokens: 8000 },
+    env: sessionEnv,
     // No MCP servers — rescue uses only built-in CC tools. MCP servers are
     // often the thing that might be broken in the first place.
     mcpServers: {},
@@ -143,7 +190,14 @@ function _clearTurnTimers() {
   if (_turnHardTimer)   { clearTimeout(_turnHardTimer);   _turnHardTimer = null }
 }
 
-async function _runTurn(messageContent) {
+// Matches Claude Code's "out of extra usage" / "quota" / "rate limit" error
+// strings. On a match we drop the current provider and try the other one.
+function _isUsageExhaustionError(err) {
+  const msg = (err && err.message) || ''
+  return /out of extra usage|usage.*limit|rate.?limit|quota.*exceed|session.*limit.*reach/i.test(msg)
+}
+
+async function _runTurn(messageContent, excludeProviders = []) {
   bridge.publishStatus('streaming', { resume: !!ccSessionId })
 
   // Arm both timers for the turn.
@@ -154,11 +208,20 @@ async function _runTurn(messageContent) {
   }, TURN_MAX_MS)
   if (typeof _turnHardTimer.unref === 'function') _turnHardTimer.unref()
 
+  const auth = _pickAuth(excludeProviders)
+  if (!auth) {
+    const msg = 'No usable Claude account available (all exhausted or unconfigured). Check CLAUDE_CODE_OAUTH_TOKEN_* env vars.'
+    logger.error('rescueRunner: no auth available', { excludeProviders })
+    bridge.publishOutput({ type: 'error', content: msg })
+    bridge.publishStatus('error', { error: 'no_auth' })
+    _clearTurnTimers()
+    return
+  }
+  logger.info('rescueRunner: auth selected', { provider: auth.provider, reason: auth.reason || 'default' })
+
   try {
     const queryFn = await getQuery()
-    const options = _buildOptions()
-    const token = _pickOAuthToken()
-    if (token) process.env.CLAUDE_CODE_OAUTH_TOKEN = token
+    const options = _buildOptions(auth)
 
     const q = queryFn({ prompt: messageContent, options })
     activeQuery = q
@@ -232,17 +295,44 @@ async function _runTurn(messageContent) {
     _clearTurnTimers()
     bridge.publishStatus('idle', { resume: !!ccSessionId })
   } catch (err) {
-    logger.error('rescueRunner: turn failed', { error: err.message, stack: err.stack })
-    bridge.publishOutput({ type: 'error', content: `Rescue turn failed: ${err.message}` })
-    bridge.publishStatus('error', { error: err.message })
     activeQuery = null
     _clearTurnTimers()
-    // If the failure was a stale/invalid resume, drop it so the next message
+    logger.error('rescueRunner: turn failed', { error: err.message, provider: auth.provider, excludeProviders })
+
+    // If the failure was a stale/invalid resume, drop it so the next attempt
     // starts a fresh session instead of re-failing the same way.
     if (ccSessionId && /resume|session.*not.*found|unknown.*session/i.test(err.message || '')) {
       logger.warn('rescueRunner: dropping ccSessionId after likely-stale resume failure')
       ccSessionId = null
     }
+
+    // Usage-exhaustion: retry on a different account (up to once per provider).
+    if (_isUsageExhaustionError(err)) {
+      const nextExclude = [...excludeProviders, auth.provider]
+      const nextAuth = _pickAuth(nextExclude)
+      if (nextAuth) {
+        logger.warn('rescueRunner: provider exhausted, retrying on alternate', {
+          failed: auth.provider, retry: nextAuth.provider,
+        })
+        bridge.publishOutput({
+          type: 'text_delta',
+          content: `\n[rescue: ${auth.provider} out of usage — retrying on ${nextAuth.provider}]\n`,
+        })
+        // Drop resume because we're on a different account.
+        ccSessionId = null
+        return _runTurn(messageContent, nextExclude)
+      }
+      logger.error('rescueRunner: all providers exhausted')
+      bridge.publishOutput({
+        type: 'error',
+        content: `All Claude accounts out of usage. Try again after quota reset, or set CLAUDE_CODE_OAUTH_TOKEN_RESCUE.`,
+      })
+      bridge.publishStatus('error', { error: 'all_providers_exhausted' })
+      return
+    }
+
+    bridge.publishOutput({ type: 'error', content: `Rescue turn failed: ${err.message}` })
+    bridge.publishStatus('error', { error: err.message })
   }
 }
 
@@ -266,11 +356,17 @@ function _resetSession(reason) {
 
 // ─── Boot ────────────────────────────────────────────────────────────
 async function main() {
+  const bootAuth = _pickAuth()
   logger.info('rescueRunner: booting', {
     cwd: process.cwd(),
     repoPath: process.env.RESCUE_REPO_PATH || '/home/tate/ecodiaos',
     model: process.env.RESCUE_MODEL || 'claude-opus-4-7',
-    hasToken: !!_pickOAuthToken(),
+    initialProvider: bootAuth ? bootAuth.provider : '(none available)',
+    availableTokens: {
+      rescue: !!process.env.CLAUDE_CODE_OAUTH_TOKEN_RESCUE,
+      tate: !!process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE,
+      code: !!process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE,
+    },
     idleTimeoutMs: SESSION_IDLE_TIMEOUT_MS,
   })
 
