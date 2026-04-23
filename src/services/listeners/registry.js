@@ -120,23 +120,28 @@ async function dispatch(event, _testListeners) {
 /**
  * Register all loaded listeners with the wsManager's in-process subscribe().
  * Accepts an optional wsManager override for tests.
+ *
+ * NOTE: wsManager fan-out emits on channel keys (currently only 'os-session:output'),
+ * NOT on envelope.type. Listeners declare subscribesTo in envelope-type terms
+ * (e.g. 'text_delta'); dispatch() does the envelope.type filter. If more fan-out
+ * channels are added later, extend WS_CHANNELS + route per-listener.
  */
+const WS_CHANNELS = ['os-session:output']
+
 function registerAll(_wsManager) {
   const wsMgr = _wsManager || require('../../websocket/wsManager')
 
   let registered = 0
   for (const listener of _listeners) {
-    const types = Array.isArray(listener.subscribesTo) ? listener.subscribesTo : [listener.subscribesTo]
-
-    // Each listener gets its own subscription so the handler is scoped to it
+    // Subscribe each listener to the channel; envelope.type filtering happens in dispatch()
     const l = listener
-    wsMgr.subscribe(types, async (event) => {
+    wsMgr.subscribe(WS_CHANNELS, async (event) => {
       await dispatch(event, [l])
     })
     registered++
   }
 
-  logger.info(`listener subsystem: registered ${registered} listeners`)
+  logger.info(`listener subsystem: registered ${registered} listeners on channels [${WS_CHANNELS.join(', ')}]`)
   return registered
 }
 
