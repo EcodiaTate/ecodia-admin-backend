@@ -56,7 +56,10 @@ router.post('/invoke', async (req, res, next) => {
 
 router.get('/status', async (_req, res, next) => {
   try {
-    res.json(rescue.getStatus())
+    // Use the probing version so the first load after an api restart
+    // doesn't return ready:false for the whole lifetime of the process.
+    const status = await rescue.getStatusWithProbe()
+    res.json(status)
   } catch (err) { next(err) }
 })
 
@@ -78,6 +81,15 @@ router.post('/abort', async (req, res, next) => {
   try {
     const reason = (req.body && req.body.reason) || 'user_abort'
     const result = await rescue.abort(reason)
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// Reset — drop the current cc session so next message starts fresh.
+// Also clears the api-side transcript.
+router.post('/reset', async (_req, res, next) => {
+  try {
+    const result = await rescue.resetSession()
     res.json(result)
   } catch (err) { next(err) }
 })

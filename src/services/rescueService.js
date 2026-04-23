@@ -29,7 +29,7 @@ function _appendTranscript(entry) {
 }
 
 async function start() {
-  await bridge.subscribeToRescueEvents({
+  bridge.subscribeToRescueEvents({
     [bridge.CHANNELS.READY]: () => {
       state.ready = true
       state.lastReadyAt = Date.now()
@@ -102,16 +102,52 @@ async function abort(reason = 'user_abort') {
   return { aborted: true, reason }
 }
 
+// Start a fresh rescue conversation — drops ccSessionId on the rescue
+// process so the next message starts without resume.
+async function resetSession() {
+  bridge.publishAbort('reset_session')
+  // Clear api-side transcript too so the UI reflects the reset.
+  state.transcript = []
+  return { reset: true }
+}
+
 async function healthCheck() {
   const before = state.lastHealthPongAt
+  const sentAt = Date.now()
   bridge.publishHealthPing()
-  // Wait up to 3s for the pong
-  const deadline = Date.now() + 3000
+  const deadline = sentAt + 3000
   while (Date.now() < deadline) {
-    if ((state.lastHealthPongAt || 0) > (before || 0)) return { alive: true, latencyMs: Date.now() - (before || 0) }
+    if ((state.lastHealthPongAt || 0) > (before || 0)) {
+      return { alive: true, latencyMs: Date.now() - sentAt }
+    }
     await new Promise(r => setTimeout(r, 100))
   }
   return { alive: false }
+}
+
+// Health-ping-backed status getter. If we've never seen rescue come up
+// (state.ready=false, e.g. api booted after rescue's ready broadcast),
+// fire a ping and give the pong a moment to arrive. This prevents the UI
+// showing "offline" forever just because of subscribe-ordering timing.
+async function getStatusWithProbe() {
+  if (!state.ready) {
+    try {
+      const probe = await healthCheck()
+      if (probe.alive) {
+        state.ready = true
+        state.status = state.status === 'unknown' ? 'idle' : state.status
+        if (!state.lastReadyAt) state.lastReadyAt = Date.now()
+      }
+    } catch {}
+  }
+  return {
+    ready: state.ready,
+    status: state.status,
+    lastReadyAt: state.lastReadyAt,
+    lastStatusAt: state.lastStatusAt,
+    lastActivityAt: state.lastActivityAt,
+    transcriptLength: state.transcript.length,
+  }
 }
 
 function getStatus() {
@@ -130,4 +166,4 @@ function getTranscript(limit = 100) {
   return state.transcript.slice(-n)
 }
 
-module.exports = { start, sendMessage, abort, healthCheck, getStatus, getTranscript }
+module.exports = { start, sendMessage, abort, resetSession, healthCheck, getStatus, getStatusWithProbe, getTranscript }
