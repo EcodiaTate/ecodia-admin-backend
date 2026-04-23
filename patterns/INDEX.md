@@ -54,6 +54,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [sdk-abortcontroller-cancellation.md](sdk-abortcontroller-cancellation.md) | sdk, abort, cancellation, watchdog, query.close, hang, tool-timeout, webfetch, undici, mcp-transport, abortcontroller, per-tool-watchdog, turn-watchdog, inactivity-timeout, osSessionService, active-query, process-exit, pm2-respawn |
 | [grace-timer-must-not-kill-chat-session.md](grace-timer-must-not-kill-chat-session.md) | grace-timer, process-exit, pm2-respawn, abort-grace, empty_sdk_stream, inactivity_timeout, turn-pin, restart-loop, chat-kill, SDK_ABORT_GRACE_EXIT_ENABLED, scheduleAbortGraceTimer |
 | [curl-attachments-on-restart-no-refetch.md](curl-attachments-on-restart-no-refetch.md) | webfetch, attachments, restart, recent_exchanges, message-redelivery, re-fetch, supabase-os-attachments, turn-restart, file-url, one-shot-download, /tmp, spec-file, attached-file, http-attachment |
+| [ordit-prepush-pipeline.md](ordit-prepush-pipeline.md) | ordit, prepush, push-to-ordit, bitbucket, scope-check, semgrep, pre-submission, client-push, fireauditors1, ordit-pr, reviewer-persona, pre-review, authorised-push |
 
 ## Authoring rules
 
