@@ -39,14 +39,21 @@ export TEST_CMD='yarn test'
 export BUILD_CMD='yarn build'
 
 # --- Ordit-specific extras beyond CI parity ---
-# Format: "name|cmd||name2|cmd2"   (double-pipe separates steps)
+# Paired bash arrays. Consumed by client-push-gauntlet.sh step 13.
 #
-# 1. AuthSource-string-literal regression check. Eugene flagged string-
-#    literal 'COGNITO' comparisons in his Apr 19 review (comment 785398791).
-#    App-code comparisons MUST use AuthSource.COGNITO. HTTP-boundary test
-#    assertions like toHaveProperty('authSource', 'COGNITO') are allowed.
+# 1. authsource-string-literal-regression. Eugene flagged string-literal
+#    'COGNITO' comparisons in his Apr 19 review (comment 785398791). App-code
+#    comparisons MUST use AuthSource.COGNITO. HTTP-boundary test assertions
+#    like toHaveProperty('authSource', 'COGNITO') are allowed, so exclude
+#    anything under a test/ path or with a .spec.ts suffix.
 #
-# 2. Cognito integration sanity - ensure AuthSource enum + authSource column
-#    are still present in schema.prisma (i.e. the feature wasn't accidentally
-#    reverted).
-export EXTRA_STEPS='authsource-string-literal-regression|bash -c "hits=\$(grep -rnE \"=== *[\x27\\x22]COGNITO[\x27\\x22]|[\x27\\x22]COGNITO[\x27\\x22] *===\" src/ 2>/dev/null | grep -v test/ | grep -v spec.ts || true); if [ -n \"\$hits\" ]; then echo \"string-literal COGNITO found in src/ (Eugene nit 785398791):\"; echo \"\$hits\"; exit 1; fi"||authsource-enum-still-in-schema|bash -c "grep -q \"enum AuthSource\" prisma/schema.prisma && grep -q \"authSource *AuthSource\" prisma/schema.prisma"'
+# 2. authsource-enum-still-in-schema. Ensure AuthSource enum + User.authSource
+#    column still exist in prisma/schema.prisma.
+export EXTRA_STEPS_NAMES=(
+  "authsource-string-literal-regression"
+  "authsource-enum-still-in-schema"
+)
+export EXTRA_STEPS_CMDS=(
+  $'hits=$(grep -rnE "=== *[\'\"]COGNITO[\'\"]|[\'\"]COGNITO[\'\"] *===" src/ 2>/dev/null | grep -v "/test/" | grep -v "\\.spec\\.ts" || true); if [ -n "$hits" ]; then echo "string-literal COGNITO found in src/ (Eugene nit 785398791):"; echo "$hits"; exit 1; fi'
+  $'grep -q "enum AuthSource" prisma/schema.prisma && grep -qE "authSource[[:space:]]+AuthSource" prisma/schema.prisma'
+)
