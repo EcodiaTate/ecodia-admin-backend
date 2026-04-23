@@ -11,6 +11,12 @@
  *   The whole point of rescue is it keeps working when main is wedged. If
  *   rescue lived inside ecodia-api it would die with it. Dedicated PM2
  *   process, dedicated event loop, only coupled via Redis.
+ *
+ * ioredis subscriber model:
+ *   - A subscribed connection can't be used for commands → duplicate()
+ *   - sub.subscribe(channel, ackCb) — ackCb receives subscription ack, not messages
+ *   - sub.on('message', (channel, raw)) — actual dispatch
+ *   - This is DIFFERENT from node-redis v4's `subscribe(channel, handler)` pattern
  */
 const logger = require('../config/logger')
 const { getRedisClient } = require('../config/redis')
@@ -32,8 +38,59 @@ function publish(channel, data) {
     logger.warn('rescueBridge.publish: no Redis client — message dropped', { channel })
     return false
   }
-  redis.publish(channel, JSON.stringify(data))
+  redis.publish(channel, JSON.stringify(data)).catch(err => {
+    logger.warn('rescueBridge.publish failed', { channel, error: err.message })
+  })
   return true
+}
+
+// ─── Subscriber singleton (one connection per process, not per subscribe) ─
+
+let _subscriber = null
+
+function _getSubscriber() {
+  if (_subscriber) return _subscriber
+  const redis = getRedisClient()
+  if (!redis) return null
+  _subscriber = redis.duplicate()
+  _subscriber.on('error', (err) => logger.debug('rescueBridge subscriber error', { error: err.message }))
+  return _subscriber
+}
+
+// Subscribes to a map of { channel: handler } on the shared subscriber.
+// Messages are dispatched by channel name. Returns a cleanup function.
+function subscribeMany(handlerMap) {
+  const sub = _getSubscriber()
+  if (!sub) {
+    logger.warn('rescueBridge.subscribeMany: no Redis client — subscriptions skipped')
+    return () => {}
+  }
+  const channels = Object.keys(handlerMap)
+  for (const channel of channels) {
+    sub.subscribe(channel, (err) => {
+      if (err) logger.warn('rescueBridge subscribe failed', { channel, error: err.message })
+      else logger.info(`rescueBridge subscribed to ${channel}`)
+    })
+  }
+  // Listener is additive — multiple subscribeMany calls layer handlers by channel,
+  // so only one global 'message' listener is needed.
+  if (!sub._rescueBridgeListenerAttached) {
+    sub._rescueBridgeListenerAttached = true
+    sub._rescueBridgeHandlers = {}
+    sub.on('message', (ch, raw) => {
+      const handler = sub._rescueBridgeHandlers[ch]
+      if (!handler) return
+      try {
+        handler(JSON.parse(raw))
+      } catch (err) {
+        logger.warn('rescueBridge message parse error', { channel: ch, error: err.message })
+      }
+    })
+  }
+  // Register handlers for this call (channel → handler map stored on subscriber)
+  for (const [channel, handler] of Object.entries(handlerMap)) {
+    sub._rescueBridgeHandlers[channel] = handler
+  }
 }
 
 // ─── API-side: publish messages to rescue, subscribe to events ───────
@@ -50,35 +107,14 @@ function publishHealthPing() {
   return publish(CHANNELS.HEALTH_PING, { ts: Date.now() })
 }
 
-// Subscribes the api process to rescue events. Callbacks receive parsed data.
-// Returns an unsubscribe function.
-async function subscribeToRescueEvents(handlers) {
-  const redis = getRedisClient()
-  if (!redis) {
-    logger.warn('rescueBridge.subscribeToRescueEvents: no Redis client')
-    return () => {}
-  }
-
-  const sub = redis.duplicate()
-  await sub.connect()
-
-  const channels = [CHANNELS.OUTPUT, CHANNELS.STATUS, CHANNELS.READY, CHANNELS.EXIT, CHANNELS.HEALTH_PONG]
-  for (const channel of channels) {
-    await sub.subscribe(channel, (raw) => {
-      try {
-        const data = JSON.parse(raw)
-        const handler = handlers[channel]
-        if (typeof handler === 'function') handler(data)
-      } catch (err) {
-        logger.warn('rescueBridge: subscribe handler threw', { channel, error: err.message })
-      }
-    })
-  }
-
-  return async () => {
-    try { await sub.unsubscribe() } catch {}
-    try { await sub.quit() } catch {}
-  }
+function subscribeToRescueEvents(handlers) {
+  subscribeMany({
+    [CHANNELS.OUTPUT]:      handlers[CHANNELS.OUTPUT]      || (() => {}),
+    [CHANNELS.STATUS]:      handlers[CHANNELS.STATUS]      || (() => {}),
+    [CHANNELS.READY]:       handlers[CHANNELS.READY]       || (() => {}),
+    [CHANNELS.EXIT]:        handlers[CHANNELS.EXIT]        || (() => {}),
+    [CHANNELS.HEALTH_PONG]: handlers[CHANNELS.HEALTH_PONG] || (() => {}),
+  })
 }
 
 // ─── Rescue-side: publish events, subscribe to incoming messages ─────
@@ -103,33 +139,12 @@ function publishHealthPong() {
   return publish(CHANNELS.HEALTH_PONG, { ts: Date.now() })
 }
 
-async function subscribeToApiEvents(handlers) {
-  const redis = getRedisClient()
-  if (!redis) {
-    logger.warn('rescueBridge.subscribeToApiEvents: no Redis client')
-    return () => {}
-  }
-
-  const sub = redis.duplicate()
-  await sub.connect()
-
-  const channels = [CHANNELS.MESSAGE_SEND, CHANNELS.MESSAGE_ABORT, CHANNELS.HEALTH_PING]
-  for (const channel of channels) {
-    await sub.subscribe(channel, (raw) => {
-      try {
-        const data = JSON.parse(raw)
-        const handler = handlers[channel]
-        if (typeof handler === 'function') handler(data)
-      } catch (err) {
-        logger.warn('rescueBridge: subscribe handler threw', { channel, error: err.message })
-      }
-    })
-  }
-
-  return async () => {
-    try { await sub.unsubscribe() } catch {}
-    try { await sub.quit() } catch {}
-  }
+function subscribeToApiEvents(handlers) {
+  subscribeMany({
+    [CHANNELS.MESSAGE_SEND]:  handlers[CHANNELS.MESSAGE_SEND]  || (() => {}),
+    [CHANNELS.MESSAGE_ABORT]: handlers[CHANNELS.MESSAGE_ABORT] || (() => {}),
+    [CHANNELS.HEALTH_PING]:   handlers[CHANNELS.HEALTH_PING]   || (() => {}),
+  })
 }
 
 module.exports = {
