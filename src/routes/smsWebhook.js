@@ -79,11 +79,13 @@ router.post('/incoming', validateTwilioSignature, async (req, res) => {
 
     const prompt = `[SMS from ${senderName} (${from})]: ${Body}\n\n${context}\n\nRespond concisely (SMS length). Send your reply back via the send_sms tool to ${from}. Aim for under 320 chars. Tone should match the relationship — warm and direct with Tate, professional with clients, appropriate with the person.`
 
-    // priority: true — SMS wake messages cut through any background turn
-    // (heartbeat, scheduled task, consolidation). Without this the SMS would
-    // sit behind the current turn for up to several minutes, defeating the
-    // "Tate texts from Africa to wake the OS" use case.
-    osSession.sendMessage(prompt, { priority: true }).catch(err => {
+    // priority: false — queue behind the active turn (same as chat /message).
+    // Hard-interrupting with priority:true broke the interrupt/reply/end cycle:
+    // SMS would abort mid-turn, I'd reply, turn would end, prior work never resumed.
+    // Tate flagged 2026-04-23 22:10 AEST. Queue behaviour: if idle, fires immediately
+    // (wake case still works); if mid-turn, fires after current turn completes
+    // (preserves flow). See CLAUDE.md "Turn Completion Discipline".
+    osSession.sendMessage(prompt, { priority: false }).catch(err => {
       console.error('[SMS Webhook] OS session error:', err.message)
     })
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
