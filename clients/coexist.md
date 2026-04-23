@@ -142,3 +142,6 @@ Auto-deploys from main branch. Push to GitHub, Vercel handles the rest.
 - Cloudflare WAF quirk: the Management API blocks some SQL payloads with HTTP 403 `error code: 1010`. Workaround: send body via `curl --data-binary @file.json` with a `User-Agent: supabase-cli` header.
 - Column A holds the row ID. Forms rows = integers (immutable, owned by sheet). App rows = UUID strings (owned by DB, written by `to-excel`).
 - Manual probe: `curl -X POST 'https://tjutlbzekfouwsiaplbr.supabase.co/functions/v1/excel-sync?direction=from-excel' -H "Authorization: Bearer <service_role_key>"`. Always pass an explicit `direction=` when probing.
+
+## 2026-04-23 21:50 AEST - SKIP_LINT=1 bypass on fix/mobile-padding-audit push
+Reason: main had 184 pre-existing lint errors (not introduced by this PR). Padding commit 9bf9003 touched 20 layout/spacing files only, no code logic. Build green, 158 tests green, only lint skipped via documented targeted flag. Branch pushed at 11:50 UTC. Separate cleanup PR needed to resolve main's lint debt before SKIP_LINT can be retired.
