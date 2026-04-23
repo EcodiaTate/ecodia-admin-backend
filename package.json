@@ -6,7 +6,11 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "migrate": "node src/db/migrate.js",
-    "kg:backfill": "node src/scripts/kgBackfill.js"
+    "kg:backfill": "node src/scripts/kgBackfill.js",
+    "test": "jest"
+  },
+  "jest": {
+    "testEnvironment": "node"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.92",
@@ -33,6 +37,8 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "jest": "^29.7.0",
     "nodemon": "^3.1.0"
   }
 }
