@@ -1,4 +1,10 @@
-# Ordit — Client Knowledge File
+# Ordit - Client Knowledge File
+
+> **DISPATCH SPEC FILES (load before any ordit-backend Factory session):**
+> - [clients/ordit/DISPATCH_PREAMBLE.md](ordit/DISPATCH_PREAMBLE.md) - paste at top of every `start_cc_session` prompt
+> - [clients/ordit/HOUSE_STYLE.md](ordit/HOUSE_STYLE.md) - code conventions, cast rules, DTO rules, test rules
+> - [clients/ordit/REVIEWER_PROFILE.md](ordit/REVIEWER_PROFILE.md) - Eugene: what he rejects, what neutralizes him
+> - [clients/ordit/PR_BODY_TEMPLATE.md](ordit/PR_BODY_TEMPLATE.md) - required PR description structure
 
 **Client:** Ordit (fire safety compliance SaaS)
 **Contact:** Eugene Kerner (CTO/dev lead, ekerner@ekerner.com). Billing contact: Craige Hills (craige@fireauditors.com.au).
