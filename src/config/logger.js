@@ -148,8 +148,111 @@ class DBErrorTransport extends Transport {
   }
 }
 
+// ─── Retrospective debug ring-buffer transport ──────────────────────
+// Problem solved: production log level is 'info' so debug context is
+// discarded. When an error fires we have the error but no trail leading
+// up to it — useless for triage when the OS is wedged and you can't ask
+// it what happened.
+//
+// This transport accepts ALL levels (including debug/verbose) but keeps
+// them only in an in-memory circular buffer. On every `error` log, it
+// flushes the current buffer to a retrospective dump file with a
+// timestamped name. Net effect: zero cost during healthy operation
+// (memory-only), full debug context captured around every real error.
+//
+// Also exposes getRecentLogs() so triage tooling (the rescue process,
+// /api/triage/dump, etc) can read the current window programmatically.
+
+const RING_BUFFER_SIZE = parseInt(process.env.LOG_RING_BUFFER_SIZE || '500', 10)
+const RETRO_DUMP_DIR = process.env.LOG_RETRO_DUMP_DIR || 'logs/retro'
+const _fs = require('fs')
+const _path = require('path')
+let _lastDumpAt = 0
+const RETRO_DUMP_COOLDOWN_MS = 10_000 // one retro dump per 10s max
+
+class RingBufferTransport extends Transport {
+  constructor(opts) {
+    super(opts)
+    this.name = 'ring-buffer'
+    this._buf = new Array(RING_BUFFER_SIZE)
+    this._head = 0
+    this._len = 0
+  }
+
+  log(info, callback) {
+    if (callback) callback() // always sync ack
+
+    // Normalise — winston passes info with a Symbol(level) in addition to info.level.
+    const entry = {
+      ts: new Date().toISOString(),
+      level: info.level,
+      message: info.message,
+      ...Object.fromEntries(Object.entries(info).filter(([k]) => (
+        k !== 'level' && k !== 'message' && k !== 'timestamp' &&
+        typeof k === 'string' && !k.startsWith('Symbol')
+      ))),
+    }
+    this._buf[this._head] = entry
+    this._head = (this._head + 1) % RING_BUFFER_SIZE
+    if (this._len < RING_BUFFER_SIZE) this._len++
+
+    // On error: dump the ring buffer to disk (cooldown-gated) so there's a
+    // persistent debug trail around every error. Fire-and-forget.
+    if (info.level === 'error' && env.NODE_ENV === 'production') {
+      const now = Date.now()
+      if (now - _lastDumpAt > RETRO_DUMP_COOLDOWN_MS) {
+        _lastDumpAt = now
+        setImmediate(() => this._dumpToDisk(entry).catch(() => {}))
+      }
+    }
+  }
+
+  getRecent(limit) {
+    const n = Math.min(limit || this._len, this._len)
+    const out = []
+    for (let i = 0; i < n; i++) {
+      const idx = (this._head - n + i + RING_BUFFER_SIZE) % RING_BUFFER_SIZE
+      const entry = this._buf[idx]
+      if (entry) out.push(entry)
+    }
+    return out
+  }
+
+  async _dumpToDisk(triggerEntry) {
+    try {
+      _fs.mkdirSync(RETRO_DUMP_DIR, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const file = _path.join(RETRO_DUMP_DIR, `retro-${stamp}.jsonl`)
+      const lines = []
+      lines.push(JSON.stringify({ _retro_header: true, trigger: triggerEntry, ts: new Date().toISOString() }))
+      for (const entry of this.getRecent(RING_BUFFER_SIZE)) {
+        lines.push(JSON.stringify(entry))
+      }
+      _fs.writeFileSync(file, lines.join('\n') + '\n')
+    } catch {
+      // never throw from a logger transport
+    }
+  }
+}
+
+const _ringTransport = new RingBufferTransport({ level: 'silly' })
+
+// Set logger level to 'silly' so every call reaches the transports. Each
+// transport then filters to its own level, so Console/File still only get
+// info+ in prod while the ring buffer catches everything.
+const _consoleTransport = new transports.Console({ level: env.NODE_ENV === 'production' ? 'info' : 'debug' })
+const _combinedFile = env.NODE_ENV === 'production'
+  ? new transports.File({ filename: 'logs/combined.log', level: 'info' })
+  : null
+const _errorFile = env.NODE_ENV === 'production'
+  ? new transports.File({ filename: 'logs/error.log', level: 'error' })
+  : null
+const _dbErrorTransport = env.NODE_ENV === 'production'
+  ? new DBErrorTransport({ level: 'error' })
+  : null
+
 const logger = createLogger({
-  level: env.NODE_ENV === 'production' ? 'info' : 'debug',
+  level: 'silly', // global floor; real filtering is per-transport
   format: format.combine(
     format.timestamp(),
     format.errors({ stack: true }),
@@ -159,16 +262,15 @@ const logger = createLogger({
   ),
   defaultMeta: { service: 'ecodiaos' },
   transports: [
-    new transports.Console(),
+    _consoleTransport,
     ...(env.NODE_ENV === 'production'
-      ? [
-          new transports.File({ filename: 'logs/error.log', level: 'error' }),
-          new transports.File({ filename: 'logs/combined.log' }),
-          // Persist errors to DB so the system can see its own failures
-          new DBErrorTransport({ level: 'error' }),
-        ]
+      ? [_errorFile, _combinedFile, _dbErrorTransport]
       : []),
+    _ringTransport,
   ],
 })
+
+// Expose programmatic access to the ring buffer for triage tooling.
+logger.getRecentLogs = (limit) => _ringTransport.getRecent(limit)
 
 module.exports = logger

@@ -3,6 +3,7 @@ const helmet = require('helmet')
 const cors = require('cors')
 const compression = require('compression')
 const errorHandler = require('./middleware/errorHandler')
+const logger = require('./config/logger')
 
 const authRoutes = require('./routes/auth')
 const financeRoutes = require('./routes/finance')
@@ -46,6 +47,34 @@ app.use(cors({
 app.use(compression())
 app.use(express.json({ limit: '5mb' }))
 app.use(express.urlencoded({ extended: false }))
+
+// ─── HTTP access log ─────────────────────────────────────────────────
+// Every inbound request gets one structured log line on finish: method,
+// path, status, duration. Critical for triage: without it you cannot tell
+// whether a "hung" OS turn actually received its request or not.
+//
+// Skips /api/healthz and /api/health (polled by monitors, would drown
+// the log). Skips static /api/files (not useful to log an asset URL).
+app.use((req, res, next) => {
+  if (req.path === '/api/healthz' || req.path === '/api/health') return next()
+  if (req.path.startsWith('/api/files')) return next()
+  const startedAt = Date.now()
+  res.on('finish', () => {
+    const ms = Date.now() - startedAt
+    const level = res.statusCode >= 500 ? 'error'
+                : res.statusCode >= 400 ? 'warn'
+                : 'info'
+    logger[level]('HTTP', {
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status: res.statusCode,
+      ms,
+      ip: req.ip,
+      // User-Agent is too noisy for the default line; add on demand via debug.
+    })
+  })
+  next()
+})
 
 // Health check (no auth) — heavier, includes route registration signal.
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
@@ -95,6 +124,7 @@ app.use('/api/sms', require('./routes/smsWebhook'))
 app.use('/api/docs', require('./routes/documents'))
 app.use('/api/dashboard', require('./routes/dashboard'))
 app.use('/api/rescue', require('./routes/rescue'))
+app.use('/api/triage', require('./routes/triage'))
 
 // Error handler (must be last)
 app.use(errorHandler)

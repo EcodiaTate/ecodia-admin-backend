@@ -2512,6 +2512,18 @@ async function _sendMessageWithWatchdog(content, opts) {
 // they abort the active query, flush the queue, and send immediately.
 // The CC session resumes via session_id so no context is lost.
 async function sendMessage(content, opts = {}) {
+  // One info-level breadcrumb at the door so you always see "a message arrived"
+  // in pm2 logs even when the turn later hangs in some deep path. Was missing
+  // during the 2026-04-23 hang-without-logs incident.
+  logger.info('OS Session sendMessage entry', {
+    contentLen: typeof content === 'string' ? content.length : null,
+    priority: !!opts.priority,
+    suppressOutput: !!opts.suppressOutput,
+    activeQuery: !!activeQuery,
+    handoverInProgress,
+    retryDepth: opts._retryDepth || 0,
+  })
+
   // Input size guard — reject pathologically huge prompts at the door. The
   // SDK technically accepts them but they cause unpredictable tool/CLI
   // behaviour and make debugging "it just froze" nearly impossible. 200KB
