@@ -15,6 +15,10 @@ module.exports = {
     // Runs separately from ecodia-api so CC sessions survive API restarts (e.g. self-modification deploys).
     // Communicates with ecodia-api via Redis pub/sub (factoryBridge).
     { ...COMMON, name: 'ecodia-factory', script: 'src/workers/factoryRunner.js', max_memory_restart: '3G', max_restarts: 10, restart_delay: 5000 },
+    // Rescue — narrow coding-focused CC session that stays alive when
+    // ecodia-api is wedged. Always running but idle until a message is
+    // sent via the rescue bridge. See src/rescue/rescueRunner.js.
+    { ...COMMON, name: 'ecodia-rescue', script: 'src/rescue/rescueRunner.js', max_memory_restart: '1G', max_restarts: 50, restart_delay: 3000, env: { ...COMMON.env, RESCUE_REPO_PATH: '/home/tate/ecodiaos' } },
     // ─────────────────────────────────────────────────────────────────
     // DISABLED 2026-04-15 — OS Session is the sole driver of work.
     // It invokes poll/consolidate/embed functions on-demand as tools.
