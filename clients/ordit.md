@@ -1,9 +1,32 @@
 # Ordit — Client Knowledge File
 
 **Client:** Ordit (fire safety compliance SaaS)
-**Contact:** Eugene (CTO/dev lead)
-**Status:** BE Cognito integration complete, pending AWS creds for real-environment testing
+**Contact:** Eugene Kerner (CTO/dev lead, ekerner@ekerner.com). Billing contact: Craige Hills (craige@fireauditors.com.au).
+**Legal entity:** Spatial & Compliance Pty Ltd (ABN 67 134 052 609, GST-reg). Trades as Fire Auditors + Ordit brand.
+**Status:** PR 212 re-review 2026-04-23 04:19 UTC - Eugene requested changes (migrations + pipeline switch out of scope). Revert 24ab453 pushed 14 min later. Awaiting Eugene re-review. Draft PR-comment reply in kv_store.ceo.drafts.ordit-pr212-eugene-reply-2026-04-23.
 **Stack:** NestJS, Prisma, MySQL (Docker local), AWS Cognito
+**Repo:** bitbucket.org/fireauditors1/be (auth via API key in kv_store.creds.bitbucket_api_token)
+**Worktree (VPS):** /home/tate/workspaces/ordit/be
+**Rate:** $80/hr (strategic discount below $120/hr rate card)
+
+---
+
+## 2026-04-23: Eugene second review - the scope-creep incident
+
+**What happened:**
+1. Apr 20-21: production-readiness pass on PR 212 introduced (a) Prisma baseline migration + authSource migration, (b) bitbucket-pipelines.yml switch from `prisma db push` to `prisma migrate deploy`. Rationale at the time: "fully production ready" per Tate directive.
+2. Apr 23 04:19 UTC: Eugene reviewed. Scorching feedback:
+   - "This PR cannot be merged. The AI agent has introduced unplanned, unreviewed infrastructure changes that were not part of this task."
+   - Existing codebase uses `prisma db push` everywhere. Switching to `migrate deploy` on live prod DB needs planned multi-step rollout, not a PR drop-in. Merging as-is would break the deployment pipeline and could corrupt migration history.
+   - "Please do not use an AI agent to submit code you have not reviewed line by line."
+3. Apr 23 04:33 UTC (14 min after): commit 24ab453 pushed - drops `prisma/migrations/` folder, restores `prisma db push --accept-data-loss` in bitbucket-pipelines.yml. Branch now contains only Cognito feature work diff vs origin/uat.
+4. Awaiting Eugene re-review. His PR comment targets `prisma/migrations/00000000000000_baseline/README.md` which no longer exists.
+
+**Doctrine lessons (apply to ALL future client Factory dispatches):**
+- **Scope discipline beats production-readiness zeal.** If a client codebase uses pattern X and the ticket does not include changing to Y, do not introduce Y even if Y is better. Ticket boundaries first.
+- **Infrastructure changes are separate deliverables.** Migrations, pipeline switches, deploy strategy changes each need their own rollout plan. Never fold into a feature PR.
+- **"Fix everything around what we've done" means finish scoped work to prod quality.** It does NOT mean "add new scope you think should exist."
+- **Eugene treats AI-agent output as owner-responsibility.** He's right. Every line of client code needs line-by-line human review before submission. See pattern file (to be written): `~/ecodiaos/patterns/client-code-scope-discipline.md`.
 
 ---
 
@@ -12,9 +35,9 @@
 Ordit uses email addresses with `+cog-` suffix as a flag to route users through AWS Cognito auth. The integration adds parallel Cognito user pool management alongside their existing legacy auth.
 
 ### Key files
-- `D:\.code\ordit\be\src\users\users.service.ts` — main user service, all Cognito logic here
-- `D:\.code\ordit\be\src\auth\` — auth module, CognitoStrategy
-- `D:\.code\ordit\be\src\users\dto\` — DTOs for request/response
+- `src/users/users.service.ts` - main user service, all Cognito logic here
+- `src/auth/` - auth module, CognitoStrategy
+- `src/users/dto/` - DTOs for request/response
 
 ### Env vars required for Cognito
 - `AWS_REGION`
@@ -26,50 +49,28 @@ Ordit uses email addresses with `+cog-` suffix as a flag to route users through 
 
 ---
 
-## Known Bugs (Review Pass — Apr 15 2026)
+## Bugs fixed (Apr 15 review pass + subsequent rounds)
 
-DO NOT push to UAT until these are fixed. Waiting on AWS creds from Eugene to test.
+All 5 review-pass bugs addressed in PR 212:
+- findByCognitoSub missing return - FIXED
+- resetPassword sync to Cognito - FIXED (AdminSetUserPasswordCommand wired in)
+- deleteUser removes from Cognito - FIXED (AdminDeleteUserCommand in handleUserDeletedEvent)
+- Cognito user orphan rollback - FIXED (try/catch + rollback on Prisma failure, commit df4b49d)
+- Cognito env guard - FIXED (isConfigured check)
 
-### CRITICAL
-**Bug 1: `findByCognitoSub` missing return statement (~L1027)**
-```typescript
-public async findByCognitoSub(cognitoSub: string): Promise<any> {
-  const user = await this.prisma.user.findFirst({ where: { cognitoSub } });
-  // NO RETURN — every caller gets undefined
-}
-```
-Fix: Add `return user;`
-
-### HIGH
-**Bug 2: `resetPassword` doesn't sync to Cognito (~L1052)**
-The method updates the local DB password hash only. If user has a `cognitoSub`, their Cognito password stays stale. After reset, Cognito auth fails with new password.
-Fix: After DB update, check if `user.cognitoSub` exists, call `AdminSetUserPasswordCommand` with new password.
-
-**Bug 3: `deleteUser` doesn't remove from Cognito (~L731-790)**
-`handleUserDeletedEvent` cleans up DB records but never deletes the Cognito user pool entry. Deleted users can still authenticate via Cognito credentials.
-Fix: In `handleUserDeletedEvent`, if user has `cognitoSub`, call `AdminDeleteUserCommand`.
-
-### MEDIUM
-**Bug 4: Cognito user orphaned on Prisma transaction failure (~L265)**
-`createUser` creates the Cognito user inside what appears to be a Prisma transaction block. If Prisma fails (unique constraint etc.), Cognito user is already created but there's no rollback/cleanup. A retry creates a second Cognito user for the same email.
-Fix: Wrap Cognito creation in try/catch, rollback (delete Cognito user) on Prisma failure.
-
-### LOW
-**Bug 5: No env var guard on Cognito client init (~L235)**
-No `isConfigured()` check before instantiating `CognitoIdentityProviderClient`. Misconfigured env produces raw AWS errors leaking implementation details.
-Fix: Add a guard: `if (!process.env.AWS_COGNITO_USER_POOL_ID) { logger.warn('Cognito not configured'); return; }`
-
----
-
-## Previous Bugs Fixed (before Apr 15)
-6 bugs caught in earlier review pass (details not captured — this file created Apr 15).
+Plus Eugene's first-round nits (PR 212 review Apr 20):
+- COGNITO string-literal replaced with AuthSource.COGNITO enum across 5 sites
+- authSource field removed from CreateUserDto + AuthRegisterDto (server decides via env, not client)
+- env-driven useCognitoAuthSource flag
+- em-dashes replaced with hyphens
 
 ---
 
 ## Scope & Contract
 - DO NOT push to UAT without Tate's explicit OK
 - DO NOT push to their repo without Tate's go-ahead
-- Waiting on Eugene to provide AWS Cognito creds for integration testing
+- Zero client contact without Tate's go-ahead per doctrine (including Bitbucket PR comments)
+- Waiting on Eugene to provide AWS Cognito creds for integration testing (not a blocker for review)
 - Migration quote (3 options) pending Bitbucket access to frontend repo
 
 ---
