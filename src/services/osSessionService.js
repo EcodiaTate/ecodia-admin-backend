@@ -1308,7 +1308,12 @@ async function _sendMessageImpl(content, opts = {}) {
   // tool_result. If a tool sits outstanding past PER_TOOL_TIMEOUT_MS, treat
   // it as a hung MCP and abort the whole query — the outer retry / account-
   // switch logic then takes over.
-  const PER_TOOL_TIMEOUT_MS = 60 * 1000
+  // 2026-04-23 hot-fix: per-tool watchdog was aborting OS turns at 60s on
+  // healthy but slow tools (Factory dispatches, large git ops, nested MCP
+  // chains). Defaulted threshold to 5 min and gated the abort action behind
+  // TURN_TOOL_WATCHDOG_ABORT_ENABLED=true. Log-only mode retains diagnostics
+  // without killing live chat mid-turn. Tate Prio 1 2026-04-23.
+  const PER_TOOL_TIMEOUT_MS = Number(process.env.TURN_TOOL_WATCHDOG_MS) || (5 * 60 * 1000)
   const _toolStartedAt = new Map()    // tool_use_id -> Date.now()
   let _toolWatchdog = null
   let _toolWatchdogAborted = false
@@ -1328,11 +1333,20 @@ async function _sendMessageImpl(content, opts = {}) {
     const remaining = Math.max(0, PER_TOOL_TIMEOUT_MS - age)
     _toolWatchdog = setTimeout(() => {
       const ageSec = Math.round((Date.now() - oldest) / 1000)
-      logger.error('OS Session: tool watchdog fired — tool outstanding past timeout, aborting query', {
-        tool_use_id: oldestId, ageSec, outstanding: _toolStartedAt.size,
-      })
-      _toolWatchdogAborted = true
-      _abortActiveQuery('tool_watchdog')
+      const abortEnabled = (process.env.TURN_TOOL_WATCHDOG_ABORT_ENABLED || 'false').toLowerCase() === 'true'
+      if (abortEnabled) {
+        logger.error('OS Session: tool watchdog fired — tool outstanding past timeout, aborting query', {
+          tool_use_id: oldestId, ageSec, outstanding: _toolStartedAt.size,
+        })
+        _toolWatchdogAborted = true
+        _abortActiveQuery('tool_watchdog')
+      } else {
+        logger.warn('OS Session: tool watchdog fired — abort suppressed (TURN_TOOL_WATCHDOG_ABORT_ENABLED=false)', {
+          tool_use_id: oldestId, ageSec, outstanding: _toolStartedAt.size,
+        })
+        // Reschedule so we keep tracking; single setTimeout fires once otherwise.
+        _scheduleToolWatchdog()
+      }
     }, remaining)
   }
   const _markToolStarted = (id, name) => {
@@ -1348,20 +1362,32 @@ async function _sendMessageImpl(content, opts = {}) {
     _scheduleToolWatchdog()
   }
 
-  // Inactivity timeout: if the SDK produces no messages for 90 seconds, abort.
+  // Inactivity timeout: if the SDK produces no messages for N seconds, abort.
   // This catches hangs from 429s, network issues, or stuck SDK state.
-  // 90s is generous enough for slow tool calls but catches silent hangs quickly.
-  const INACTIVITY_TIMEOUT_MS = 90 * 1000
+  //
+  // 2026-04-23 hot-fix: default raised from 90s to 4min and abort action gated
+  // behind TURN_INACTIVITY_ABORT_ENABLED. 90s was aborting healthy turns during
+  // long tool chains. Log-only mode retains diagnostics without killing chat.
+  const INACTIVITY_TIMEOUT_MS = Number(process.env.TURN_INACTIVITY_MS) || (4 * 60 * 1000)
   let _inactivityTimer = null
   let _inactivityAborted = false
   const _resetInactivityTimer = () => {
     if (_inactivityTimer) clearTimeout(_inactivityTimer)
     _inactivityTimer = setTimeout(() => {
-      logger.error('OS Session: inactivity timeout (90s no messages) — aborting query', {
-        currentProvider: _currentProvider,
-      })
-      _inactivityAborted = true
-      _abortActiveQuery('inactivity_timeout')
+      const abortEnabled = (process.env.TURN_INACTIVITY_ABORT_ENABLED || 'false').toLowerCase() === 'true'
+      const elapsedSec = Math.round(INACTIVITY_TIMEOUT_MS / 1000)
+      if (abortEnabled) {
+        logger.error(`OS Session: inactivity timeout (${elapsedSec}s no messages) — aborting query`, {
+          currentProvider: _currentProvider,
+        })
+        _inactivityAborted = true
+        _abortActiveQuery('inactivity_timeout')
+      } else {
+        logger.warn(`OS Session: inactivity timeout (${elapsedSec}s no messages) — abort suppressed (TURN_INACTIVITY_ABORT_ENABLED=false)`, {
+          currentProvider: _currentProvider,
+        })
+        _resetInactivityTimer()
+      }
     }, INACTIVITY_TIMEOUT_MS)
   }
 
