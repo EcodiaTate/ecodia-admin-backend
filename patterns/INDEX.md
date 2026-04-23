@@ -51,6 +51,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [client-code-scope-discipline.md](client-code-scope-discipline.md) | client-code, factory-client-dispatch, scope-creep, prisma, migration, pipeline, bitbucket-pipelines, pr-review, eugene, ordit, production-ready, fix-everything |
 | [status-board-drift-prevention.md](status-board-drift-prevention.md) | status_board, stale-status, drift, status-rot, session-start, cron-wake, audit-status, duplicate-row, completed-row, archived_at, last_touched, source-of-truth-drift |
 | [factory-metadata-trust-filesystem.md](factory-metadata-trust-filesystem.md) | factory, filesChanged, taskDiffAlignment, review_factory_session, approve_factory_deploy, force, stale-worktree, factory-metadata |
+| [sdk-abortcontroller-cancellation.md](sdk-abortcontroller-cancellation.md) | sdk, abort, cancellation, watchdog, query.close, hang, tool-timeout, webfetch, undici, mcp-transport, abortcontroller, per-tool-watchdog, turn-watchdog, inactivity-timeout, osSessionService, active-query, process-exit, pm2-respawn |
 
 ## Authoring rules
 

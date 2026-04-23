@@ -431,7 +431,10 @@ let handoverInProgress = false
 
 // In-memory state
 let activeQuery = null          // the running Query object from the SDK
+let activeAbort = null          // AbortController for the running query (enables SDK-level cancellation)
 let activeQuerySuppressed = false  // true when the current query was started via sendTask / suppressOutput
+let abortGraceTimer = null      // 30s backstop: process.exit(1) if turn stays hung after abort
+let _abortInProgress = false    // true from abort until the for-await loop naturally exits
 let ccSessionId = null          // CC's internal session_id (for resume)
 let sessionTokenUsage = { input: 0, output: 0 }
 let _currentProvider = 'claude_max'  // tracks which provider the current session is using
@@ -1523,8 +1526,11 @@ async function _sendMessageImpl(content, opts = {}) {
 
   try {
     logger.info('OS Session: calling queryFn...', { promptLength: finalPrompt.length, suppressOutput, recovery: !!recoveryBlock })
+    const turnAbort = new AbortController()
+    options.abortController = turnAbort
     const q = queryFn({ prompt: finalPrompt, options })
     activeQuery = q
+    activeAbort = turnAbort
     const _turnStartedAt = Date.now()  // for turn_complete duration_ms
     activeQuerySuppressed = suppressOutput
     _resetInactivityTimer()
@@ -1826,6 +1832,7 @@ async function _sendMessageImpl(content, opts = {}) {
                 })
                 ccSessionId = null
                 activeQuery = null
+                activeAbort = null
                 await db`UPDATE cc_sessions SET cc_cli_session_id = NULL WHERE id = ${dbSessionId}`.catch(() => {})
                 throw { _staleRetry: true, message: content }
               }
@@ -1835,6 +1842,7 @@ async function _sendMessageImpl(content, opts = {}) {
                 if (next) {
                   ccSessionId = null
                   activeQuery = null
+                  activeAbort = null
                   logger.warn(`OS Session ${_currentProvider} exhausted — switching to ${next.provider}`, { reason: next.reason })
                   emitOutput({ type: 'system', content: `⚡ ${_currentProvider} limit hit — switching to ${next.provider}.` })
                   throw { _accountRetry: true, message: content }
@@ -1945,6 +1953,9 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     _stopLiveness()
     activeQuery = null
+    activeAbort = null
+    _abortInProgress = false
+    if (abortGraceTimer) { clearTimeout(abortGraceTimer); abortGraceTimer = null }
     // If we exited the SDK loop while isCompacting was still true (the compact
     // boundary 'end' never arrived but the stream ended anyway), the next turn
     // would emitStatus('compacting') as its opening signal. Reset here.
@@ -2177,6 +2188,9 @@ async function _sendMessageImpl(content, opts = {}) {
     if (_compactBoundaryTimer) { clearTimeout(_compactBoundaryTimer); _compactBoundaryTimer = null }
     _stopLiveness()
     activeQuery = null
+    activeAbort = null
+    _abortInProgress = false
+    if (abortGraceTimer) { clearTimeout(abortGraceTimer); abortGraceTimer = null }
     // Module-level flags can leak here if we threw mid-compaction or mid-handover.
     // Reset them so the next turn isn't stuck thinking a phase is still in flight.
     if (isCompacting) isCompacting = false
@@ -2292,24 +2306,56 @@ async function _sendMessageImpl(content, opts = {}) {
 }
 
 // Safe swap helper — atomically takes the current activeQuery, nulls the ref,
-// then attempts close() in the background. Prevents the orphan-reference bug
-// where a close() throw leaves activeQuery pointing at a dead query, so the
-// NEXT turn thinks a query is still running and double-closes.
+// then propagates cancellation via AbortController before attempting close().
 //
-// close() is fire-and-forget: if the SDK's close() returns a promise that
-// hangs, or throws async, we still proceed immediately. The caller only cares
-// that activeQuery is nulled — the actual shutdown of the SDK query is best-
-// effort and must never block the next turn from starting.
+// AbortController.abort() is the primary cancellation path: it propagates into
+// the SDK's in-flight built-in tools (WebFetch/undici, Bash subprocesses, MCP
+// stdio transports) so they stop rather than pin the process indefinitely.
+// close() is belt-and-braces for SDK stream teardown.
+//
+// After abort, _scheduleAbortGraceTimer arms a 30s backstop: if the turn
+// somehow stays hung (syscall blocked, libc DNS lookup, native stream stall),
+// the timer calls process.exit(1) so PM2 respawns the process.
 function _abortActiveQuery(reason) {
   const q = activeQuery
+  const ac = activeAbort
   activeQuery = null
+  activeAbort = null
   activeQuerySuppressed = false
+  if (ac) {
+    // Primary cancellation — propagates into SDK tool runners and undici fetch.
+    try { ac.abort(reason || 'aborted') } catch (e) {
+      logger.debug('AbortController.abort threw', { reason, error: e?.message })
+    }
+  }
   if (q) {
-    // Wrap sync-throw AND async-throw paths; both get swallowed.
+    // Belt-and-braces: still call close() for SDK stream teardown.
     Promise.resolve()
       .then(() => q.close())
       .catch(err => logger.debug('activeQuery.close() rejected (ignored)', { reason, error: err?.message }))
   }
+  _scheduleAbortGraceTimer(reason)
+}
+
+// 30-second process-recycle backstop. If the for-await loop does NOT exit
+// naturally within 30s of an abort (e.g. a native syscall is truly wedged),
+// call process.exit(1) so PM2 respawns ecodia-api.
+//
+// Not scheduled for 'new_turn_starting' or 'priority_preempt' — those abort
+// one query only to immediately start the next, so lingering in _abortInProgress
+// would be wrong. All watchdog/manual aborts DO schedule the timer.
+function _scheduleAbortGraceTimer(reason) {
+  if (reason === 'new_turn_starting' || reason === 'priority_preempt' || reason === 'compact_deprecated') return
+  if (abortGraceTimer) { clearTimeout(abortGraceTimer); abortGraceTimer = null }
+  _abortInProgress = true
+  abortGraceTimer = setTimeout(() => {
+    abortGraceTimer = null
+    if (_abortInProgress) {
+      logger.error('SDK_ABORT_GRACE_EXPIRED — process exit for PM2 respawn', { reason })
+      process.exit(1)
+    }
+  }, 30 * 1000)
+  abortGraceTimer.unref?.()
 }
 
 // Hard ceiling on any single turn. If _sendMessageImpl hasn't resolved within
@@ -2840,4 +2886,11 @@ function _isQueueBusy() {
   return false
 }
 
-module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort, _isQueueBusy }
+// Test-only hooks — expose abort internals for unit tests without touching production paths.
+function _getAbortGraceTimerForTest() { return abortGraceTimer }
+function _isAbortInProgressForTest() { return _abortInProgress }
+function _setActiveAbortForTest(ac) { activeAbort = ac }
+function _setActiveQueryForTest(q) { activeQuery = q }
+function _resetAbortStateForTest() { activeAbort = null; activeQuery = null; _abortInProgress = false; if (abortGraceTimer) { clearTimeout(abortGraceTimer); abortGraceTimer = null } }
+
+module.exports = { sendMessage, getStatus, restart, getHistory, compact, getTokenUsage, recoverResponse, autoHandover, abort, _isQueueBusy, _abortActiveQuery, _getAbortGraceTimerForTest, _isAbortInProgressForTest, _setActiveAbortForTest, _setActiveQueryForTest, _resetAbortStateForTest }
