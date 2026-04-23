@@ -47,8 +47,15 @@ app.use(compression())
 app.use(express.json({ limit: '5mb' }))
 app.use(express.urlencoded({ extended: false }))
 
-// Health check (no auth)
+// Health check (no auth) — heavier, includes route registration signal.
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
+
+// Ultra-lightweight liveness probe for external monitors (and the rescue
+// process). No DB, no Neo4j, no shared state — just "the event loop is
+// alive and Express is responding." If this fails, the process is dead.
+app.get('/api/healthz', (_req, res) => {
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime(), ts: Date.now() })
+})
 
 // Static file serving — generated docs, invoices, reports (no auth needed, files are not guessable)
 const path = require('path')
@@ -87,6 +94,7 @@ app.use('/api/os-session', require('./routes/osSession'))
 app.use('/api/sms', require('./routes/smsWebhook'))
 app.use('/api/docs', require('./routes/documents'))
 app.use('/api/dashboard', require('./routes/dashboard'))
+app.use('/api/rescue', require('./routes/rescue'))
 
 // Error handler (must be last)
 app.use(errorHandler)

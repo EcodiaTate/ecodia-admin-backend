@@ -335,6 +335,18 @@ server.listen(env.PORT, async () => {
     logger.warn('Claude token refresh service failed to start', { error: err.message })
   }
 
+  // ── Boot: Rescue Service (api-side subscriber) ────────────────────
+  // Subscribes to Redis channels published by the ecodia-rescue process
+  // and relays rescue events over WS to the frontend. The rescue process
+  // itself runs separately (see ecosystem.config.js). If rescue isn't
+  // running, this subscriber silently waits — no error.
+  try {
+    const rescueService = require('./services/rescueService')
+    rescueService.start().catch(err => logger.warn('Rescue service start failed', { error: err.message }))
+  } catch (err) {
+    logger.warn('Rescue service failed to load', { error: err.message })
+  }
+
   // ── Boot: Nightly Restart ─────────────────────────────────────────
   // Scheduled `pm2 restart ecodia-api` at 03:00 AEST with a T-5min heads-up
   // (WS broadcast + [SYSTEM] message posted into the OS inbox so it sees
