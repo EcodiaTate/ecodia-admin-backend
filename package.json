@@ -11,6 +11,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.92",
     "@anthropic-ai/sdk": "^0.80.0",
+    "@supabase/supabase-js": "^2.49.0",
     "axios": "^1.7.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.4",
@@ -22,12 +23,12 @@
     "helmet": "^8.0.0",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.2",
+    "minimatch": "^3.1.5",
     "neo4j-driver": "^6.0.1",
     "playwright": "^1.59.1",
     "postgres": "^3.4.4",
     "puppeteer": "^24.40.0",
     "twilio": "^5.13.1",
-    "@supabase/supabase-js": "^2.49.0",
     "winston": "^3.14.0",
     "zod": "^3.23.0"
   },
