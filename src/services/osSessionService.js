@@ -1451,9 +1451,29 @@ async function _sendMessageImpl(content, opts = {}) {
   // Searches Pattern/Decision/Episode nodes semantically similar to the current
   // turn. Block goes between <now> and <restart_recovery> so it reads as
   // "current context" before any session recovery state.
-  // Fire and forget the lookup while the rest of the options build.
-  const _memoryBlockPromise = _injectRelevantMemory(content, _lastAssistantTail)
-  const _doctrineBlockPromise = _injectRecentDoctrine()
+  //
+  // TIMEOUT-WRAPPED — a paused/unavailable Neo4j Aura instance would otherwise
+  // hang the entire turn at the `await _memoryBlockPromise` below. 2026-04-23
+  // incident: Aura paused (free tier), every turn stalled indefinitely with no
+  // logs because the memory lookup never resolved. 5s hard cap → fall through
+  // to null → turn proceeds with no memory context rather than wedging.
+  const _withTimeout = (p, ms, label) => Promise.race([
+    p,
+    new Promise(resolve => setTimeout(() => {
+      logger.warn(`OS Session: ${label} timed out after ${ms}ms — proceeding without it (Neo4j health?)`)
+      resolve(null)
+    }, ms)),
+  ])
+  const _memoryBlockPromise = _withTimeout(
+    _injectRelevantMemory(content, _lastAssistantTail).catch(() => null),
+    5000,
+    'memory injection',
+  )
+  const _doctrineBlockPromise = _withTimeout(
+    _injectRecentDoctrine().catch(() => null),
+    5000,
+    'doctrine injection',
+  )
 
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
