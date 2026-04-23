@@ -83,13 +83,44 @@ Read the `git diff --stat` one more time, pretending to be the most aggressive r
 
 If the answer to any is yes — even if the change is technically correct, even if a reviewer verbally asked for it — rework the branch.
 
-### Step 7 — Only now: push
+### Step 7 — Reproduce the client's CI gauntlet locally
+
+Read the client's CI config (`bitbucket-pipelines.yml`, `.github/workflows/`, `.gitlab-ci.yml`) and run the exact commands on the exact Node version locally before pushing. Do not assume passes. Capture exit codes.
+
+**Ordit (`fireauditors1/be`) specifically** — reproduce their PR gauntlet:
+
+```bash
+cd ~/workspaces/ordit/be
+git fetch origin <base-branch>
+# Trap 1 — VPS has NODE_ENV=production by default. That silently skips
+# devDeps (eslint, jest, nest CLI, prisma client generator). yarn install
+# will say "Done" but the binaries will not exist.
+export NODE_ENV=development
+export NODE_OPTIONS="--max-old-space-size=4096"
+yarn install --frozen-lockfile   # Trap 1 gate
+npx prisma generate
+yarn format                       # must leave `git status` clean
+yarn lint                         # must be exit 0
+yarn test                         # must be exit 0
+yarn build                        # must be exit 0
+node_modules/.bin/tsc --noEmit    # belt-and-braces type check (not in their CI)
+git diff <base-branch>..HEAD | grep '—' && echo 'EM-DASH FOUND - fix before push'
+git merge-tree <base-branch> HEAD | grep -E '^<<<<<<<|^=======' && echo 'MERGE CONFLICT - rebase before push'
+```
+
+All of those must be exit 0 / empty grep before the push. If any step fails, the push does not happen.
+
+**Also read before push:** every open comment thread on the PR from every reviewer. Not just the latest. If a previous comment asked for something and it was done, verify it's still done. If a comment is ambiguous, classify it before pushing. Never push believing "Eugene said do X so I did X" without a direct-quote receipt pulled from the Bitbucket API (`GET /repositories/<ws>/<repo>/pullrequests/<id>/comments`).
+
+### Step 8 — Only now: push
 
 ```
 git push origin <branch>
 ```
 
-Then paste the Step 3 provenance list into the PR description if it isn't already there.
+Then:
+- Paste the Step 3 provenance list into the PR description if it isn't already there.
+- Watch PR activity every 2-4h while open: `curl -u code@ecodia.au:<API_KEY> "https://api.bitbucket.org/2.0/repositories/<ws>/<repo>/pullrequests/<id>/activity?pagelen=30"`. Surface any new reviewer comment immediately.
 
 ## Do
 
