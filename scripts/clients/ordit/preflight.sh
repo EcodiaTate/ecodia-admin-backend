@@ -14,6 +14,7 @@
 #   SKIP_LINT=1       skip eslint (use only if lint was clean on the base branch)
 #   STRICT_E2E=1      require e2e to pass (defaults to off since e2e needs DB)
 #   BASE_BRANCH=...   ref to diff against (default: origin/feat/cognito-be-integration)
+#   SCOPE_FILE=...    path to a scope manifest; enforces scope-check against declared files
 #   VERBOSE=1         echo every command
 #
 # Exit codes:
@@ -38,6 +39,8 @@ GATE_AI_TELL_EMDASH=70
 GATE_STRING_LITERAL_ENUM=80
 GATE_DEAD_DTO_FIELD=81
 GATE_COGNITO_USERNAME=82
+GATE_SCOPE_CHECK=85
+GATE_SEMGREP=86
 GATE_SECRETS=90
 GATE_OVERSIZED_DIFF=100
 
@@ -49,6 +52,14 @@ fail() { printf "\033[1;31mFAIL\033[0m  %s\n" "$*"; }
 die()  { fail "$1"; exit "$2"; }
 
 cd "$ORDIT_DIR" || { fail "cannot cd to $ORDIT_DIR"; exit 2; }
+
+# ---- compute diff target early (used by scope-check, semgrep, secrets, size gates) ----
+DIFF_TARGET=""
+if git show-ref --verify --quiet "refs/remotes/$BASE_BRANCH"; then
+  DIFF_TARGET="$BASE_BRANCH..HEAD"
+elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
+  DIFF_TARGET="origin/main..HEAD"
+fi
 
 # ---- Gate 0: worktree sanity ----
 say "Gate 0: worktree sanity"
@@ -149,15 +160,60 @@ if grep -rn "crypto\.randomUUID" src/auth 2>/dev/null; then
 fi
 ok "no random-UUID Cognito usernames"
 
-# ---- Gate 7: no secrets / credentials in staged diff ----
-say "Gate 7: secret scan"
-DIFF_TARGET=""
-if git show-ref --verify --quiet "refs/remotes/$BASE_BRANCH"; then
-  DIFF_TARGET="$BASE_BRANCH..HEAD"
-elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
-  DIFF_TARGET="origin/main..HEAD"
+# ---- Gate 6e: scope-check - diff stays inside the declared ticket scope ----
+# Requires SCOPE_FILE env pointing to a scope manifest (see ~/ecodiaos/tools/scope-check.js).
+# Unset SCOPE_FILE = warn only (can't enforce what we haven't declared). Set = hard fail on drift.
+SCOPE_CHECK_TOOL="/home/tate/ecodiaos/tools/scope-check.js"
+if [[ -n "${SCOPE_FILE:-}" ]]; then
+  say "Gate 6e: scope-check against $SCOPE_FILE"
+  if [[ ! -f "$SCOPE_FILE" ]]; then
+    die "SCOPE_FILE set but '$SCOPE_FILE' does not exist" $GATE_SCOPE_CHECK
+  fi
+  if [[ ! -f "$SCOPE_CHECK_TOOL" ]]; then
+    die "scope-check tool missing at $SCOPE_CHECK_TOOL" $GATE_SCOPE_CHECK
+  fi
+  if ! node "$SCOPE_CHECK_TOOL" --scope-file "$SCOPE_FILE" --base "$BASE_BRANCH" --head HEAD 2>&1; then
+    die "scope-check failed - files outside declared ticket scope (see client-code-scope-discipline.md)" $GATE_SCOPE_CHECK
+  fi
+  ok "diff stays inside declared scope"
+else
+  warn "SCOPE_FILE unset - scope-check skipped (set SCOPE_FILE=path to enforce)"
 fi
 
+# ---- Gate 6f: semgrep - Ordit rulepack (scoped to changed files only) ----
+# Rulepack lives at ~/ecodiaos/.semgrep/ordit/ruleset.yml (9 rules codifying PR 212 learnings).
+# Scoped to diff vs base branch so pre-existing violations in untouched files do NOT fail the gate.
+# This matches client-code-scope-discipline: "do not fix pre-existing casts you did not touch".
+SEMGREP_RULESET="/home/tate/ecodiaos/.semgrep/ordit/ruleset.yml"
+SEMGREP_BIN="$(command -v semgrep || echo /home/tate/.local/bin/semgrep)"
+if [[ -x "$SEMGREP_BIN" || -f "$SEMGREP_BIN" ]]; then
+  if [[ -f "$SEMGREP_RULESET" ]]; then
+    if [[ -n "$DIFF_TARGET" ]]; then
+      # List .ts files changed vs base, filter to src/ and test/, filter to those still present on disk.
+      CHANGED_TS=$(git diff --name-only --diff-filter=AMR "$DIFF_TARGET" 2>/dev/null \
+        | grep -E '^(src|test)/.*\.ts$' \
+        | while read -r f; do [[ -f "$f" ]] && echo "$f"; done)
+      if [[ -n "$CHANGED_TS" ]]; then
+        say "Gate 6f: semgrep on $(echo "$CHANGED_TS" | wc -l) changed .ts files"
+        if ! echo "$CHANGED_TS" | xargs "$SEMGREP_BIN" --config "$SEMGREP_RULESET" --error --quiet --metrics off 2>&1; then
+          die "semgrep found rule violations in changed files (pre-existing violations are ignored by scope)" $GATE_SEMGREP
+        fi
+        ok "semgrep clean on changed files"
+      else
+        ok "semgrep skipped (no .ts changes in src/ or test/)"
+      fi
+    else
+      warn "semgrep skipped (no base branch to diff against)"
+    fi
+  else
+    warn "semgrep ruleset missing at $SEMGREP_RULESET - gate skipped"
+  fi
+else
+  warn "semgrep not installed - install with 'pipx install semgrep' to enable gate"
+fi
+
+# ---- Gate 7: no secrets / credentials in staged diff ----
+say "Gate 7: secret scan"
 if [[ -n "$DIFF_TARGET" ]]; then
   SECRET_HITS=$(git diff "$DIFF_TARGET" -- 'src/**/*.ts' 'test/**/*.ts' 'prisma/**/*' '*.env*' 2>/dev/null \
     | grep -E '^\+' \
