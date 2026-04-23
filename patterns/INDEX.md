@@ -45,6 +45,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [authorised-branch-push-is-not-client-contact.md](authorised-branch-push-is-not-client-contact.md) | client-push, bitbucket-push, github-push, fireauditors1, ordit, client-repo, authorised-branch, pr-212, authorised-pr, client-contact-boundary, greenlight-scope, no-client-contact-without-tate-goahead, scope-envelope, delayed-push, symbolic-waiting |
 | [prefer-hooks-over-written-discipline.md](prefer-hooks-over-written-discipline.md) | hook, settings.json, discipline, surfacing, pre-commit, pre-push, remember-to, before-each, every-time, enforcement |
 | [corazon-puppeteer-first-use.md](corazon-puppeteer-first-use.md) | corazon, tailscale, puppeteer, browser, laptop-agent, screenshot, visual-verification, dashboard, admin-ui, oauth-flow, signup-flow, persistent-login, multi-step-web, 100.114.219.69, eos-laptop-agent, mac-agent, sy094, visual-monitoring, curl-alternative, headless-browser |
+| [silent-alerts-defer-when-tate-is-live.md](silent-alerts-defer-when-tate-is-live.md) | silent-loop-detector, sms-tate, alert-tate, tate-active, tate-live, dead-mans-switch, cron-during-conversation, sms-rate-limit, alert-mute, noise-reduction, in-session-sms |
+| [client-push-pre-submission-pipeline.md](client-push-pre-submission-pipeline.md) | client-push, bitbucket-push, ordit-push, fireauditors, pr-submission, push-to-client, factory-client-dispatch, pipeline-change, migration-change, bitbucket-pipelines, prisma-migrate, db-push, infra-change, staged-rollout |
 
 ## Authoring rules
 
