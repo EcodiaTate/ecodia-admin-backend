@@ -83,7 +83,11 @@ async function dispatch(event, _testListeners) {
 
   for (const listener of targets) {
     const types = Array.isArray(listener.subscribesTo) ? listener.subscribesTo : [listener.subscribesTo]
-    if (!types.includes(event.type)) continue
+    // Match the semantic inner type first (e.g. 'text_delta' inside an 'os-session:output'
+    // envelope), fall back to the outer envelope type for channels that don't wrap a data.type.
+    const innerType = event && event.data && event.data.type
+    const matched = (innerType && types.includes(innerType)) || types.includes(event.type)
+    if (!matched) continue
 
     // Relevance filter — synchronous
     let relevant = false
