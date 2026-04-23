@@ -335,6 +335,18 @@ server.listen(env.PORT, async () => {
     logger.warn('Claude token refresh service failed to start', { error: err.message })
   }
 
+  // ── Boot: Nightly Restart ─────────────────────────────────────────
+  // Scheduled `pm2 restart ecodia-api` at 03:00 AEST with a T-5min heads-up
+  // (WS broadcast + [SYSTEM] message posted into the OS inbox so it sees
+  // the warning in-turn). If the OS is busy at T-0, waits up to 10 min for
+  // idle before force-restarting. Disable with NIGHTLY_RESTART_ENABLED=false.
+  try {
+    const nightlyRestart = require('./services/nightlyRestartService')
+    nightlyRestart.start()
+  } catch (err) {
+    logger.warn('Nightly restart service failed to start', { error: err.message })
+  }
+
   // ── Boot: Process Restart Alert + Alive Beacon ────────────────────
   // Emails Tate when ecodia-api restarts. Uses kv_store to record the
   // previous "I'm alive" beacon timestamp so we can compute prior uptime.
