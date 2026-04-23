@@ -1295,6 +1295,7 @@ async function _sendMessageImpl(content, opts = {}) {
   let _assistantTurnStarted = false    // emitted assistant_message_starting this turn?
   let _currentToolUseBlock = null      // { id, name, inputChunks[] } while streaming tool_use
   let _turnModel = null                // model from system.init, for turn_complete telemetry
+  let _lastTurnInputTokens = 0         // set from result.usage.input_tokens; used for compact threshold
   let _compactBoundaryTimer = null     // 60s safety timeout for stuck compact_boundary start
 
   // ─── Per-tool watchdog ─────────────────────────────────────────────────
@@ -1709,6 +1710,28 @@ async function _sendMessageImpl(content, opts = {}) {
                 // Log for history/turns-this-week count (non-blocking)
                 usageEnergy.logUsage({ sessionId: dbSessionId, source: 'os_session', provider, model, inputTokens: turnInput, outputTokens: turnOutput }).catch(() => {})
               }
+              // Live token usage broadcast — surfaces context-fill progress in the UI
+              // so Tate can see the session approaching the compact threshold rather
+              // than being surprised by a silent handover. Fire-and-forget; don't care
+              // if the broadcast fails.
+              if (!suppressOutput) {
+                try {
+                  const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '800000', 10)
+                  const total = sessionTokenUsage.input + sessionTokenUsage.output
+                  // Also surface the "context size" signal — for resumed sessions the
+                  // SDK's per-turn input_tokens is roughly how much context we're
+                  // sending each turn, i.e. effective session size.
+                  broadcast('os-session:tokens', {
+                    input: sessionTokenUsage.input,
+                    output: sessionTokenUsage.output,
+                    total,
+                    turnInput,
+                    threshold: handoverThreshold,
+                    needsCompaction: turnInput > handoverThreshold * 0.95,
+                    pctOfThreshold: Math.min(100, Math.round((turnInput / handoverThreshold) * 100)),
+                  })
+                } catch {}
+              }
             }
             try {
               if (safeText && safeText.trim()) {
@@ -1804,10 +1827,16 @@ async function _sendMessageImpl(content, opts = {}) {
               if (!suppressOutput) emitStatus('streaming', { sessionId: dbSessionId })
             }
             if (msg.usage) {
-              // result.usage is cumulative — use only for the threshold/compaction check,
-              // not for logging (individual turns already logged in 'assistant' case above)
-              sessionTokenUsage.input  = msg.usage.input_tokens  || sessionTokenUsage.input
-              sessionTokenUsage.output = msg.usage.output_tokens || sessionTokenUsage.output
+              // For resumed sessions, result.usage.input_tokens reflects the full
+              // context the SDK is sending each turn (resume history + this turn).
+              // That's effectively the "context-window fill" signal we want for
+              // the compaction threshold. Capture it for the post-turn check.
+              //
+              // We deliberately do NOT overwrite sessionTokenUsage here — that
+              // double-accounted against the `assistant` event accumulation and
+              // made the cumulative total reflect only the latest turn, which is
+              // why the 800k compact threshold never actually fired historically.
+              _lastTurnInputTokens = msg.usage.input_tokens || 0
             }
 
             // Check for rate-limit / usage-exhaustion errors in the result
@@ -2130,6 +2159,32 @@ async function _sendMessageImpl(content, opts = {}) {
       }
     }
 
+    // ─── Auto-handover threshold decision ────────────────────────────
+    // Check this BEFORE emitting os-session:complete so the UI can switch
+    // straight from "streaming" to "compacting" without a flash of "idle"
+    // in between. Prior ordering was: emit complete → UI flips to idle →
+    // handover signal → UI flips to compacting. That's the "doesn't tell
+    // me it's compacting till after" feel from 2026-04-24.
+    //
+    // Threshold signal: use last turn's input_tokens (= resumed context
+    // size being sent each turn), NOT sessionTokenUsage.input+output
+    // which is smaller because it accumulates only output across turns.
+    const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '800000', 10)
+    const contextFill = _lastTurnInputTokens || 0
+    const shouldHandover = contextFill > handoverThreshold && !suppressOutput
+    if (shouldHandover) {
+      logger.info('OS Session: auto-handover threshold hit — signalling before complete', {
+        contextFill, threshold: handoverThreshold,
+      })
+      // Tell the UI *now*, before os-session:complete flips it to idle.
+      broadcast('os-session:handover', {
+        phase: 'preparing',
+        tokens: contextFill,
+        trigger: 'threshold',
+      })
+      try { emitStatus('handover_preparing', { phase: 'threshold_hit' }) } catch {}
+    }
+
     if (!suppressOutput) {
       emitStatus('complete', { sessionId: dbSessionId, code: 0 })
       broadcast('os-session:complete', { sessionId: dbSessionId, code: 0 })
@@ -2141,7 +2196,7 @@ async function _sendMessageImpl(content, opts = {}) {
     // other in-flight work. Only runs for user-visible turns — background
     // turns (handover brief generation, heartbeats) must not drain the queue
     // since that would trigger mid-handover delivery loops.
-    if (!suppressOutput) {
+    if (!suppressOutput && !shouldHandover) {
       try {
         const mq = require('./messageQueue')
         mq.deliverPending({ summary: null }).catch(err => {
@@ -2163,15 +2218,15 @@ async function _sendMessageImpl(content, opts = {}) {
     sessionMemory.ingestProjectDir(undefined, { recentHours: 2 })
       .catch(err => logger.debug('Session memory ingest skipped', { error: err.message }))
 
-    const totalTokens = sessionTokenUsage.input + sessionTokenUsage.output
-    logger.info('OS Session exchange complete', { sessionId: dbSessionId, ccSessionId, totalTokens })
+    logger.info('OS Session exchange complete', {
+      sessionId: dbSessionId, ccSessionId,
+      sessionInput: sessionTokenUsage.input, sessionOutput: sessionTokenUsage.output,
+      lastTurnInput: contextFill,
+    })
 
-    // Auto-handover: when conversation exceeds threshold, generate a handover brief
-    // and start a fresh session. Prevents unbounded context growth which multiplies
-    // token cost on every subsequent turn (resume re-sends full history).
-    const handoverThreshold = parseInt(env.OS_SESSION_COMPACT_THRESHOLD || '800000', 10)
-    if (totalTokens > handoverThreshold && !suppressOutput) {
-      logger.info('OS Session: triggering auto-handover', { totalTokens, threshold: handoverThreshold })
+    // Actually kick off the handover (async). We already broadcast the signal
+    // above so the UI is already in compacting state before this starts.
+    if (shouldHandover) {
       autoHandover().catch(err => logger.error('Auto-handover failed', { error: err.message }))
     }
 
