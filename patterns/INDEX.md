@@ -48,6 +48,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [silent-alerts-defer-when-tate-is-live.md](silent-alerts-defer-when-tate-is-live.md) | silent-loop-detector, sms-tate, alert-tate, tate-active, tate-live, dead-mans-switch, cron-during-conversation, sms-rate-limit, alert-mute, noise-reduction, in-session-sms |
 | [client-push-pre-submission-pipeline.md](client-push-pre-submission-pipeline.md) | client-push, bitbucket-push, ordit-push, fireauditors, pr-submission, push-to-client, factory-client-dispatch, pipeline-change, migration-change, bitbucket-pipelines, prisma-migrate, db-push, infra-change, staged-rollout |
 | [verify-e2e-harness-loads-before-claiming-coverage.md](verify-e2e-harness-loads-before-claiming-coverage.md) | e2e, end-to-end, test:e2e, jest-e2e, test coverage, auth-cognito.e2e-spec, shipped-but-inert, test harness, ordit e2e, client test infra |
+| [client-code-scope-discipline.md](client-code-scope-discipline.md) | client-code, factory-client-dispatch, scope-creep, prisma, migration, pipeline, bitbucket-pipelines, pr-review, eugene, ordit, production-ready, fix-everything |
 
 ## Authoring rules
 
