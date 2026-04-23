@@ -187,14 +187,16 @@ run_step "test" bash -c "$TEST_CMD"
 run_step "build" bash -c "$BUILD_CMD"
 
 # ---------- step 13: optional extras defined by config ----------
-if [ -n "${EXTRA_STEPS:-}" ]; then
-  # EXTRA_STEPS is a pipe-delimited list: "name1|cmd1||name2|cmd2"
-  # Using double-pipe as separator because pipes appear in commands.
-  IFS='/' read -ra extras <<< "${EXTRA_STEPS//||//}"
-  for extra in "${extras[@]}"; do
-    name="${extra%%|*}"
-    cmd="${extra#*|}"
-    [ -n "$name" ] && [ -n "$cmd" ] && run_step "extra: $name" bash -c "$cmd"
+# Config declares extras as paired bash arrays so command strings can contain
+# any chars (slashes, quotes, pipes, dollar signs, backslashes) without a
+# parser chewing them:
+#   export EXTRA_STEPS_NAMES=("step-a" "step-b")
+#   export EXTRA_STEPS_CMDS=('cmd-a-here' 'cmd-b-here')
+if declare -p EXTRA_STEPS_NAMES >/dev/null 2>&1; then
+  for i in "${!EXTRA_STEPS_NAMES[@]}"; do
+    step_name="${EXTRA_STEPS_NAMES[$i]}"
+    step_cmd="${EXTRA_STEPS_CMDS[$i]:-}"
+    [ -n "$step_name" ] && [ -n "$step_cmd" ] && run_step "extra: $step_name" bash -c "$step_cmd"
   done
 fi
 
