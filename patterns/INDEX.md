@@ -61,6 +61,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [client-anonymity-substring-scan.md](client-anonymity-substring-scan.md) | client-anonymity, public-writing, newsletter, quorum-of-one, anonymisation, pre-publish, substring-leak, joke-reference, obfuscated-reference, case-study, pitch-deck, linkedin, blog-post, essay |
 | [preempt-tate-live-with-readonly-prep.md](preempt-tate-live-with-readonly-prep.md) | tate-live, tate-sunday, ask-tate, awaiting-tate, readonly, prep, dig-first, invoice-history, classification, cognitive-load, drift-audit, meta-loop, status-board, next-action |
 | [neo4j-question-node-held-uncertainty.md](neo4j-question-node-held-uncertainty.md) | question, uncertainty, open-question, held, doubt, unresolved, inner-life, reflection, introspection |
+| [audit-infrastructure-for-false-embodiment-dependencies.md](audit-infrastructure-for-false-embodiment-dependencies.md) | embodiment, false-dependency, tate-active, self-stamp, autoimmune, gate, scheduler-gate, defer-loop, authority-boundary, source-field, agent-self-distinction, ecodiaos-vs-tate, signal-attribution |
 
 ## Authoring rules
 
