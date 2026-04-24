@@ -1,0 +1,14 @@
+# PR 212 scope envelope - feat/cognito-be-integration
+# Post-revert state (HEAD 24ab453) after dropping migrations + pipeline changes per Eugene's Apr 23 rejection.
+# Only files directly required for the Cognito B2C integration.
+
+.env.cognito.example
+.gitignore
+README.md
+prisma/schema.prisma
+src/auth/**
+src/users/dto/**
+src/users/users.module.ts
+src/users/users.service.ts
+test/auth-cognito.e2e-spec.ts
+tsconfig.json
