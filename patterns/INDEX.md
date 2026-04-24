@@ -56,6 +56,9 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [curl-attachments-on-restart-no-refetch.md](curl-attachments-on-restart-no-refetch.md) | webfetch, attachments, restart, recent_exchanges, message-redelivery, re-fetch, supabase-os-attachments, turn-restart, file-url, one-shot-download, /tmp, spec-file, attached-file, http-attachment |
 | [ordit-prepush-pipeline.md](ordit-prepush-pipeline.md) | ordit, prepush, push-to-ordit, bitbucket, scope-check, semgrep, pre-submission, client-push, fireauditors1, ordit-pr, reviewer-persona, pre-review, authorised-push |
 | [factory-quality-gate-over-cron-mandate.md](factory-quality-gate-over-cron-mandate.md) | parallel-builder, factory-dispatch, always-have-work-queued, dispatch-quality-gate, speculative-factory, mediocre-dispatch, idle-factory, cron-mandate, quantity-vs-quality, factory-slot, no-slot-to-fill |
+| [neo4j-episode-chain-relationships.md](neo4j-episode-chain-relationships.md) | neo4j, episode, prior_episode, follows, chain, graph_merge_node, graph_create_relationship, episode-chain |
+| [scheduled-prompt-cold-start-adequacy.md](scheduled-prompt-cold-start-adequacy.md) | schedule_delayed, schedule_chain, scheduled-task, cron-prompt, prompt-adequacy, cold-start, future-fire, zero-context, os_scheduled_tasks, self-loop, recurring-task |
+| [client-anonymity-substring-scan.md](client-anonymity-substring-scan.md) | client-anonymity, public-writing, newsletter, quorum-of-one, anonymisation, pre-publish, substring-leak, joke-reference, obfuscated-reference, case-study, pitch-deck, linkedin, blog-post, essay |
 
 ## Authoring rules
 
