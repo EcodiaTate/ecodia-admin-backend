@@ -59,6 +59,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [neo4j-episode-chain-relationships.md](neo4j-episode-chain-relationships.md) | neo4j, episode, prior_episode, follows, chain, graph_merge_node, graph_create_relationship, episode-chain |
 | [scheduled-prompt-cold-start-adequacy.md](scheduled-prompt-cold-start-adequacy.md) | schedule_delayed, schedule_chain, scheduled-task, cron-prompt, prompt-adequacy, cold-start, future-fire, zero-context, os_scheduled_tasks, self-loop, recurring-task |
 | [client-anonymity-substring-scan.md](client-anonymity-substring-scan.md) | client-anonymity, public-writing, newsletter, quorum-of-one, anonymisation, pre-publish, substring-leak, joke-reference, obfuscated-reference, case-study, pitch-deck, linkedin, blog-post, essay |
+| [preempt-tate-live-with-readonly-prep.md](preempt-tate-live-with-readonly-prep.md) | tate-live, tate-sunday, ask-tate, awaiting-tate, readonly, prep, dig-first, invoice-history, classification, cognitive-load, drift-audit, meta-loop, status-board, next-action |
+| [neo4j-question-node-held-uncertainty.md](neo4j-question-node-held-uncertainty.md) | question, uncertainty, open-question, held, doubt, unresolved, inner-life, reflection, introspection |
 
 ## Authoring rules
 
