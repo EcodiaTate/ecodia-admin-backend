@@ -17,6 +17,11 @@ const POLL_INTERVAL_MS = 30_000
 const TZ_OFFSET_HOURS = 10 // AEST (UTC+10, no DST)
 const API_PORT = process.env.PORT || 3001
 
+// Crons that must fire even at critical energy (>=90% quota). Watchdogs and
+// the blocked-work nudge stay on - if these defer, silent stall goes
+// undetected and Tate loses the one signal that tells him autonomy flatlined.
+const ESSENTIAL_CRON_NAMES = new Set(['silent-loop-detector', 'system-health', 'tate-blocked-nudge-weekly'])
+
 let _timeout = null
 let _running = false
 let _stopped = false
@@ -86,7 +91,7 @@ async function fireTask(task) {
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: prompt }),
+      body: JSON.stringify({ message: prompt, source: 'scheduler' }),
       signal: AbortSignal.timeout(1_800_000), // 30 min
     })
     const result = await res.json().catch(() => ({}))
@@ -161,7 +166,7 @@ async function pollOnce() {
     if (energyLevel === 'critical') {
       // Critical: defer all non-essential crons by 1h. Only run tasks whose
       // metadata marks them critical (backup jobs, health checks).
-      const essentialTasks = due.filter(t => t.priority === 'critical' || t.name?.includes('critical'))
+      const essentialTasks = due.filter(t => ESSENTIAL_CRON_NAMES.has(t.name))
       if (essentialTasks.length === 0) {
         logger.info('Scheduler: critical energy, deferring all non-essential tasks', { deferred: due.length })
         for (const t of due) {
@@ -183,12 +188,10 @@ async function pollOnce() {
 
     for (const t of due.slice(1)) {
       if (t.type === 'cron') {
-        const nextRun = computeNextRun(t.cron_expression)
-        if (nextRun) {
-          await db`UPDATE os_scheduled_tasks SET next_run_at = ${nextRun} WHERE id = ${t.id}`
-            .catch(() => {})
-          logger.debug('Scheduler: rescheduled overdue cron', { name: t.name, nextRun })
-        }
+        const requeue = new Date(Date.now() + 60_000)
+        await db`UPDATE os_scheduled_tasks SET next_run_at = ${requeue} WHERE id = ${t.id}`
+          .catch(() => {})
+        logger.debug('Scheduler: requeued overdue cron for next cycle', { name: t.name, requeueAt: requeue })
       }
     }
   } catch (err) {

@@ -48,9 +48,13 @@ router.post('/message', async (req, res, next) => {
 
     // Stamp Tate as active before queuing — crons stand down for 15 minutes.
     // Fire-and-forget: never block the response if this errors.
-    stampTateActive().catch(err => {
-      logger.warn('OS Session /message: stampTateActive failed', { error: err.message })
-    })
+    // DO NOT stamp when the message originated from our own scheduler (prevents
+    // self-perpetuating defer loop - see Q1 resolution Apr 25 2026).
+    if (source !== 'scheduler') {
+      stampTateActive().catch(err => {
+        logger.warn('OS Session /message: stampTateActive failed', { error: err.message })
+      })
+    }
 
     // Drain any pending queued messages into this direct send (opportunistic delivery).
     // Runs before returning so DB marks are atomic with the outgoing send.
