@@ -113,14 +113,42 @@ async function getForkConductorMcpServer() {
       },
     )
 
+    const send_message_tool = tool(
+      'send_message',
+      'Inject a new user message into a running fork\'s SDK stream without aborting it. Use this when Tate (or new context on main) gives input that is relevant to a fork that is still running. The fork will receive the message on its next SDK turn and decide what to do with it. The fork remains responsible for its [FORK_REPORT] - your message becomes additional context, not a new task. If you want a different task, abort and respawn.',
+      {
+        fork_id: z.string().describe('The fork id to send a message to, as returned by spawn_fork.'),
+        message: z.string().min(1).describe('The message text to inject into the fork\'s SDK stream.'),
+      },
+      async (args) => {
+        try {
+          const result = fork.sendMessageToFork(args.fork_id, args.message)
+          if (!result.accepted) {
+            return {
+              content: [{ type: 'text', text: `send_message rejected: ${result.reason}` }],
+              isError: true,
+            }
+          }
+          return {
+            content: [{
+              type: 'text',
+              text: `Message injected into fork ${result.fork_id}. Queued messages waiting to be consumed: ${result.queued_messages}.`,
+            }],
+          }
+        } catch (err) {
+          return { content: [{ type: 'text', text: `send_message error: ${err.message}` }], isError: true }
+        }
+      },
+    )
+
     const server = createSdkMcpServer({
       name: 'forks',
       version: '1.0.0',
-      tools: [spawn_fork_tool, list_forks_tool, abort_fork_tool],
+      tools: [spawn_fork_tool, list_forks_tool, abort_fork_tool, send_message_tool],
     })
 
     logger.info('forkConductorTool: in-process MCP server "forks" ready', {
-      tools: ['spawn_fork', 'list_forks', 'abort_fork'],
+      tools: ['spawn_fork', 'list_forks', 'abort_fork', 'send_message'],
     })
     _serverConfig = server
     return server
