@@ -137,9 +137,9 @@ function registerAll(_wsManager) {
 
   let registered = 0
   for (const listener of _listeners) {
-    // Subscribe each listener to the channel; envelope.type filtering happens in dispatch()
+    // Subscribe each listener directly to its declared event types
     const l = listener
-    wsMgr.subscribe(WS_CHANNELS, async (event) => {
+    wsMgr.subscribe(l.subscribesTo, async (event) => {
       await dispatch(event, [l])
     })
     registered++
