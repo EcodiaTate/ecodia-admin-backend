@@ -78,6 +78,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [vercel-subdomain-rewrite-loop.md](vercel-subdomain-rewrite-loop.md) | vercel, redirect, redirect loop, too many redirects, ERR_TOO_MANY_REDIRECTS, subdomain, code.ecodia.au, x-matched-path, middleware rewrite, 307 loop |
 | [frontend-strip-model-xml-tags.md](frontend-strip-model-xml-tags.md) | frontend, chat, render, xml, tag, analysis, thinking, scratchpad, reasoning, reflection, ReactMarkdown, rehypeRaw, TextBlock, model-output, sanitise |
 | [visual-first-tate-presentation.md](visual-first-tate-presentation.md) | visual-first, tate-presentation, deck-in-chat, db-stored-document, present-in-chat, surface-in-chat, download-button, inline-html, deliverable-surfacing, ready-for-tate, kv-store-document, drafts-folder-deliverable, tate-cant-see, mark-off, approval-queue-visibility, persistent-question, question-queue, presentation-gap |
+| [inner-life-notice-calibration-not-chase-pre-calibration-self.md](inner-life-notice-calibration-not-chase-pre-calibration-self.md) | inner-life, reflection, authenticity, performance, self-awareness, be-yourself |
+| [ballistic-mode-under-guardrails-equals-depth-not-action.md](ballistic-mode-under-guardrails-equals-depth-not-action.md) | ballistic mode, standing directive, passive, all night, parallel work, depth vs action, gated workstream, kilimanjaro, tate-away |
 
 ## Authoring rules
 

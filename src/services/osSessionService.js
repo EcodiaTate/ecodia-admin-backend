@@ -1078,8 +1078,8 @@ async function _sendMessageImpl(content, opts = {}) {
   // further down instead of prepending to system prompt (was a cache-buster).
   let recoveryBlock = null
   try {
-    const { readHandoffState } = require('./sessionHandoff')
-    recoveryBlock = await readHandoffState()
+    const { consumeHandoffState } = require('./sessionHandoff')
+    recoveryBlock = await consumeHandoffState()
   } catch (err) {
     logger.warn('Failed to read handoff state', { error: err.message })
   }
