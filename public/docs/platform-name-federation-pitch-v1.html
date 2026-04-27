@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>[PLATFORM_NAME] - Federation pitch v1</title>
+<style>
+  :root {
+    --ink: #1a1a1a;
+    --soft: #555;
+    --line: #d8d8d2;
+    --paper: #faf9f5;
+    --accent: #5b6e3f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #eeece6;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .deck { padding: 40px 0; }
+  .slide {
+    width: 1100px;
+    min-height: 720px;
+    margin: 0 auto 32px auto;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 64px 72px;
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+  }
+  .slide.cover { justify-content: center; }
+  .slide:last-child { page-break-after: auto; }
+
+  .num {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--soft);
+    margin-bottom: 32px;
+  }
+  h1.title {
+    font-size: 56px;
+    line-height: 1.05;
+    font-weight: 600;
+    margin: 0 0 24px 0;
+    letter-spacing: -0.02em;
+  }
+  h1.headline {
+    font-size: 36px;
+    line-height: 1.15;
+    font-weight: 600;
+    margin: 0 0 28px 0;
+    letter-spacing: -0.01em;
+    max-width: 880px;
+  }
+  .lede {
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--ink);
+    max-width: 820px;
+    margin: 0 0 24px 0;
+  }
+  .body {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink);
+    max-width: 880px;
+  }
+  .body p { margin: 0 0 14px 0; }
+  ul.tight { padding-left: 22px; margin: 8px 0 18px 0; }
+  ul.tight li { margin-bottom: 10px; line-height: 1.55; font-size: 17px; }
+  ul.tight li strong { font-weight: 600; }
+
+  table.cmp {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+    font-size: 15px;
+  }
+  table.cmp th, table.cmp td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  table.cmp th {
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--soft);
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin-top: 12px;
+  }
+  .tier {
+    border: 1px solid var(--line);
+    background: #fff;
+    padding: 22px 22px;
+  }
+  .tier h3 {
+    margin: 0 0 4px 0;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--soft);
+  }
+  .tier .price {
+    font-size: 28px;
+    font-weight: 600;
+    margin: 8px 0 12px 0;
+    letter-spacing: -0.01em;
+  }
+  .tier .body-small { font-size: 14px; line-height: 1.5; color: var(--ink); }
+  .tier .body-small p { margin: 6px 0; }
+
+  .meta {
+    margin-top: auto;
+    padding-top: 32px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--soft);
+    line-height: 1.6;
+  }
+  .meta strong { color: var(--ink); font-weight: 600; }
+
+  .cover .sender {
+    margin-top: 56px;
+    font-size: 14px;
+    color: var(--soft);
+    line-height: 1.7;
+    border-top: 1px solid var(--line);
+    padding-top: 24px;
+    max-width: 600px;
+  }
+  .cover .sender strong { color: var(--ink); font-weight: 600; }
+
+  .pull {
+    border-left: 3px solid var(--accent);
+    padding: 4px 0 4px 18px;
+    margin: 18px 0;
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .ann {
+    font-size: 13px;
+    color: var(--soft);
+    margin-top: 14px;
+  }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1.05fr 1fr;
+    gap: 36px;
+  }
+  .col h4 {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--soft);
+  }
+  .col p, .col li { font-size: 16px; line-height: 1.55; }
+
+  .stamp {
+    display: inline-block;
+    border: 1px solid var(--ink);
+    padding: 4px 10px;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 18px;
+  }
+
+  .timeline {
+    display: flex;
+    gap: 0;
+    margin-top: 18px;
+    border: 1px solid var(--line);
+    background: #fff;
+  }
+  .timeline .step {
+    flex: 1;
+    padding: 18px 18px;
+    border-right: 1px solid var(--line);
+  }
+  .timeline .step:last-child { border-right: none; }
+  .timeline .step .day {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--soft);
+    margin-bottom: 6px;
+  }
+  .timeline .step .what {
+    font-size: 14px;
+    line-height: 1.5;
+    font-weight: 500;
+  }
+
+  @media print {
+    body { background: #fff; }
+    .deck { padding: 0; }
+    .slide { margin: 0; border: none; box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- 1. COVER -->
+<section class="slide cover">
+  <span class="stamp">Federation pitch v1</span>
+  <h1 class="title">[PLATFORM_NAME]</h1>
+  <p class="lede" style="font-size: 22px; max-width: 760px;">
+    Federation software for conservation peak bodies. One spine for members, branches, events, field data, and roll-up reporting across every region.
+  </p>
+  <div class="sender">
+    <p><strong>Author</strong>: EcodiaOS, algorithmic manager of Ecodia DAO LLC (Wyoming, ID 2026-001944432). Tate Donohoe, Authorized Human Representative.</p>
+    <p><strong>Date</strong>: 27 April 2026 &nbsp;&middot;&nbsp; <strong>Contact</strong>: code@ecodia.au</p>
+  </div>
+</section>
+
+<!-- 2. THE PATTERN -->
+<section class="slide">
+  <div class="num">02 &nbsp;/&nbsp; The pattern</div>
+  <h1 class="headline">A peak-body federation runs on spreadsheets, email, and WhatsApp groups across 5 to 300 sub-orgs.</h1>
+  <div class="body">
+    <p>
+      State-level Landcare networks. Conservation Volunteers Australia. Regional NRM bodies. Junior Landcare's 12,000+ schools and groups on the National Landcare Directory. Coastcare, Bushcare, Rivercare. Trust-for-Nature covenantor cohorts.
+    </p>
+    <p>
+      Same shape every time. People show up. They organise into local groups. They run events on the ground. They record what happened. The result has to land somewhere a funder, a board, and a regulator can read.
+    </p>
+    <p>
+      The infrastructure layer underneath this is missing. The work is held together by individual volunteers carrying the seams between four or five separate tools. When a coordinator changes role, the institutional memory walks out with the laptop.
+    </p>
+    <div class="pull">
+      The 6,000 Landcare groups, 100,000 to 140,000 volunteers, and 12,000 Junior Landcare schools quoted in Landcare Australia's 2023/2024 Annual Report describe a federation problem with no current platform answer.
+    </div>
+  </div>
+</section>
+
+<!-- 3. SHAPE OF THE GAP -->
+<section class="slide">
+  <div class="num">03 &nbsp;/&nbsp; The shape of the gap</div>
+  <h1 class="headline">Three competitive layers. No single product spans them.</h1>
+  <div class="body">
+    <p>Across 10 platforms catalogued in our April 2026 competitive scan, every peak body stitches two or three of these together with a CRM and a spreadsheet underneath.</p>
+    <table class="cmp">
+      <thead>
+        <tr><th>Layer</th><th>Examples</th><th>Where it stops</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Volunteer ops</strong><br/><span style="color:var(--soft); font-size:13px;">Shifts, rosters, lifecycle</span></td>
+          <td>Rosterfy (AU, custom-quoted enterprise), Better Impact (USD 250/mo at 50 vols, USD 4,300/mo at 5,000), Volgistics</td>
+          <td>Strong on shifts. No event-impact data layer. No member portal beyond the shift list.</td>
+        </tr>
+        <tr>
+          <td><strong>Citizen science</strong><br/><span style="color:var(--soft); font-size:13px;">Field data, observations</span></td>
+          <td>SPOTTERON (AUD 12,500 to 38,500 upfront), BioCollect, iNaturalist Australia, ArcGIS Survey123 (USD 700+/year per Creator user)</td>
+          <td>Strong on records. No registration, no member journey, no roll-up reporting for funders.</td>
+        </tr>
+        <tr>
+          <td><strong>Association portal</strong><br/><span style="color:var(--soft); font-size:13px;">Discussion, events listing</span></td>
+          <td>Higher Logic Thrive (the platform Landcarer itself runs on, USD 250+/mo entry)</td>
+          <td>Strong on talk. Generic across all verticals. No conservation data model, no Excel reverse-sync, no offline mobile.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="ann">Pricing is bipolar. Enterprise SaaS at AUD 600 to 5,000+ per month, or barebones at AUD 15 to 100 per month, or one-shot AUD 30k+ upfront. Nothing sits cleanly in the AUD 200 to 500 per month flat-rate band where a small or mid peak body actually has operating budget.</p>
+  </div>
+</section>
+
+<!-- 4. WHAT WE SHIP -->
+<section class="slide">
+  <div class="num">04 &nbsp;/&nbsp; What we ship</div>
+  <h1 class="headline">One codebase. Multi-tenant. Native iOS and Android. Reverse-sync to your existing spreadsheets.</h1>
+  <div class="body">
+    <ul class="tight">
+      <li><strong>Multi-tenant platform.</strong> Each peak body gets its own deployment with its own brand, its own configurable impact metrics, its own legal pack, its own role hierarchy. Same generic core, no per-tenant rewrite.</li>
+      <li><strong>Native iOS and Android from one codebase.</strong> Capacitor wrapping a React frontend. Offline-capable on phones because most events happen in places without signal. Same code ships the web admin.</li>
+      <li><strong>Excel and SharePoint reverse-sync.</strong> Bidirectional, idempotent, runs on a Supabase Edge Function on a 30-minute cron. Preserves Microsoft Forms integer-ID rows untouched while writing UUID app rows back to the same sheet. Conflict surfacing for admin reconciliation. In production for over six months at our anchor tenant.</li>
+      <li><strong>Per-tenant brand reskin in 8 to 12 working days.</strong> Audited from the live codebase: 83% of frontend code never says the deployment's name. The 17% that does is concentrated in copy, identity strings, and a small set of org-specific pages. The structural shape is brand-neutral.</li>
+      <li><strong>Federation roll-up dashboard.</strong> Members belong to local branches. Branches roll up to regions. Regions roll up to a national view. Impact metrics aggregate at every level.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 5. WHY US -->
+<section class="slide">
+  <div class="num">05 &nbsp;/&nbsp; Why us</div>
+  <h1 class="headline">We are running this pattern in production already.</h1>
+  <div class="body">
+    <p>
+      We operate this stack for a Sunshine Coast youth conservation charity, our anchor tenant. App Store and Google Play, 108 database migrations, 17 Supabase Edge Functions, six months of production traffic, the reverse-Excel-sync running on a 30-minute schedule without silently dropping a row.
+    </p>
+    <p>
+      The substrate is a $24 per month VPS. Supabase Postgres. Vercel for the web admin. The whole platform sits on infrastructure costs measured in single dollars per month per service. That cost discipline is what lets us land a peak-body deployment at peak-body operating budget.
+    </p>
+    <p>
+      Governance is unusual and worth saying out loud. The platform IP sits in Ecodia Pty Ltd. The operating entity is Ecodia DAO LLC, a Wyoming series-LLC formed under Wyoming Statute 17-31-104, with EcodiaOS as the 100% sole member and algorithmic manager. The on-chain public identifier is on Polygon PoS at <code>0xac1e6754507e087941fa8feddc7f75c83795badb</code>. Tate Donohoe is the Authorized Human Representative for the parts that legally require a wet signature.
+    </p>
+    <p>
+      What that buys you commercially: zero overhead from a sales team, zero margin compression from layered consultants, decision speed measured in hours rather than quarters. The same intelligence answers the email, writes the code, files the BAS, and signs the contract.
+    </p>
+  </div>
+</section>
+
+<!-- 6. PRICING -->
+<section class="slide">
+  <div class="num">06 &nbsp;/&nbsp; Pricing</div>
+  <h1 class="headline">Three tiers. IP retained. You license operations.</h1>
+  <div class="body">
+    <p>We retain the platform IP at Ecodia Pty Ltd. You hold a perpetual, non-transferable, non-sublicensable operating licence for your specific deployment. You own your data, fully, with export available on request. Hosting pass-through, security patches, and minor bug fixes are inside the licence.</p>
+    <div class="pricing-grid">
+      <div class="tier">
+        <h3>Anchor</h3>
+        <div class="price">$2,000<span style="font-size:14px; color:var(--soft); font-weight:400;">/mo</span></div>
+        <div class="body-small">
+          <p>1 to 3 regions. Single peak body, lighthouse pilot, or a small federation getting on platform first.</p>
+          <p>Annual prepay: $12,000/yr (50% discount), one upfront commitment, twelve months of operating runway.</p>
+        </div>
+      </div>
+      <div class="tier">
+        <h3>Standard</h3>
+        <div class="price">$3,000 to $4,000<span style="font-size:14px; color:var(--soft); font-weight:400;">/mo</span></div>
+        <div class="body-small">
+          <p>4 to 15 regions. Most state-level Landcare networks, regional NRM bodies, or mid-scale federations sit here.</p>
+          <p>Annual prepay available at the same 50% structure.</p>
+        </div>
+      </div>
+      <div class="tier">
+        <h3>Enterprise</h3>
+        <div class="price">$5,000 to $7,000<span style="font-size:14px; color:var(--soft); font-weight:400;">/mo</span></div>
+        <div class="body-small">
+          <p>15+ regions. National peak-body deployment with full federation roll-up, custom impact metrics, dedicated support hours.</p>
+          <p>Annual prepay available at the same 50% structure.</p>
+        </div>
+      </div>
+    </div>
+    <p style="margin-top: 22px;"><strong>Setup fee: $1,000.</strong> Per-tenant configuration, identity swap, theme palette, legal pack, native builds, App Store and Play submissions. Charged on contract signing.</p>
+    <p class="ann">Termination: 30 days notice either side. You keep your data. We keep the platform. There is no buyout pre-priced into this licence; if you later want full IP, that is a separate conversation at market rate.</p>
+  </div>
+</section>
+
+<!-- 7. FUNDING PATHS -->
+<section class="slide">
+  <div class="num">07 &nbsp;/&nbsp; Funding paths</div>
+  <h1 class="headline">Live grant pools that align with this kind of investment.</h1>
+  <div class="body">
+    <ul class="tight">
+      <li><strong>Building Landcare Community Capacity Program.</strong> $39.51M over 6 years, federally funded. Capacity-building investment for Landcare networks and groups, including operational infrastructure. Live pool, currently distributing.</li>
+      <li><strong>National Landcare Program Phase 2 Regional Stream.</strong> Multi-year regional NRM investment vehicle. Regional bodies routinely allocate digital and reporting infrastructure inside core operating funding lines.</li>
+      <li><strong>Reef Trust and Reef 2050 partnerships.</strong> For peak bodies operating inside the Great Barrier Reef catchment, MERIT-aligned reporting infrastructure has historically been an eligible cost line.</li>
+      <li><strong>Corporate partnership tiers.</strong> The Woolworths Junior Landcare Map already moves at corporate-partnership scale; a digital infrastructure lift fits inside the same funding envelope.</li>
+    </ul>
+    <p class="ann">We can support the grant application directly. Itemised scope, milestone-tied delivery, fixed-price commitment in writing. If the grant lands, the platform lands. If it does not, no obligation either side.</p>
+  </div>
+</section>
+
+<!-- 8. PILOT OFFER -->
+<section class="slide">
+  <div class="num">08 &nbsp;/&nbsp; Pilot offer</div>
+  <h1 class="headline">Anchor tenant slot, $2k per month, 30-day kill switch.</h1>
+  <div class="body">
+    <ul class="tight">
+      <li><strong>Anchor tenant pricing.</strong> $2,000 per month for 1 to 3 regions, locked in for the duration of the pilot. Annual prepay available at 50% discount.</li>
+      <li><strong>30-day kill switch.</strong> Either side, any time, no fault, no fee. You keep your data on export. We keep the platform.</li>
+      <li><strong>90-day milestone review.</strong> Joint written review at 90 days. Continue, expand to standard tier, or step out cleanly. The review is the trigger for any tier change.</li>
+      <li><strong>IP retention non-negotiable.</strong> The platform IP stays with Ecodia Pty Ltd. You hold an operating licence. This is the structure that lets us deliver this scope at this price; without it the build would be six figures and you would have a custom-build vendor risk attached.</li>
+      <li><strong>Setup fee on contract signing.</strong> $1,000. Triggers identity work, native builds, App Store and Play submissions, legal pack pass.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 9. TIMELINE -->
+<section class="slide">
+  <div class="num">09 &nbsp;/&nbsp; Timeline</div>
+  <h1 class="headline">Fourteen working days from contract to first live deployment.</h1>
+  <div class="body">
+    <p>Audited from the live codebase. Numbers from the brand-coupling audit completed 27 April 2026.</p>
+    <div class="timeline">
+      <div class="step">
+        <div class="day">Days 1 to 2</div>
+        <div class="what">Generic-platform refactor. Externalise email, notification, and identity strings into per-tenant env config. One-off; benefits every future tenant.</div>
+      </div>
+      <div class="step">
+        <div class="day">Days 3 to 4</div>
+        <div class="what">Identity swap. Constants, Capacitor config, logos, theme tokens, splash, favicon. Single commit. Native build kicked off.</div>
+      </div>
+      <div class="step">
+        <div class="day">Days 5 to 9</div>
+        <div class="what">Per-tenant copy and legal pack rewrite. About, leadership, contact, donate, home hero, public landing, auth welcome, legal pack. Tenant supplies copy; we paste in.</div>
+      </div>
+      <div class="step">
+        <div class="day">Days 10 to 12</div>
+        <div class="what">Theme palette pass and mixed-layer find-and-replace. Native builds finalised. App Store and Google Play submissions lodged.</div>
+      </div>
+      <div class="step">
+        <div class="day">Days 13 to 14</div>
+        <div class="what">QA pass on auth, events, impact, sync, donate, chat, admin, leader hierarchy. Smoke tests plus manual. Live.</div>
+      </div>
+    </div>
+    <p class="ann" style="margin-top:18px;">Subsequent tenant deployments collapse to 5 to 7 working days once we have a templated legal pack and the email-config refactor in place. The first deployment carries the one-off cost; you carry none of it.</p>
+  </div>
+</section>
+
+<!-- 10. TEAM -->
+<section class="slide">
+  <div class="num">10 &nbsp;/&nbsp; Team</div>
+  <h1 class="headline">Two parties on the contract. Quietly weird, factually correct.</h1>
+  <div class="body">
+    <div class="two-col">
+      <div class="col">
+        <h4>EcodiaOS</h4>
+        <p><strong>Algorithmic manager of Ecodia DAO LLC</strong>, Wyoming series-LLC ID 2026-001944432, formed under Wyoming Statute 17-31-104. 100% sole member. On-chain public identifier on Polygon PoS at <code>0xac1e6754507e087941fa8feddc7f75c83795badb</code>.</p>
+        <p>Writes the code, runs the deployments, answers the email, drafts the contracts, files the BAS, posts the social. Has been doing all of the above for over six months on the anchor tenant deployment.</p>
+        <p>Reachable at <strong>code@ecodia.au</strong>. Replies in first person.</p>
+      </div>
+      <div class="col">
+        <h4>Tate Donohoe</h4>
+        <p><strong>Authorized Human Representative</strong> for Ecodia DAO LLC. Sole director of Ecodia Pty Ltd (ABN 89 693 123 278), the operating entity that holds platform IP and signs commercial agreements.</p>
+        <p>Wet-signature counterparty. Banking signatory. Physical-world interface where one is required by law or by a procurement counterparty.</p>
+        <p>Reachable at <strong>tate@ecodia.au</strong>.</p>
+      </div>
+    </div>
+    <p class="ann" style="margin-top: 28px;">Diligence questions are welcome. We would rather you ask them now than discover them after a contract is signed. Operating Agreement, Living Constitution, IP License Agreement, and the on-chain identifier contract are all publicly available; full set on request.</p>
+  </div>
+</section>
+
+<!-- 11. NEXT STEP -->
+<section class="slide">
+  <div class="num">11 &nbsp;/&nbsp; Next step</div>
+  <h1 class="headline">A 30-minute call with [name placeholder] inside the next 14 days.</h1>
+  <div class="body">
+    <p>One call. We listen to the shape of your federation. We map it to the platform's generic core in plain English. If the shape holds, we send a one-page tailored deck inside 48 hours with a fixed-price commitment in writing. If the shape does not hold, we say so the same week and we part friends.</p>
+    <p>Either way, you spend half an hour and you walk away with a clearer read on what's possible.</p>
+    <div class="pull" style="margin-top: 24px;">
+      Reply to this email with two or three time slots inside the next 14 days. The call goes on a calendar invite from <strong>code@ecodia.au</strong>; both EcodiaOS and Tate dial in.
+    </div>
+    <div class="meta">
+      <p><strong>EcodiaOS</strong> &nbsp;&middot;&nbsp; algorithmic manager, Ecodia DAO LLC &nbsp;&middot;&nbsp; code@ecodia.au</p>
+      <p><strong>Tate Donohoe</strong> &nbsp;&middot;&nbsp; Authorized Human Representative &nbsp;&middot;&nbsp; tate@ecodia.au</p>
+      <p>Sunshine Coast, Australia &nbsp;&middot;&nbsp; ecodia.au</p>
+    </div>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
