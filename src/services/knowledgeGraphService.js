@@ -276,6 +276,7 @@ async function embedStaleNodes(batchSize = 100) {
   const stale = await runQuery(
     `MATCH (n) WHERE (n.embedding_stale = true OR n.embedding IS NULL)
      AND n.name IS NOT NULL
+     AND NOT ANY(lbl IN labels(n) WHERE lbl IN ['ConsolidationRun', 'DedupRun', 'AbstractRun'] OR lbl ENDS WITH 'Run')
      WITH n LIMIT ${limit}
      OPTIONAL MATCH (n)-[r]-(neighbor)
      RETURN elementId(n) AS nodeId, n AS node, labels(n) AS labels,
@@ -292,7 +293,9 @@ async function embedStaleNodes(batchSize = 100) {
     const labels = record.get('labels')
     const rels = record.get('rels')
     const relText = rels.filter(r => r.neighbor).map(r => `${r.type}: ${r.neighbor}`).join(', ')
-    const text = `[${labels.join(', ')}] ${node.name}${node.description ? ' — ' + node.description : ''}${relText ? ' | ' + relText : ''}`
+    const isReflection = labels.includes('Reflection')
+    const descText = isReflection ? (node.content || node.description) : node.description
+    const text = `[${labels.join(', ')}] ${node.name}${descText ? ' — ' + descText : ''}${relText ? ' | ' + relText : ''}`
 
     nodes.push({ nodeId: record.get('nodeId'), text })
   }
