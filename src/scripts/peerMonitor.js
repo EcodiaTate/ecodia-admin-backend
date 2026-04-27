@@ -344,7 +344,7 @@ module.exports = { runPeerMonitor }
 // -- CLI entry point --------------------------------------------------------
 
 if (require.main === module) {
-  const logger = require('./config/logger').child ? require('../config/logger') : require('../config/logger')
+  const logger = require('../config/logger')
   const dryRun = process.argv.includes('--dry-run')
 
   if (dryRun) logger.info('peerMonitor: DRY-RUN mode -- no writes will occur')
