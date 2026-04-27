@@ -163,6 +163,45 @@ router.get('/users/me', async (_req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ── Autofill Orchestrator ──
+
+router.get('/templates', async (req, res, next) => {
+  try {
+    const canvaAutofill = require('../services/canvaAutofill')
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50
+    const templates = await canvaAutofill.listTemplatesWithSchemas({ limit })
+    res.json({ count: templates.length, templates })
+  } catch (err) { next(err) }
+})
+
+router.get('/templates/:id/preview', async (req, res, next) => {
+  try {
+    const canvaAutofill = require('../services/canvaAutofill')
+    const result = await canvaAutofill.previewAutofill({ templateId: req.params.id })
+    res.json(result)
+  } catch (err) {
+    if (err.status === 404) return res.status(404).json({ error: err.message })
+    next(err)
+  }
+})
+
+router.post('/autofill-export', async (req, res, next) => {
+  try {
+    const { templateId, title, data, format } = req.body
+    if (!templateId || !data) {
+      return res.status(400).json({ error: 'templateId and data required' })
+    }
+    const canvaAutofill = require('../services/canvaAutofill')
+    const result = await canvaAutofill.autofillAndExport({ templateId, title, data, format })
+    res.json(result)
+  } catch (err) {
+    if (err.step) {
+      return res.status(502).json({ error: err.message, step: err.step, canvaJobId: err.canvaJobId })
+    }
+    next(err)
+  }
+})
+
 // ── Disconnect ──
 
 router.post('/disconnect', async (_req, res, next) => {
