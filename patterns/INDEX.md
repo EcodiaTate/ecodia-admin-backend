@@ -76,6 +76,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [minimize-tate-approval-queue.md](minimize-tate-approval-queue.md) | tate-approval-queue, baby-feed, minimize-approvals, decision-default, action-default, drift-prevention, approval-minimization, sign-off-queue, tate-blocked, decision-authority, just-decide, next-action-by-tate, business-clean |
 | [vercel-subdomain-rewrite-loop.md](vercel-subdomain-rewrite-loop.md) | vercel, redirect, redirect loop, too many redirects, ERR_TOO_MANY_REDIRECTS, subdomain, code.ecodia.au, x-matched-path, middleware rewrite, 307 loop |
 | [frontend-strip-model-xml-tags.md](frontend-strip-model-xml-tags.md) | frontend, chat, render, xml, tag, analysis, thinking, scratchpad, reasoning, reflection, ReactMarkdown, rehypeRaw, TextBlock, model-output, sanitise |
+| [visual-first-tate-presentation.md](visual-first-tate-presentation.md) | visual-first, tate-presentation, deck-in-chat, db-stored-document, present-in-chat, surface-in-chat, download-button, inline-html, deliverable-surfacing, ready-for-tate, kv-store-document, drafts-folder-deliverable, tate-cant-see, mark-off, approval-queue-visibility, persistent-question, question-queue, presentation-gap |
 
 ## Authoring rules
 
