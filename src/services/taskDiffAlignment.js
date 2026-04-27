@@ -14,20 +14,25 @@ const STOPWORDS = new Set([
   'out','in','on','at','to','for','by','up','down','off','as','is','are','be',
   'and','or','but','not','if','so','it','its','the','an','a','of','do','does',
   'src','test','tests','spec','specs','lib','dist','node_modules','utils','util',
-  'service','services','module','modules','config','configs',
+  'module','modules','config','configs',
   'pipeline','stage','stages','status','output','input','data','row','rows',
   'json','http','api','url','ref','id','uuid','object','array','string','number',
-  'boolean','function','method','handler','helper','helpers','result','return',
+  'boolean','function','result','return',
   'throw','throws','error','errors','log','logs','logger','debug','info','warn',
   'ms','seconds','minutes','hours','days','week','weeks','month','months','year',
   'ecodiaos','factory','session','sessions','commit','commits','diff','diffs',
   'deploy','deployed','deploying','approve','approved','reject','rejected',
-  'claude','cc','mcp','pattern','patterns','doctrine','docs','documentation',
+  'claude','cc','mcp','docs','documentation',
+  // NOTE: 'service','services','method','handler','helper','helpers','pattern','patterns','doctrine'
+  // were removed — they are domain-meaningful in this codebase and suppressing them caused
+  // false misses (e.g. "bookkeeper service" task vs bookkeeperService.js diff).
 ])
 
 function extractKeywords(text) {
   if (!text || typeof text !== 'string') return []
-  const tokens = text.toLowerCase().match(/[a-z][a-z0-9]{3,}/g) || []
+  // Bug 1 fix: min 3 chars (1 letter + 2 more) so 3-char acronyms like iap, sms, dao are captured.
+  // Previously {3,} required min 4 chars, stripping these while extractPathTokens kept them.
+  const tokens = text.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) || []
   const kept = []
   const seen = new Set()
   for (const t of tokens) {
@@ -77,11 +82,19 @@ function computeTaskDiffAlignment(statedTask, filesChanged) {
     }
   }
 
-  // Overlap: how many stated keywords appear as substrings of any diff path token
+  // Bug 2 fix: one-directional match only.
+  // Original: t.includes(kw) || kw.includes(t) — the kw.includes(t) clause let short path
+  // tokens (e.g. "set" from "dataset") match any keyword containing them ("settings", "reset"),
+  // inflating scores for phantom sessions.
+  // Fix: t.includes(kw) only (a long path token may contain the keyword as a meaningful part).
+  // Edge case for 3-char keywords: require exact match because t.includes('iap') on 'iap.js'
+  // splits to 'iap' (exact), but 'api' could match 'capital' — exact avoids noise.
   let hits = 0
   const matched = []
   for (const kw of statedKeywords) {
-    const hit = diffPathTokens.some((t) => t.includes(kw) || kw.includes(t))
+    const hit = kw.length < 4
+      ? diffPathTokens.some((t) => t === kw)
+      : diffPathTokens.some((t) => t === kw || t.includes(kw))
     if (hit) { hits++; matched.push(kw) }
   }
   const overlapScore = hits / statedKeywords.length
