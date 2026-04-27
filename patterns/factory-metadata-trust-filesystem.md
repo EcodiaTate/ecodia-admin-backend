@@ -57,7 +57,27 @@ Recovery required manually: ff main from origin, ff main to topic branch HEAD, `
 - [ ] If yes and they are unrelated to the session: commit them on a separate branch first, OR accept the snowball and plan to amend message + split via revert+commit on the next push.
 - [ ] If yes and they are session-related leakage: investigate before approving.
 
+## Addendum 3 - the metric being improved flags its own improvement
+
+Apr 27 2026, 23:30 AEST. Factory session `d67c00f5-52ca-45d6-b9be-25e43f5d58ad` fixed three bugs in `src/services/taskDiffAlignment.js` itself - the very gate that produces the `flagged` signal. Bugs were:
+1. keyword-extraction regex required min 4 chars while extractPathTokens accepted length>=3, silent asymmetry stripping 3-char acronyms (iap, sms, dao).
+2. bidirectional substring match (`t.includes(kw) || kw.includes(t)`) let short path tokens match keywords containing them ("set" in "dataset" matching "settings"), inflating phantom scores.
+3. STOPWORDS contained domain-meaningful words (`service`, `services`, `method`, `handler`, `helper`, `pattern`, `patterns`, `doctrine`), silently dropping real signal.
+
+Diff cleanly modified exactly the two prescribed files (`src/services/taskDiffAlignment.js` + `tests/taskDiffAlignment.test.js`) plus 4 new regression tests. All 7 tests passed via the prescribed verification command. Pre-dispatch hygiene commit `7c5744a` had already isolated 20 files of ambient work from the worktree, so no snowball risk.
+
+When I called `approve_factory_deploy` without `force`, it rejected with `Task-diff mismatch: Low keyword overlap (8%)`. The irony is structural: the prompt was a long, explanatory bug-description (~700 words of "the regex strips X while paths keep Y, and STOPWORDS dropping service means..."). Under the stricter post-fix matching the PR introduces, that long narrative prompt scores low against terse filenames like `taskDiffAlignment.js`. **The metric this PR is improving flags its own improvement.**
+
+Approved with `force=true`, deployed as commit `adc42da`. No worktree pollution, no parallel session, no operator-authored leakage - this addendum is the third distinct mechanism producing a false-positive `flagged` signal:
+
+- Addendum 1 (Apr 23): stale `filesChanged` from polluted worktree pre-existing the session.
+- Addendum 2 (Apr 27 morning): operator ambient untracked state snowballed at approve time.
+- **Addendum 3 (Apr 27 night): long, explanatory prompts inherently score low under stricter matching - especially when fixing the matcher itself.**
+
+The doctrine holds: `flagged` is advisory, filesystem-truth is authoritative. Verify on disk, force-approve when verified clean, record the mechanism in `notes`.
+
 ## Related patterns
 - `factory-codebase-staleness-check-before-dispatch.md` - prevention side (clean worktree before dispatch)
 - `factory-phantom-session-no-commit.md` - when Factory reports work that produced no commit
 - `factory-approve-no-push-no-commit-sha.md` - approve succeeds but no real commit shipped
+- `factory-reject-nukes-untracked-files.md` - the worktree-clean side of pre-dispatch hygiene
