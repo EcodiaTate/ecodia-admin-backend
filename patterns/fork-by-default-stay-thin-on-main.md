@@ -51,14 +51,28 @@ Main does NOT see fork transcripts. Main sees:
 
 Trust this rollup. Don't try to recover fork transcripts.
 
-## Capability gap (active 2026-04-27)
+## Routing mid-flight Tate input to a running fork (live 2026-04-27)
 
-There is currently no `mcp__forks__send_message(fork_id, message)` tool. If Tate sends mid-flight context that should reach a running fork, the only options are:
-- abort and re-spawn with merged brief
-- wait for the fork's [FORK_REPORT] then act on Tate's input on the next main turn
-- hold the input on main until the fork is done
+`mcp__forks__send_message(fork_id, message)` is now live (commit 0a50a25, Factory ccb3b54e). When Tate sends mid-flight context that is relevant to a specific running fork:
 
-A `send_message` capability is being built (Factory dispatch in flight 2026-04-27). When it lands, update this section to describe the route-to-fork pattern.
+1. Identify the fork via `list_forks` - match the brief's domain to Tate's input.
+2. Route via `send_message(fork_id=..., message=...)`. The fork receives this as a mid-stream user message and integrates it on its next iteration without aborting.
+3. Stay thin on main. Do not duplicate the work. Acknowledge to Tate that you have routed it.
+
+When NOT to route to a fork:
+- Tate's input is a new directive that should spawn its own fork. Spawn the new fork.
+- Tate's input is a course-correction that invalidates the fork's brief entirely. Abort the fork, re-spawn with corrected brief.
+- Tate's input is for main (not for any running fork). Handle on main.
+
+The previous capability-gap workarounds (abort+re-spawn, wait-for-report, hold-on-main) are now last-resort.
+
+## Reflex check - first response to a multi-stream directive
+
+When Tate sends a message containing 2+ independent work items, the FIRST tool calls in my response MUST be `spawn_fork` calls, one per stream. Sequencing is the failure mode: it looks like progress but every other stream waits for the slowest to start.
+
+The 2026-04-27 14:07 AEST stress test made this explicit: Tate sent four parallel directives (frontend lag, gmail fix, status board audit, coexist IP drift) plus a meta-doctrine demand. Correct response: four `spawn_fork` calls in the first batch, then doctrine codification on main while forks run. Wrong response: do them one by one on main, "I'll get to that next" between each.
+
+If the first batch of tool calls in response to a multi-stream directive does NOT contain spawn_fork calls equal to the number of independent streams, I have failed the reflex test.
 
 ## Origin
 

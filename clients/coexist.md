@@ -88,6 +88,28 @@ Auto-deploys from main branch. Push to GitHub, Vercel handles the rest.
 
 ---
 
+## IP & Licence Model — READ BEFORE ANY EXTERNAL ARTEFACT
+
+**Recalibrated 2026-04-27 per Tate. See `~/ecodiaos/patterns/coexist-vs-platform-ip-separation.md`.**
+
+| Layer | Owner | Brand | Sellable to others? |
+|-------|-------|-------|---------------------|
+| Co-Exist app, brand, charity content, member data | Co-Exist Australia (Kurt's charity) | Co-Exist | No - it is their app |
+| Underlying conservation platform code patterns (multi-tenant Edge Functions, sync engines, admin UI patterns, deployment automation) | Ecodia Labs Pty Ltd | TBD - rebrand pending Tate | Yes - this is what we sell to other peak bodies |
+| The running Co-Exist deployment (their app on a stack we own) | Joint - app theirs, platform underneath ours | Co-Exist | Reference case study only, anonymised by default |
+
+**Co-Exist's licence with Ecodia covers:** operating their Co-Exist app deployment specifically. Build fee + ~$200/mo operating licence (INV-2026-003 May draft). IP-retention model per `~/CLAUDE.md` "IP Retention & Licensing Model" - Ecodia Labs retains platform IP, Co-Exist gets a perpetual non-transferable operating licence contingent on payment. Client-facing contract attributes IP to Ecodia Pty Ltd (Labs → Pty Ltd licensing chain is internal plumbing, not exposed to client).
+
+**Contract status (2026-04-27):** Software agreement sent to hello@coexistaus.org Apr 8 2026. Signed by Tate. Awaiting Kurt countersign. May licence invoice (INV-2026-003) draft-ready in status_board.
+
+**What this means for any work touching Co-Exist:**
+- Internal artefacts about Co-Exist app/feature work: no change, business as usual.
+- Any artefact that mentions "the platform" or "Platform-Co-Exist" or pitches multi-tenant federation: Co-Exist is the LIGHTHOUSE DEPLOYMENT, not the product brand. Pitch under the platform's TBD rebrand, anonymise Co-Exist as the case study per public-writing doctrine.
+- Affected legacy kv_store briefs (keep keys, rewrite content before external derivation): `ceo.briefs.platform-coexist-pricing-benchmarks-2026-04-25`, `ceo.briefs.platform-coexist-federation-thesis-2026-04-26`, `ceo.drafts.platform-coexist-peak-bodies-brief-v1`, `ceo.audit.coexist-multitenant-readiness-2026-04-25`. Each now carries an inline `_ip_recalibration_notice` field flagging the rewrite-pending state.
+- Tate-owned blocker on status_board priority 1: name decision for the rebranded platform product. Until stamped, all external artefacts use "conservation platform (working name pending)" placeholder.
+
+---
+
 ## Known Issues
 - Splash screen on Android: FIXED (Apr 14) — needs rebuild + deploy to verify on device
 - Hero images fix: LIVE (commit 6018cc0)
