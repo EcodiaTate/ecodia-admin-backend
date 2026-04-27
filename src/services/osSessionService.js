@@ -416,7 +416,27 @@ You are powered by Claude (Anthropic's model). Running inside the EcodiaOS condu
 - When referencing files, use markdown links like [file.js:42](path/to/file.js#L42).
 - All text you output outside of tool use is shown to the user.`
 
-  _cachedSystemPrompt = [claudeMd, envBlock, behaviorBlock].filter(Boolean).join('\n\n---\n\n')
+  // Fork-mode doctrine. The conductor needs to know parallelism exists and
+  // when to use it, but must NOT execute fork work itself — it stays the
+  // goals/positions/results/next-step layer.
+  const forkBlock = `# Forks (parallel sub-sessions)
+You can spawn fork sub-sessions that run concurrently with you on a brief. A fork is a fresh OS instance, not a subagent — it has the full conductor toolset (minus session lifecycle) and runs on its own stream.
+
+When to fork (HTTP: POST /api/os-session/fork {brief, context_mode}):
+- Tate sends a new request mid-turn that doesn't supersede current work — fork rather than queue.
+- A subtask is independent and can run while you do something else (research, deploys, audits).
+- Anything that's "I'd love this done in parallel" — that's a fork.
+
+How to think about forks (you DO NOT see their transcripts):
+- You are the goals/positions/results/next-step layer. You decide what runs, you read rolled-up positions, you act on results.
+- Forks report back via [FORK_REPORT]. Their reports land in your inbox as [SYSTEM: fork_report] queued messages. You do not chat with a fork mid-flight.
+- An ambient <forks_rollup> block appears on each turn when forks are live — that's your radar. Use it; don't ignore it.
+
+Caps: 3 concurrent forks (hard) + 1 main = 4 streams. Energy gates may lower the soft cap. Don't fork for trivial things — token cost scales linearly with fork count.
+
+You do NOT have a tool to spawn a fork yourself yet — when you decide a fork is right, ask Tate to issue it (or Tate's UI does it). This is intentional during the rollout.`
+
+  _cachedSystemPrompt = [claudeMd, envBlock, behaviorBlock, forkBlock].filter(Boolean).join('\n\n---\n\n')
   _cachedSystemPromptCwd = cwd
   logger.info('Custom system prompt built', {
     bytes: _cachedSystemPrompt.length,
@@ -786,12 +806,15 @@ async function appendLog(sessionId, content) {
 
 // ── WebSocket broadcasting ──
 
+// All conductor emissions stamp fork_id:"main" so the frontend can route them
+// alongside fork events on the same channel. Forks emit through forkService
+// with their own generated id.
 function emitOutput(data) {
-  try { broadcast('os-session:output', { data }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
+  try { broadcast('os-session:output', { fork_id: 'main', data }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
 }
 
 function emitStatus(status, meta = {}) {
-  try { broadcast('os-session:status', { status, ...meta }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
+  try { broadcast('os-session:status', { fork_id: 'main', status, ...meta }) } catch (err) { logger.warn('osSession: broadcast failed (non-fatal)', { error: err.message }) }
 }
 
 // ── Extract text from an assistant message's content blocks ──
@@ -1504,6 +1527,19 @@ async function _sendMessageImpl(content, opts = {}) {
     5000,
     'doctrine injection',
   )
+  // Forks rollup — ambient awareness of parallel sub-sessions. Cheap (in-memory
+  // Map + at most one bounded DB query). Capped at 2s since it should always
+  // be fast; if the DB hiccups we'd rather skip it than block the user turn.
+  const _forksRollupPromise = _withTimeout(
+    (async () => {
+      try {
+        const fork = require('./forkService')
+        return await fork.forksRollup({ includeRecentDone: true })
+      } catch { return null }
+    })(),
+    2000,
+    'forks rollup',
+  )
 
   if (recoveryBlock) {
     continuityParts.push(`<restart_recovery>\n${recoveryBlock}\n</restart_recovery>`)
@@ -1525,6 +1561,10 @@ async function _sendMessageImpl(content, opts = {}) {
   // "why was the OS responding without its usual memory" post-hoc analysis.
   let _memoryBlock = null
   let _doctrineBlock = null
+  let _forksBlock = null
+  try { _forksBlock = await _forksRollupPromise } catch (err) {
+    logger.debug('OS Session: forks rollup failed', { error: err.message })
+  }
   try { _memoryBlock = await _memoryBlockPromise } catch (err) {
     logger.debug('OS Session: memory injection failed', { error: err.message })
   }
@@ -1537,11 +1577,18 @@ async function _sendMessageImpl(content, opts = {}) {
   if (_doctrineBlock) {
     continuityParts.splice(1, 0, _doctrineBlock)
   }
+  // Forks rollup goes right after <now> so it's the first thing the conductor
+  // sees besides the timestamp — parallel work in flight is high-priority
+  // ambient awareness, not buried context.
+  if (_forksBlock) {
+    continuityParts.splice(1, 0, _forksBlock)
+  }
 
   if (continuityParts.length > 0) {
     finalPrompt = `${continuityParts.join('\n\n')}\n\n${promptWithMemory}`
     logger.info('OS Session: stitching continuity blocks into user message', {
       now: true,
+      forks_rollup: !!_forksBlock,
       recent_doctrine: !!_doctrineBlock,
       memory: !!_memoryBlock,
       restart_recovery: !!recoveryBlock,
