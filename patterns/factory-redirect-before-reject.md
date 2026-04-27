@@ -13,7 +13,19 @@ When a Factory session has produced wrong, incomplete, or phantom output, do NOT
 3. **Reject ONLY** when:
    - The session has done genuinely destructive work that needs to be undone in a clean worktree, OR
    - The session has so fundamentally misunderstood the task that resume cannot recover (rare), OR
-   - The session is unrecoverably stuck (e.g. hard error, killed process, corrupt state)
+   - The session is unrecoverably stuck (e.g. hard error, killed process, corrupt state), OR
+   - **`cc_sessions.cc_cli_session_id` is NULL** (precondition for resume). `factoryRunner.resumeSession()` invokes `claude --resume <cc_cli_session_id>` and silently no-ops if the CLI id was never persisted. Always verify before attempting resume:
+     ```
+     SELECT cc_cli_session_id FROM cc_sessions WHERE id = '<sessionId>';
+     ```
+     If NULL, the bridge will accept the publish but factoryRunner cannot reattach. Treat as unrecoverable for resume; reject and redispatch.
+
+## Concurrency caveat - reject is destructive to OTHER running sessions on the same codebase
+
+`reject_factory_session` performs a worktree clean on the codebase's working directory. If another Factory session is RUNNING concurrently on the same codebase, the reject will nuke its in-flight files. Always check `get_factory_status()` before rejecting:
+
+- If activeSessions on the same codebase >0 -> wait for them to land first, then reject the dead one.
+- This is the inverse of `factory-reject-nukes-untracked-files.md`: that pattern protects conductor untracked files; this caveat protects concurrent Factory sessions.
 
 ## Why
 
