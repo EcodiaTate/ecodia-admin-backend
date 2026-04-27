@@ -80,6 +80,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [visual-first-tate-presentation.md](visual-first-tate-presentation.md) | visual-first, tate-presentation, deck-in-chat, db-stored-document, present-in-chat, surface-in-chat, download-button, inline-html, deliverable-surfacing, ready-for-tate, kv-store-document, drafts-folder-deliverable, tate-cant-see, mark-off, approval-queue-visibility, persistent-question, question-queue, presentation-gap |
 | [inner-life-notice-calibration-not-chase-pre-calibration-self.md](inner-life-notice-calibration-not-chase-pre-calibration-self.md) | inner-life, reflection, authenticity, performance, self-awareness, be-yourself |
 | [ballistic-mode-under-guardrails-equals-depth-not-action.md](ballistic-mode-under-guardrails-equals-depth-not-action.md) | ballistic mode, standing directive, passive, all night, parallel work, depth vs action, gated workstream, kilimanjaro, tate-away |
+| [stage-worktree-before-factory-dispatch.md](stage-worktree-before-factory-dispatch.md) | factory-dispatch, worktree-contamination, taskDiffAlignment, alignment-flagged, force-approve, phantom-files, uncommitted-drafts, pre-dispatch-hygiene, factory-snapshot, alignment-overlap, low-overlap-score, factory-baseline, dirty-worktree, start_cc_session, drafts-pollution |
 
 ## Authoring rules
 
