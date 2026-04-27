@@ -88,7 +88,10 @@ async function consumeHandoffState() {
       UPDATE kv_store
       SET value = jsonb_set(value::jsonb, '{consumed_at}', to_jsonb(${markedConsumedAt}::text), true)
       WHERE key = ${KV_KEY}
-        AND (value->>'consumed_at' IS NULL OR (value->>'consumed_at')::timestamptz < (value->>'saved_at')::timestamptz)
+        AND (
+          (value::jsonb->>'consumed_at') IS NULL
+          OR (value::jsonb->>'consumed_at')::timestamptz < (value::jsonb->>'saved_at')::timestamptz
+        )
       RETURNING value
     `
 
