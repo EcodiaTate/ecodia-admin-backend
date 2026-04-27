@@ -10,7 +10,7 @@ const COMMON = {
 }
 module.exports = {
   apps: [
-    { ...COMMON, name: 'ecodia-api', script: 'src/server.js', max_memory_restart: '2G', env: { ...COMMON.env, PORT: 3001, OS_CONV_LOG_ENABLED: 'true' } },
+    { ...COMMON, name: 'ecodia-api', script: 'src/server.js', max_memory_restart: '2G', env: { ...COMMON.env, PORT: 3001, OS_CONV_LOG_ENABLED: 'true', KG_CONTEXT_MAX_DEPTH: '3', KG_CONTEXT_MAX_SEEDS: '8' } },
     // Factory runner — owns all CC session child processes.
     // Runs separately from ecodia-api so CC sessions survive API restarts (e.g. self-modification deploys).
     // Communicates with ecodia-api via Redis pub/sub (factoryBridge).
