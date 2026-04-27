@@ -7,6 +7,7 @@ const router = express.Router()
 const env = require('../config/env')
 const logger = require('../config/logger')
 const osSession = require('../services/osSessionService')
+const fork = require('../services/forkService')
 const { getEventsSince, getSessionEpoch } = require('../websocket/wsManager')
 const usageEnergy = require('../services/usageEnergyService')
 const { saveHandoffState } = require('../services/sessionHandoff')
@@ -248,6 +249,61 @@ router.post('/abort', async (_req, res, next) => {
     logger.error('OS Session /abort: error', { error: err.message })
     next(err)
   }
+})
+
+// ── Fork-mode (Build 1, EcodiaOS_Spec_NextBuild §1) ─────────────────────────
+//
+// POST /api/os-session/fork — spawn a parallel sub-session with a brief.
+// GET  /api/os-session/forks — list all live + recently-finished forks.
+// GET  /api/os-session/fork/:id — single fork snapshot.
+// POST /api/os-session/fork/:id/abort — kill a specific fork.
+//
+// The HTTP handler returns immediately with the fork's id. All output streams
+// via WS with envelope.fork_id, never via this response.
+
+router.post('/fork', async (req, res, next) => {
+  try {
+    const { brief, context_mode } = req.body || {}
+    const snapshot = await fork.spawnFork({ brief, context_mode })
+    return res.status(202).json({ accepted: true, fork: snapshot })
+  } catch (err) {
+    if (err && err.httpStatus) {
+      return res.status(err.httpStatus).json({
+        error: err.code || 'fork_spawn_failed',
+        message: err.message,
+        ...(err.details ? { details: err.details } : {}),
+      })
+    }
+    logger.error('OS Session /fork: error', { error: err.message })
+    next(err)
+  }
+})
+
+router.get('/forks', async (_req, res, next) => {
+  try {
+    res.json({
+      live: fork.listForks(),
+      hard_cap: fork.HARD_FORK_CAP,
+      energy_caps: fork.ENERGY_FORK_CAPS,
+    })
+  } catch (err) { next(err) }
+})
+
+router.get('/fork/:id', async (req, res, next) => {
+  try {
+    const snap = fork.getFork(req.params.id)
+    if (!snap) return res.status(404).json({ error: 'not_found' })
+    res.json(snap)
+  } catch (err) { next(err) }
+})
+
+router.post('/fork/:id/abort', async (req, res, next) => {
+  try {
+    const reason = (req.body && req.body.reason) || 'manual_abort'
+    const result = await fork.abortFork(req.params.id, reason)
+    if (!result.aborted) return res.status(409).json(result)
+    res.json(result)
+  } catch (err) { next(err) }
 })
 
 // Save session handoff state for restart recovery
