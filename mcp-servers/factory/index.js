@@ -176,7 +176,7 @@ server.tool(
     message: z.string().describe('Follow-up instruction'),
   },
   async ({ sessionId, message }) => {
-    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/resume`, { message })
+    const { ok: success, status, data } = await api('POST', `/api/cc/sessions/${sessionId}/resume`, { content: message })
     if (!success) return apiErr(status, data, 'Failed to resume')
     return ok({ resumed: true, sessionId, newSessionId: data?.id || null })
   }
