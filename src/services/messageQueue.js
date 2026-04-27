@@ -34,8 +34,8 @@ async function buildContextSnapshot() {
   const snapshot = {}
 
   try {
-    const { readHandoffState } = require('./sessionHandoff')
-    const handoff = await readHandoffState()
+    const { peekHandoffState } = require('./sessionHandoff')
+    const handoff = await peekHandoffState()
     if (handoff) snapshot.handoff_state_summary = handoff.slice(0, 500)
   } catch {}
 
