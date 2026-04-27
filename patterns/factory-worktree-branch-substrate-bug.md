@@ -32,15 +32,31 @@ The first rejection was symbolic loss - the work was already there. The second r
 5. Update the rejected status_board row to reflect actual state: shipped, not failed.
 6. Reset the worktree to `main` (`git checkout main && git pull`) so the substrate bug does not poison the next dispatch.
 
-## Substrate fix needed
+## Substrate fix shipped (2026-04-27 20:36 AEST)
 
-The dispatcher should either:
-- (a) Reset the worktree to `main` (or a known clean base) before each `start_cc_session` call.
-- (b) Have the review tool compare against the dispatched branch's base (recoverable from the prompt's "Branch from:" line or `git merge-base`), not against the current worktree branch.
+Path (a) shipped. `src/workers/factoryRunner.js` `startSession` now runs a worktree-reset preflight before spawning the CC CLI: `git fetch origin`, detect default branch via `git symbolic-ref --short refs/remotes/origin/HEAD`, `git checkout <default>`, `git pull --ff-only`. All git calls wrapped in nested try/catch (soft-fail with logger.warn). Skip condition: `if (cwd && cwd !== process.cwd())` - never resets the EcodiaOS backend itself (would self-mutate). Commit `1e70761` on branch `fix/factory-dispatcher-worktree-reset-2026-04-27`, force-approved (diff tool was misreading uncommitted briefing edits as Factory's diff - see "Recursion case" below). Loaded into running ecodia-api process at 20:39 AEST after PM2 restart.
 
-(a) is the cheaper fix - one `git checkout main && git pull` in the dispatcher pre-flight. (b) is the more correct fix and survives bad worktree state.
+Path (b) - review tool comparing against dispatched-branch-base instead of worktree HEAD - still NOT shipped. Path (a) is sufficient when the worktree is clean, but recursion case below shows (a) alone does not cover all failure modes.
 
-Until the substrate is fixed, every Factory dispatcher caller MUST run the verify-on-disk check above before accepting a rejection at face value. Treat the review's `filesChanged` field as a hint, not as ground truth.
+Until path (b) ships, every Factory dispatcher caller MUST run the verify-on-disk check above before accepting a rejection at face value. Treat the review's `filesChanged` field as a hint, not as ground truth.
+
+## Recursion case: ecodiaos-backend self-dispatch with dirty worktree (2026-04-27 second incident)
+
+Path (a) skips the worktree reset when `cwd === process.cwd()` to avoid self-mutating the running process. Correct safety choice but it leaves a hole: when Factory targets `ecodiaos-backend` and the worktree has uncommitted unrelated edits (e.g. drafts I was just editing), those edits surface in the review tool's diff as if they were Factory's work. Same shape as the original bug, different root cause: not stale-branch leakage, but uncommitted-file leakage from the SAME worktree the dispatcher is running in.
+
+Hit on session `a1b41d91` (the meta-dispatch that shipped path (a) itself). Review reported `filesChanged: ["public/docs/quorum-of-one-003.html"]` and `overlapScore: 0` against a Factory commit (1e70761) that actually modified `src/workers/factoryRunner.js` correctly. The "diff" was my own uncommitted Quorum 003 doctrine-pass edits leaking through.
+
+Recovery: force-approve via `approve_factory_deploy({force: true})` after on-disk verification of the actual commit.
+
+## Do (additions)
+
+- Before any Factory dispatch against `ecodiaos-backend`: run `git status --short` in `~/ecodiaos`. If output is non-empty, commit or stash FIRST. Untracked dirs (`??`) count - they will leak just like modified files.
+- Treat `ecodiaos-backend` as the highest-risk dispatch target. The substrate bug is unfixable there by path (a) alone because the dispatcher cannot reset its own running cwd.
+
+## Do NOT (additions)
+
+- Do not dispatch Factory against `ecodiaos-backend` with a dirty worktree. Ever. Every uncommitted file is a candidate for diff hijack.
+- Do not assume path (a) covers ecodiaos-backend self-dispatches. It explicitly does not (skip-self-cwd guard).
 
 ## Do
 
