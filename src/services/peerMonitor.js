@@ -69,26 +69,47 @@ function isHighSignal(peer) {
 }
 
 // -- Web search + extraction ------------------------------------------------
+//
+// Primary: Anthropic API with web_search_20250305 (requires ANTHROPIC_API_KEY).
+// Fallback: callClaude via factory bridge (knowledge-based, no live web access).
+// TODO: wire to actual real-time WebSearch once ANTHROPIC_API_KEY is set in
+//       the environment — currently routes to knowledge-based fallback.
 
 async function runSearchQuery(client, query) {
+  // Primary path: real web search via Anthropic API
+  if (client) {
+    try {
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        betas: ['web-search-2025-03-05'],
+        messages: [{
+          role: 'user',
+          content: `Search for: "${query}"\n\nFocus on finding specifically named AI-managed legal entities, autonomous AI companies, or on-chain DAOs where an AI is the sole or primary legal member/manager. Return a concise summary of any specific named entities found, including their legal form, jurisdiction, and any on-chain identifiers.`,
+        }],
+      })
+      return response.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('\n')
+        .trim()
+    } catch (err) {
+      const logger = require('../config/logger')
+      logger.warn(`peerMonitor: web_search failed, falling back to knowledge query — ${err.message.slice(0, 80)}`)
+    }
+  }
+
+  // Fallback: knowledge-based query via factory bridge (works without API key)
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: `Search for: "${query}"\n\nFocus on finding specifically named AI-managed legal entities, autonomous AI companies, or on-chain DAOs where an AI is the sole or primary legal member/manager. Return a concise summary of any specific named entities found, including their legal form, jurisdiction, and any on-chain identifiers.`,
-      }],
-    })
-    return response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n')
-      .trim()
+    const { callClaude } = require('./claudeService')
+    return await callClaude([{
+      role: 'user',
+      content: `Research task: ${query}\n\nFrom your training knowledge, list any specifically named AI-managed legal entities, autonomous AI companies, AI-run DAOs, or on-chain entities where an AI is the sole or primary legal member/manager. Focus on real registered entities, not theoretical concepts. Include their legal form, jurisdiction, and any on-chain identifiers if known.`,
+    }], { module: 'peer_monitor_search' })
   } catch (err) {
     const logger = require('../config/logger')
-    logger.warn(`peerMonitor: search failed for query "${query.slice(0, 60)}"`, { error: err.message })
+    logger.warn(`peerMonitor: fallback search also failed for query "${query.slice(0, 60)}"`, { error: err.message })
     return ''
   }
 }
@@ -129,18 +150,31 @@ Respond with JSON only - no markdown, no explanation:
   ]
 }`
 
+  // Primary: direct Anthropic API call (fast, structured)
+  if (client) {
+    try {
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }],
+      })
+      const text = response.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('')
+      const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      const parsed = JSON.parse(cleaned)
+      if (Array.isArray(parsed.candidates)) return parsed.candidates
+    } catch (err) {
+      const logger = require('../config/logger')
+      logger.warn('peerMonitor: direct extraction failed, trying factory bridge', { error: err.message })
+    }
+  }
+
+  // Fallback: factory bridge (works without API key)
   try {
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
-      messages: [{ role: 'user', content: prompt }],
-    })
-    const text = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('')
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const parsed = JSON.parse(cleaned)
+    const { callClaudeJSON } = require('./claudeService')
+    const parsed = await callClaudeJSON([{ role: 'user', content: prompt }], { module: 'peer_monitor_extract' })
     return Array.isArray(parsed.candidates) ? parsed.candidates : []
   } catch (err) {
     const logger = require('../config/logger')
@@ -225,13 +259,18 @@ async function runPeerMonitor({ dryRun = false } = {}) {
   const { runWrite } = require('../config/neo4j')
   const env = require('../config/env')
   const logger = require('../config/logger')
-  const Anthropic = require('@anthropic-ai/sdk')
 
-  if (!env.ANTHROPIC_API_KEY) {
-    throw new Error('peerMonitor: ANTHROPIC_API_KEY is not set')
+  // Build Anthropic client only if API key available. When absent, web_search
+  // falls back to callClaude via factory bridge (knowledge-based, no live web).
+  // TODO: set ANTHROPIC_API_KEY in environment to enable real-time web search.
+  let client = null
+  if (env.ANTHROPIC_API_KEY) {
+    const Anthropic = require('@anthropic-ai/sdk')
+    client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
+    logger.info('peerMonitor: using Anthropic API (real-time web search)')
+  } else {
+    logger.info('peerMonitor: ANTHROPIC_API_KEY not set — using knowledge-based fallback via factory bridge')
   }
-
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
 
   logger.info('peerMonitor: starting scan', { dryRun, queries: SEARCH_QUERIES.length })
 
