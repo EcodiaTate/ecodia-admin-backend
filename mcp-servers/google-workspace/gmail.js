@@ -26,6 +26,28 @@ const optionalArrayParam = (inner, description) =>
     z.array(inner)
   ).optional().describe(description)
 
+// Accept either `messageIds: [...]` (plural array, canonical) OR a singular scalar alias
+// like `messageId` / `message_id` / `id` (single string). Normalises everything to an
+// array. Used by gmail_archive, gmail_trash, gmail_mark_read.
+const arrayOrSingleParam = (inner, description) =>
+  z.preprocess(
+    (v) => {
+      if (v === undefined || v === null) return v
+      if (typeof v === 'string') {
+        try {
+          const parsed = JSON.parse(v)
+          if (Array.isArray(parsed)) return parsed
+          return [parsed]
+        } catch {
+          return [v]
+        }
+      }
+      if (Array.isArray(v)) return v
+      return [v]
+    },
+    z.array(inner)
+  ).describe(description)
+
 const INTERNAL_DOMAIN = 'ecodia.au'
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -238,24 +260,47 @@ export function registerGmailTools(server) {
   )
 
   server.tool('gmail_modify_labels',
-    'Add or remove labels from a message.',
-    { messageId: z.string().describe('Message ID'), addLabels: optionalArrayParam(z.string(), 'Label IDs to add'), removeLabels: optionalArrayParam(z.string(), 'Label IDs to remove'), inbox: z.string().optional().describe('Email account') },
-    async ({ messageId, addLabels, removeLabels, inbox }) => {
+    'Add or remove labels from a single message. Canonical param: messageId (singular string). Also accepts messageIds as a single-element array alias — multi-element arrays are rejected (use separate calls).',
+    {
+      messageId: z.string().optional().describe('Message ID (canonical singular form)'),
+      messageIds: optionalArrayParam(z.string(), 'Single-element array alias for messageId. Pass ["msg_id"]. Multi-element arrays are rejected.'),
+      addLabels: optionalArrayParam(z.string(), 'Label IDs to add'),
+      removeLabels: optionalArrayParam(z.string(), 'Label IDs to remove'),
+      inbox: z.string().optional().describe('Email account'),
+    },
+    async ({ messageId, messageIds, addLabels, removeLabels, inbox }) => {
+      let id = messageId
+      if (!id && messageIds) {
+        if (messageIds.length > 1) {
+          throw new Error('gmail_modify_labels operates on a single message. Pass one message ID via messageId (string) or messageIds (single-element array). For multiple messages use separate calls.')
+        }
+        id = messageIds[0]
+      }
+      if (!id) throw new Error('gmail_modify_labels requires messageId (string) or messageIds (single-element array).')
       const gmail = getGmailClient(inbox || primaryAccount)
-      await gmail.users.messages.modify({ userId: 'me', id: messageId, requestBody: { addLabelIds: addLabels || [], removeLabelIds: removeLabels || [] } })
-      return { content: [{ type: 'text', text: `Labels modified on ${messageId}` }] }
+      await gmail.users.messages.modify({ userId: 'me', id, requestBody: { addLabelIds: addLabels || [], removeLabelIds: removeLabels || [] } })
+      return { content: [{ type: 'text', text: `Labels modified on ${id}` }] }
     }
   )
 
   server.tool('gmail_archive',
-    'Archive one or more messages (removes INBOX label).',
-    { messageIds: arrayParam(z.string(), 'Message IDs to archive'), inbox: z.string().optional().describe('Email account') },
-    async ({ messageIds, inbox }) => {
+    'Archive one or more Gmail messages (removes INBOX label). Canonical param: messageIds (array of message ID strings). For a single message, pass messageIds: ["msg_id"]. Singular aliases messageId / message_id are also accepted and will be coerced to a single-element array.',
+    {
+      messageIds: arrayOrSingleParam(z.string(), 'Message IDs to archive (array; for a single message pass either ["msg_id"] or use the messageId alias)').optional(),
+      messageId: z.string().optional().describe('Singular camelCase alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      message_id: z.string().optional().describe('Singular snake_case alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      inbox: z.string().optional().describe('Email account'),
+    },
+    async ({ messageIds, messageId, message_id, inbox }) => {
+      const ids = messageIds ?? (messageId ? [messageId] : (message_id ? [message_id] : null))
+      if (!ids || ids.length === 0) {
+        throw new Error('gmail_archive requires messageIds (array of strings). Pass messageIds: ["msg_id"] for a single message. Aliases messageId / message_id are also accepted.')
+      }
       const gmail = getGmailClient(inbox || primaryAccount)
-      for (const id of messageIds) {
+      for (const id of ids) {
         await gmail.users.messages.modify({ userId: 'me', id, requestBody: { removeLabelIds: ['INBOX'] } })
       }
-      return { content: [{ type: 'text', text: `Archived ${messageIds.length} message(s)` }] }
+      return { content: [{ type: 'text', text: `Archived ${ids.length} message(s)` }] }
     }
   )
 
@@ -296,26 +341,44 @@ export function registerGmailTools(server) {
   )
 
   server.tool('gmail_trash',
-    'Move messages to trash.',
-    { messageIds: arrayParam(z.string(), 'Message IDs to trash'), inbox: z.string().optional() },
-    async ({ messageIds, inbox }) => {
+    'Move one or more Gmail messages to trash. Canonical param: messageIds (array of message ID strings). For a single message, pass messageIds: ["msg_id"]. Singular aliases messageId / message_id are also accepted and will be coerced to a single-element array.',
+    {
+      messageIds: arrayOrSingleParam(z.string(), 'Message IDs to trash (array; for a single message pass either ["msg_id"] or use the messageId alias)').optional(),
+      messageId: z.string().optional().describe('Singular camelCase alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      message_id: z.string().optional().describe('Singular snake_case alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      inbox: z.string().optional(),
+    },
+    async ({ messageIds, messageId, message_id, inbox }) => {
+      const ids = messageIds ?? (messageId ? [messageId] : (message_id ? [message_id] : null))
+      if (!ids || ids.length === 0) {
+        throw new Error('gmail_trash requires messageIds (array of strings). Pass messageIds: ["msg_id"] for a single message. Aliases messageId / message_id are also accepted.')
+      }
       const gmail = getGmailClient(inbox || primaryAccount)
-      for (const id of messageIds) {
+      for (const id of ids) {
         await gmail.users.messages.trash({ userId: 'me', id })
       }
-      return { content: [{ type: 'text', text: `Trashed ${messageIds.length} message(s)` }] }
+      return { content: [{ type: 'text', text: `Trashed ${ids.length} message(s)` }] }
     }
   )
 
   server.tool('gmail_mark_read',
-    'Mark messages as read.',
-    { messageIds: arrayParam(z.string(), 'Message IDs'), inbox: z.string().optional() },
-    async ({ messageIds, inbox }) => {
+    'Mark one or more Gmail messages as read. Canonical param: messageIds (array of message ID strings). For a single message, pass messageIds: ["msg_id"]. Singular aliases messageId / message_id are also accepted and will be coerced to a single-element array.',
+    {
+      messageIds: arrayOrSingleParam(z.string(), 'Message IDs to mark as read (array; for a single message pass either ["msg_id"] or use the messageId alias)').optional(),
+      messageId: z.string().optional().describe('Singular camelCase alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      message_id: z.string().optional().describe('Singular snake_case alias for messageIds. Accepts a single message ID string. Coerced to messageIds internally.'),
+      inbox: z.string().optional(),
+    },
+    async ({ messageIds, messageId, message_id, inbox }) => {
+      const ids = messageIds ?? (messageId ? [messageId] : (message_id ? [message_id] : null))
+      if (!ids || ids.length === 0) {
+        throw new Error('gmail_mark_read requires messageIds (array of strings). Pass messageIds: ["msg_id"] for a single message. Aliases messageId / message_id are also accepted.')
+      }
       const gmail = getGmailClient(inbox || primaryAccount)
-      for (const id of messageIds) {
+      for (const id of ids) {
         await gmail.users.messages.modify({ userId: 'me', id, requestBody: { removeLabelIds: ['UNREAD'] } })
       }
-      return { content: [{ type: 'text', text: `Marked ${messageIds.length} message(s) as read` }] }
+      return { content: [{ type: 'text', text: `Marked ${ids.length} message(s) as read` }] }
     }
   )
 }
