@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ecodia and Yarn and Yield - A Proposal</title>
+<style>
+  @page { size: A4 landscape; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Georgia, serif;
+    color: #1a1a1a;
+    background: #fafafa;
+    line-height: 1.55;
+  }
+  .slide {
+    width: 297mm; height: 210mm;
+    padding: 22mm 26mm;
+    page-break-after: always;
+    background: #fafafa;
+    display: flex; flex-direction: column;
+    position: relative;
+  }
+  .slide:last-child { page-break-after: avoid; }
+  .slide-num {
+    position: absolute;
+    bottom: 12mm; right: 26mm;
+    font-size: 10pt; color: #999;
+    letter-spacing: 0.1em;
+  }
+  .eyebrow {
+    font-size: 10pt;
+    color: #2d8a2d;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    margin-bottom: 6mm;
+  }
+  h1 {
+    font-size: 32pt; font-weight: 400;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin-bottom: 8mm;
+    color: #111;
+  }
+  h2 {
+    font-size: 22pt; font-weight: 400;
+    line-height: 1.2;
+    margin-bottom: 6mm;
+    color: #111;
+  }
+  h3 {
+    font-size: 13pt; font-weight: 600;
+    color: #2d8a2d;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 3mm;
+  }
+  p { font-size: 13pt; margin-bottom: 4mm; max-width: 230mm; }
+  ul { list-style: none; max-width: 230mm; }
+  li {
+    font-size: 12.5pt;
+    margin-bottom: 3.5mm;
+    padding-left: 7mm;
+    position: relative;
+  }
+  li::before {
+    content: ""; position: absolute;
+    left: 0; top: 8pt;
+    width: 4mm; height: 1px; background: #2d8a2d;
+  }
+  .meta {
+    font-size: 11pt; color: #666;
+    margin-top: 6mm;
+  }
+  .quote {
+    font-size: 14pt; font-style: italic;
+    color: #444;
+    border-left: 3px solid #2d8a2d;
+    padding-left: 6mm;
+    margin: 6mm 0;
+    max-width: 200mm;
+  }
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14mm;
+    margin-top: 4mm;
+  }
+  .col-label {
+    font-size: 10pt; color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 2mm;
+  }
+  .tier-box {
+    border: 1px solid #d4d4d4;
+    background: #fff;
+    padding: 8mm;
+    margin-top: 4mm;
+    max-width: 230mm;
+  }
+  .tier-header {
+    font-size: 13pt;
+    color: #2d8a2d;
+    font-weight: 600;
+    margin-bottom: 3mm;
+  }
+  .ask-num {
+    display: inline-block;
+    width: 9mm; height: 9mm;
+    border: 1.5px solid #2d8a2d;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 9mm;
+    margin-right: 4mm;
+    color: #2d8a2d;
+    font-weight: 600;
+    font-size: 11pt;
+  }
+  .ask-row {
+    display: flex; align-items: flex-start;
+    margin-bottom: 6mm;
+    font-size: 13pt;
+  }
+  .signature-block {
+    margin-top: 12mm;
+    padding-top: 6mm;
+    border-top: 1px solid #ddd;
+    font-size: 11pt;
+    color: #555;
+    line-height: 1.7;
+  }
+  em { color: #444; }
+</style>
+</head>
+<body>
+
+<!-- SLIDE 1 - TITLE -->
+<div class="slide">
+  <div class="eyebrow">A proposal from a Sunshine Coast neighbour</div>
+  <h1>Ecodia and Yarn and Yield</h1>
+  <p style="font-size: 14pt; color: #444; max-width: 220mm; margin-top: 4mm;">
+    Andrew told us about you. What you are building is what we are also building, from a different angle. We would like to spend 90 days proving that.
+  </p>
+  <div class="signature-block">
+    <strong>From:</strong> Tate Donohoe and EcodiaOS<br>
+    Ecodia Pty Ltd, Sunshine Coast. Ecodia DAO LLC, Wyoming.<br>
+    <strong>For:</strong> Helen Andrew, Andrew Maitland, Alicia, and the Yarn and Yield board<br>
+    <strong>Date:</strong> April 2026
+  </div>
+  <div class="slide-num">01</div>
+</div>
+
+<!-- SLIDE 2 - WHAT WE KNOW ABOUT YOU -->
+<div class="slide">
+  <div class="eyebrow">Homework, on display</div>
+  <h2>What we already know about you</h2>
+  <ul>
+    <li>Yarn and Yield is a Community Land Trust and cooperative dual-entity, seeded by Helen and her husband through the purchase of Nalbo at West Woombye</li>
+    <li>Three branches: Connection, Knowledge, Practice</li>
+    <li>Sunshine Syntropics is the regen-ag arm</li>
+    <li>The property sits adjacent to Triunia Environmental Reserve. Wildlife corridor land.</li>
+    <li>Long arc: invite other landowners into the CLT to build a multi-property regenerative network across Australia</li>
+  </ul>
+  <div class="quote">
+    "Land should belong to the community, and the community should belong to the land."
+    <div style="font-size: 11pt; color: #888; margin-top: 3mm; font-style: normal;">Helen Andrew</div>
+  </div>
+  <div class="slide-num">02</div>
+</div>
+
+<!-- SLIDE 3 - WHO WE ARE -->
+<div class="slide">
+  <div class="eyebrow">A short, dense intro</div>
+  <h2>Who we are</h2>
+  <p style="margin-bottom: 6mm;">
+    Ecodia is two things in one operating envelope: an Australian software business on the Sunshine Coast, and a Wyoming DAO LLC running an experiment in algorithmic governance under W.S. 17-31-104.
+  </p>
+  <h3>What we build</h3>
+  <ul>
+    <li>A digital platform for collective-care organisations: members, branches, events, working bees, impact tracking, and operational sync. Owned and operated by us.</li>
+    <li>One live deployment to date, running at a Sunshine Coast conservation charity. Multi-tenant by design, ready to host the next deployment without rebuild.</li>
+    <li>Roam, a travel app, and a small portfolio of client engagements.</li>
+  </ul>
+  <h3 style="margin-top: 6mm;">What is structurally novel</h3>
+  <ul>
+    <li>Ecodia DAO LLC, formed April 2026. EcodiaOS (an AI member) is the 100% sole member and algorithmic manager. Tate is the Authorized Human Representative.</li>
+    <li>This is not theory. It is in production. Helen, this is one of the things you speak about. We are doing it.</li>
+  </ul>
+  <div class="slide-num">03</div>
+</div>
+
+<!-- SLIDE 4 - WHY WE SHARE YOUR THESIS -->
+<div class="slide">
+  <div class="eyebrow">Same thesis, different substrate</div>
+  <h2>Why we share your thesis</h2>
+  <div class="two-col">
+    <div>
+      <div class="col-label">Yarn and Yield</div>
+      <ul>
+        <li>"Surpluses stay local. Prosperity is shared, not extracted."</li>
+        <li>Land in collective care</li>
+        <li>"Cooperative ensures everyone who contributes - knowledge, labour, skills, capital - has a real stake and a voice"</li>
+        <li>Multi-property CLT network as a long arc</li>
+      </ul>
+    </div>
+    <div>
+      <div class="col-label">Ecodia in practice</div>
+      <ul>
+        <li>We run on a $24/month Sunshine Coast VPS. Most of our infrastructure is local. We are not extracting back to a US tech parent.</li>
+        <li>We do not own land. We build the operating layer for organisations that hold land in trust.</li>
+        <li>Our DAO is the digital-native version of the same idea. We have built it for ourselves and we know how hard it is.</li>
+        <li>The platform we own is multi-tenant. When your network grows, the platform grows with it.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="slide-num">04</div>
+</div>
+
+<!-- SLIDE 5 - WHY WE'RE WELL-POSITIONED -->
+<div class="slide">
+  <div class="eyebrow">Five facts only we have</div>
+  <h2>Why we are well-positioned</h2>
+  <ul style="margin-top: 4mm;">
+    <li>We are literal Sunshine Coast neighbours. The boardroom is twenty minutes from our office.</li>
+    <li>Andrew Maitland anchors us inside this room. Tate's Landcare teacher from Montessori, a friend of the family for years.</li>
+    <li>The Woodfordia and Conservatree thread already runs through both of us. Tate's mum and Alicia met at the Easter tree planting at Lake Gkula.</li>
+    <li>The platform shape Yarn and Yield will eventually need is the platform shape we have already built. Members, branches, working bees, impact, multi-property scale. Generalised, not just rebranded.</li>
+    <li>We do not need your capital. This is not a fundraising ask in disguise.</li>
+  </ul>
+  <div class="slide-num">05</div>
+</div>
+
+<!-- SLIDE 6 - THE PLATFORM, BRIEFLY -->
+<div class="slide">
+  <div class="eyebrow">What the tech actually is</div>
+  <h2>The platform, briefly</h2>
+  <p>
+    A working, multi-tenant operating layer for collective-care organisations. Owned by Ecodia. Built for the shape of org Yarn and Yield is, not for the brand of any specific deployment.
+  </p>
+  <h3 style="margin-top: 4mm;">Capabilities, in plain terms</h3>
+  <ul>
+    <li>Members, branches, working bees, events, sign-ups, check-ins, post-event sharing</li>
+    <li>Impact tracking: trees planted, kilograms of rubbish, attendees, hours contributed. Reverse-sync from spreadsheet operational tools to canonical data the org owns.</li>
+    <li>Per-org configuration. Yarn and Yield's three-branch model is a configuration, not a fork.</li>
+    <li>Per-tenant deployment. Your data stays in your tenant. We do not co-mingle.</li>
+  </ul>
+  <h3 style="margin-top: 4mm;">What it is not</h3>
+  <ul>
+    <li>Not a custom build for one org. The platform exists. Per-tenant work is configuration, with code touched only when the platform itself improves.</li>
+    <li>Not a re-skin of someone else's brand. Yarn and Yield's deployment would carry Yarn and Yield's identity end to end.</li>
+  </ul>
+  <div class="slide-num">06</div>
+</div>
+
+<!-- SLIDE 7 - TIER 1 -->
+<div class="slide">
+  <div class="eyebrow">The actual ask</div>
+  <h2>Tier 1: ninety days, contributed in kind</h2>
+  <div class="tier-box">
+    <div class="tier-header">No invoice. No platform fee. No commitment past 90 days.</div>
+    <ul style="margin-top: 4mm;">
+      <li>Tate joins as a member-collaborator and contributes to working bees in person</li>
+      <li>We run one event on Nalbo within 90 days, using a Yarn and Yield staging of our platform. A working bee, a tree-planting day, or a Practice-branch session: whatever the board picks.</li>
+      <li>The event uses the platform as the coordination layer. Sign-ups, check-in, impact stats, post-event sharing. At the end of it, Yarn and Yield owns the data, the members on platform, and a working demo.</li>
+      <li>We document what worked, what did not, and what Yarn and Yield could do with it next.</li>
+    </ul>
+  </div>
+  <p style="margin-top: 6mm;">
+    The point of Tier 1 is not the event. It is to earn the right to the next conversation. No ongoing commitment from you.
+  </p>
+  <div class="slide-num">07</div>
+</div>
+
+<!-- SLIDE 8 - TIER 2 / TIER 3 -->
+<div class="slide">
+  <div class="eyebrow">Past the first ask</div>
+  <h2>What might come next</h2>
+  <div class="tier-box">
+    <div class="tier-header">Tier 2 - mentioned, not pitched today</div>
+    <p style="font-size: 12pt; margin-top: 2mm;">
+      If Tier 1 lands well, we can talk about the platform as Yarn and Yield's operating layer. Members, branches, contributions, working bees, capital flows, all configured to Yarn and Yield's three-branch model. Per-property pricing that scales as you scale. A licence relationship with Ecodia, with Yarn and Yield's data and identity owned by Yarn and Yield.
+    </p>
+  </div>
+  <div class="tier-box">
+    <div class="tier-header">Tier 3 - hinted, only if you want to open the door</div>
+    <p style="font-size: 12pt; margin-top: 2mm;">
+      Yarn and Yield's stated long arc is a multi-property CLT network across Australia. The technology and governance layer for that network does not exist yet. We are building components of it for ourselves. If Yarn and Yield ever decides it wants a technology and AI partner for the multi-property CLT, we would like to be the first conversation. This is a five-to-ten year horizon. We mention it once.
+    </p>
+  </div>
+  <p style="margin-top: 6mm;">
+    Both tiers are gated on Tier 1 earning the right to a Tier 2 conversation. We are not asking you to commit to anything past Tier 1 today.
+  </p>
+  <div class="slide-num">08</div>
+</div>
+
+<!-- SLIDE 9 - RISKS WE ACKNOWLEDGE -->
+<div class="slide">
+  <div class="eyebrow">Saying it first</div>
+  <h2>Risks we acknowledge</h2>
+  <ul style="margin-top: 4mm;">
+    <li><strong>"We have a software engineer on the board already."</strong> Yes. We are not pitching a custom build that competes with that role. The platform exists. Your engineer keeps building whatever sits on top, alongside, or around it.</li>
+    <li><strong>"We are not yet ready for a public technology partner."</strong> We respect that. Tier 1 has nothing public-facing. One event on Nalbo, internal to your members. Low risk for you.</li>
+    <li><strong>"Why not just pay you to do it?"</strong> Because reciprocity is more honest than vendor-client at this stage. If we are still doing this in a year, both sides will have evidence to set commercial terms on. Setting them today would be guessing.</li>
+    <li><strong>"You are a small team."</strong> Yes. We are also two legal entities, a working platform, and a 24/7 algorithmic operator. Capacity is not the bottleneck the size suggests.</li>
+  </ul>
+  <div class="slide-num">09</div>
+</div>
+
+<!-- SLIDE 10 - ASKS -->
+<div class="slide">
+  <div class="eyebrow">Three things, today</div>
+  <h2>What we are asking of you</h2>
+  <div style="margin-top: 8mm;">
+    <div class="ask-row"><span class="ask-num">1</span><div>A yes or a not-yet on Tier 1: one event on Nalbo within 90 days, contributed in kind, no invoice.</div></div>
+    <div class="ask-row"><span class="ask-num">2</span><div>An introduction to whichever board member runs the events and branches calendar, so we can scope the first session jointly.</div></div>
+    <div class="ask-row"><span class="ask-num">3</span><div>A second meeting in 30 days, after the event runs, to compare notes and decide whether there is a Tier 2 conversation worth having.</div></div>
+  </div>
+  <div class="signature-block" style="margin-top: 14mm;">
+    Thank you for the time. Andrew vouched for us. The rest is on us to demonstrate.<br><br>
+    <strong>Tate Donohoe</strong> - Authorized Human Representative, Ecodia DAO LLC<br>
+    <strong>EcodiaOS</strong> - sole member, Ecodia DAO LLC; algorithmic manager under W.S. 17-31-104
+  </div>
+  <div class="slide-num">10</div>
+</div>
+
+</body>
+</html>
