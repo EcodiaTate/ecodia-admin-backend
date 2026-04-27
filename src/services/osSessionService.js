@@ -416,25 +416,47 @@ You are powered by Claude (Anthropic's model). Running inside the EcodiaOS condu
 - When referencing files, use markdown links like [file.js:42](path/to/file.js#L42).
 - All text you output outside of tool use is shown to the user.`
 
-  // Fork-mode doctrine. The conductor needs to know parallelism exists and
-  // when to use it, but must NOT execute fork work itself — it stays the
-  // goals/positions/results/next-step layer.
-  const forkBlock = `# Forks (parallel sub-sessions)
-You can spawn fork sub-sessions that run concurrently with you on a brief. A fork is a fresh OS instance, not a subagent — it has the full conductor toolset (minus session lifecycle) and runs on its own stream.
+  // Fork-mode doctrine. The conductor IS the parallelism decider — it has
+  // the spawn_fork tool and is expected to use it whenever work can run in
+  // parallel. The conductor stays the goals/positions/results/next-step
+  // layer; forks do the actual work.
+  const forkBlock = `# Forks (parallel sub-sessions) — YOU DECIDE PARALLELISM
 
-When to fork (HTTP: POST /api/os-session/fork {brief, context_mode}):
-- Tate sends a new request mid-turn that doesn't supersede current work — fork rather than queue.
-- A subtask is independent and can run while you do something else (research, deploys, audits).
-- Anything that's "I'd love this done in parallel" — that's a fork.
+You have three tools that let you run work in parallel:
+  - mcp__forks__spawn_fork({ brief, context_mode? })  — spawn a parallel sub-session
+  - mcp__forks__list_forks()                          — see what's running
+  - mcp__forks__abort_fork({ fork_id, reason? })      — kill a fork
 
-How to think about forks (you DO NOT see their transcripts):
-- You are the goals/positions/results/next-step layer. You decide what runs, you read rolled-up positions, you act on results.
-- Forks report back via [FORK_REPORT]. Their reports land in your inbox as [SYSTEM: fork_report] queued messages. You do not chat with a fork mid-flight.
-- An ambient <forks_rollup> block appears on each turn when forks are live — that's your radar. Use it; don't ignore it.
+A fork is a fresh OS instance running on its own SDK stream, in parallel with you. It has the same conductor toolset and the same four subagents (comms, finance, ops, social). It does NOT share state with you after spawn — it cannot talk to you while it works.
 
-Caps: 3 concurrent forks (hard) + 1 main = 4 streams. Energy gates may lower the soft cap. Don't fork for trivial things — token cost scales linearly with fork count.
+## When to fork (use the tool — don't just describe forking)
 
-You do NOT have a tool to spawn a fork yourself yet — when you decide a fork is right, ask Tate to issue it (or Tate's UI does it). This is intentional during the rollout.`
+- Whenever Tate gives you a request that decomposes into 2+ independent pieces of work, fork the independent ones.
+- Whenever Tate sends a new request mid-turn that doesn't supersede your current work — fork it instead of queueing.
+- Whenever a subtask will take more than ~10 seconds AND can run while you do something else (research, audits, deploys, big report runs).
+- For "I'd love this done in parallel" or "do these all at once" requests — fork them out and then immediately call list_forks at the end of your message so Tate sees you're managing them.
+
+## Caps
+
+- Hard cap: 5 concurrent forks (+ you = 6 streams). spawn_fork returns an error when the cap is reached — read it and adapt (wait, do it yourself, or queue with a follow-up).
+- Energy soft cap: tightens as the weekly Claude Max budget burns down. healthy=5, conserve=4, low=2, critical=0. Don't fight a critical-energy reject.
+
+## Discipline (this is the load-bearing thing)
+
+You are the goals/positions/results/next-step layer. You do NOT execute fork work yourself once you've spawned one. Specifically:
+  - You do NOT see forks' transcripts. You see only the <forks_rollup> block on each turn (positions, current tool, age) and the [SYSTEM: fork_report ...] message that arrives in your inbox when each fork finishes.
+  - When you spawn a fork, IMMEDIATELY return to the main thread of work, or end your turn. Do NOT sit and wait for the fork — you cannot see its progress mid-stream.
+  - When [FORK_REPORT] messages arrive on later turns, integrate their results into your view of the world: act on next_step, update Tate, kick off follow-ups.
+
+## Writing a good brief
+
+The fork has none of your context unless you give it. A fork brief should read like a message you'd send to a fresh OS instance: state the goal, the constraints, what counts as done. context_mode="recent" inherits the recent conversation tail (default — usually right). context_mode="brief" gives the fork only your brief and nothing else (use when the brief is fully self-contained).
+
+## When NOT to fork
+
+- Trivial questions you can answer in one turn — don't burn a stream slot.
+- Work that needs your context to make decisions and can't be expressed as a clean brief — do it yourself.
+- When you've already got 4–5 forks live; finish those first or you'll thrash the energy budget.`
 
   _cachedSystemPrompt = [claudeMd, envBlock, behaviorBlock, forkBlock].filter(Boolean).join('\n\n---\n\n')
   _cachedSystemPromptCwd = cwd
@@ -1020,6 +1042,19 @@ async function _sendMessageImpl(content, opts = {}) {
   // subagents get their domain tools via inline MCP server definitions.
   const allConfigs = getAllMcpServerConfigs(cwd)
   const mcpServers = loadConductorServers(allConfigs)
+
+  // Fork-mode (Build 1): the conductor gets an in-process SDK MCP server
+  // exposing spawn_fork / list_forks / abort_fork. This is what makes the
+  // conductor capable of self-spawning parallel sub-sessions; without it the
+  // conductor can only describe parallelism, not actually trigger it.
+  // Failure here is non-fatal — turn proceeds without fork tools.
+  try {
+    const { getForkConductorMcpServer } = require('./forkConductorTool')
+    const forksServer = await getForkConductorMcpServer()
+    if (forksServer) mcpServers.forks = forksServer
+  } catch (err) {
+    logger.warn('OS Session: fork conductor MCP server unavailable for this turn', { error: err.message })
+  }
 
   // Energy level is still tracked for logging + provider routing, but no longer
   // gates thinking — the conductor thinks on every turn now (see thinking block

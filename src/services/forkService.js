@@ -64,13 +64,16 @@ async function getQuery() {
 // tokens. NEVER set this in production code paths.
 let _queryOverride = null
 
-// ── Caps (spec §1.5) ─────────────────────────────────────────────────────────
-const HARD_FORK_CAP = 3
+// ── Caps (raised 2026-04-27 — Tate's directive: conductor self-spawns up to 5) ─
+// Hard cap is the absolute concurrency ceiling. Energy soft caps step down
+// proportionally as the weekly budget tightens — at "low" we still allow 2
+// forks so the conductor isn't single-threaded just because we're past 70%.
+const HARD_FORK_CAP = 5
 const ENERGY_FORK_CAPS = {
-  full:     3,
-  healthy:  3,
-  conserve: 2,
-  low:      1,
+  full:     5,
+  healthy:  5,
+  conserve: 4,
+  low:      2,
   critical: 0,
 }
 

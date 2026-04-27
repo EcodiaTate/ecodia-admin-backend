@@ -174,23 +174,26 @@ test('three forks run in parallel (wall-clock < sequential)', async () => {
   assert.ok(elapsed < 3500, `expected <3500ms wall-clock, got ${elapsed}ms (would indicate forks running serially)`)
 })
 
-test('hard cap rejects a 4th concurrent fork', async () => {
+test('hard cap rejects a 6th concurrent fork (cap = 5)', async () => {
   fork._resetForTest()
   _sdkDelayMs = 1500
-  // Spawn three (don't await their completion).
+  // Spawn five concurrently — these all succeed.
   await Promise.all([
     fork.spawnFork({ brief: 'a' }),
     fork.spawnFork({ brief: 'b' }),
     fork.spawnFork({ brief: 'c' }),
+    fork.spawnFork({ brief: 'd' }),
+    fork.spawnFork({ brief: 'e' }),
   ])
-  // 4th must fail.
+  assert.strictEqual(fork.HARD_FORK_CAP, 5, 'hard cap exposed as 5')
+  // 6th must fail.
   let threw = null
   try {
-    await fork.spawnFork({ brief: 'd' })
+    await fork.spawnFork({ brief: 'f' })
   } catch (err) {
     threw = err
   }
-  assert.ok(threw, 'expected 4th spawn to throw')
+  assert.ok(threw, 'expected 6th spawn to throw')
   assert.strictEqual(threw.httpStatus, 429, 'expected httpStatus 429')
   assert.ok(threw.code === 'fork_cap_reached' || threw.code === 'fork_energy_cap_reached',
     `expected fork_cap_reached, got ${threw.code}`)
