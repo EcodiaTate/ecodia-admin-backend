@@ -402,7 +402,11 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
     ended_at: null,
     abort,
     queryHandle: null,
-    transcript: [],   // collected assistant text fragments — used to extract [FORK_REPORT]
+    transcript: [],   // collected assistant text fragments - used to extract [FORK_REPORT]
+    // Per-fork message injection queue (populated by sendMessageToFork)
+    pendingMessages:  [],  // messages waiting to be yielded to the SDK
+    pendingResolvers: [],  // resolvers waiting for the next message
+    input_closed:     false,
   }
   _forks.set(fork_id, state)
   _emitForkEvent('spawned', state)
@@ -442,7 +446,44 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
       const userPrompt = `BRIEF (fork ${fork_id}, context_mode=${context_mode}):\n\n${brief}`
       logger.info('forkService: starting fork', { fork_id, provider, context_mode, brief_chars: brief.length })
 
-      const q = queryFn({ prompt: userPrompt, options })
+      // Build async-iterable prompt source so sendMessageToFork can inject
+      // user messages mid-stream without aborting the session (spec §2).
+      // The generator closes over `state` (outer spawnFork scope) and
+      // `userPrompt` (this IIFE scope) - both are available here.
+      async function* _makeForkPromptStream() {
+        // First yield: the initial brief.
+        yield {
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'text', text: userPrompt }] },
+          parent_tool_use_id: null,
+        }
+        // Subsequent yields: injected messages from sendMessageToFork.
+        while (true) {
+          if (state.pendingMessages.length > 0) {
+            // Message already queued - yield it immediately.
+            const txt = state.pendingMessages.shift()
+            yield {
+              type: 'user',
+              message: { role: 'user', content: [{ type: 'text', text: txt }] },
+              parent_tool_use_id: null,
+            }
+          } else if (state.input_closed) {
+            // Stream closed and queue drained - end the iterable.
+            return
+          } else {
+            // No message queued and not closed - wait for the next push.
+            const txt = await new Promise(resolve => state.pendingResolvers.push(resolve))
+            if (txt === null) return  // null sentinel = stream closed
+            yield {
+              type: 'user',
+              message: { role: 'user', content: [{ type: 'text', text: txt }] },
+              parent_tool_use_id: null,
+            }
+          }
+        }
+      }
+
+      const q = queryFn({ prompt: _makeForkPromptStream(), options })
       state.queryHandle = q
       state.status = 'running'
       state.position = 'started'
@@ -518,7 +559,10 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
             break
           }
           case 'result': {
-            // SDK terminal — fork is wrapping up.
+            // SDK terminal - fork is wrapping up.
+            // Close the prompt stream so the generator yields no further messages.
+            state.input_closed = true
+            for (const resolve of state.pendingResolvers.splice(0)) resolve(null)
             state.status = 'reporting'
             _emitForkEvent('status', state)
             break
@@ -570,6 +614,11 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
         }
       }
     } catch (err) {
+      // Close the prompt stream and drain pending resolvers so the generator
+      // does not leak (null sentinel causes the generator to return).
+      state.input_closed = true
+      for (const resolve of state.pendingResolvers.splice(0)) resolve(null)
+
       const aborted = err?.name === 'AbortError' || /abort/i.test(err?.message || '')
       state.status = aborted ? 'aborted' : 'error'
       state.abort_reason = state.abort_reason || (aborted ? 'aborted' : err?.message || 'error')
@@ -609,6 +658,37 @@ async function abortFork(fork_id, reason = 'manual_abort') {
   try { s.abort?.abort?.(reason) } catch {}
   try { s.queryHandle?.close?.() } catch {}
   return { aborted: true, fork_id }
+}
+
+// ── Message injection ───────────────────────────────────────────────────────
+// Sends a user message into a running fork's SDK stream without aborting it.
+// The fork receives the message on its next SDK turn via the async-iterable
+// prompt source built in spawnFork. Returns synchronously.
+function sendMessageToFork(fork_id, message) {
+  const s = _forks.get(fork_id)
+  if (!s) return { accepted: false, reason: 'not_found' }
+  if (s.status === 'done' || s.status === 'aborted' || s.status === 'error') {
+    return { accepted: false, reason: 'fork_terminal' }
+  }
+  if (s.status === 'spawning' && !s.queryHandle) {
+    return { accepted: false, reason: 'fork_not_running' }
+  }
+
+  // Push to queue or resolve a waiting generator promise, whichever applies.
+  if (s.pendingResolvers.length > 0) {
+    const resolve = s.pendingResolvers.shift()
+    resolve(message)
+  } else {
+    s.pendingMessages.push(message)
+  }
+
+  s.last_heartbeat = Date.now()
+  s.position = `received message: ${message.slice(0, 80)}`
+
+  const queuedCount = s.pendingMessages.length
+  logger.info('forkService: message_injected', { fork_id, message_chars: message.length, queued_count: queuedCount })
+
+  return { accepted: true, fork_id, queued_messages: queuedCount }
 }
 
 // ── Conductor rollup (spec §3 of the message follow-up) ─────────────────────
@@ -653,6 +733,7 @@ function _setQueryForTest(fn) { _queryOverride = fn }
 module.exports = {
   spawnFork,
   abortFork,
+  sendMessageToFork,
   listForks,
   getFork,
   forksRollup,
