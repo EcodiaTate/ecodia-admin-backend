@@ -67,6 +67,8 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [audit-infrastructure-for-false-embodiment-dependencies.md](audit-infrastructure-for-false-embodiment-dependencies.md) | embodiment, false-dependency, tate-active, self-stamp, autoimmune, gate, scheduler-gate, defer-loop, authority-boundary, source-field, agent-self-distinction, ecodiaos-vs-tate, signal-attribution |
 | [coexist-vs-platform-ip-separation.md](coexist-vs-platform-ip-separation.md) | co-exist, coexist, kurt, platform, multi-tenant, peak body, peak-body, landcare, federation, multiplier thesis, conservation platform, white-label, rebrand, generalise, generic platform, tenant-0 |
 | [platform-must-be-substantively-applicable.md](platform-must-be-substantively-applicable.md) | platform pitch, peak body, peak-body, landcare, cetin, conservation platform, multi-tenant, white-label, generalise, generalised, rebrand, platform applicability, platform fit, platform tier, target org, prospective tenant, tenant deployment, deployment model, federation, multiplier thesis, working name pending |
+| [fork-by-default-stay-thin-on-main.md](fork-by-default-stay-thin-on-main.md) | fork, spawn_fork, parallel, branching, decompose, independent, multi-stream, conductor-routing, mid-task-input, fork-vs-main, conductor-thin, work-doer, list_forks, abort_fork, mcp__forks, fork-mode, sub-session, parallel-work, in-flight-task, mid-turn-input, route-vs-execute |
+| [factory-reject-nukes-untracked-files.md](factory-reject-nukes-untracked-files.md) | factory, reject_factory_session, factory-reject, untracked-files, git-reset, worktree-clean, untracked-loss, dirty-worktree-dispatch, pre-dispatch-commit, factory-cleanup, lost-work, untracked-deleted |
 
 ## Authoring rules
 
