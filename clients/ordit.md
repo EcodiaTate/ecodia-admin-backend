@@ -575,3 +575,23 @@ If we want to run Ordit e2e locally for OUR own pre-push validation without modi
 3. `git checkout test/jest-e2e.json` to discard the patch before pushing.
 
 Cost: minor git hygiene friction. Benefit: real e2e gate on our side. Worth doing next time we're changing anything in `src/auth/` or `src/users/`.
+
+---
+
+## 2026-04-27: BE env-toggle follow-up - gauntlet green, push blocked on token
+
+**What happened:**
+1. Eugene comment 787452426 (Apr 24 00:38 UTC) on PR 212: "OK for now however the FE/consumer shouldnt switch the authSource. It will need to be an env var." Direct response: gate the existing authSource exposure behind a server-side env var.
+2. Branch `ecodia/cognito-authsource-env-var-toggle` (fast-forward of `feat/cognito-be-integration`). Single commit `a008b47` (was `a871a32`, amended after `yarn format` wrapped one line).
+3. Files: `.env.cognito.example` (added EXPOSE_AUTH_SOURCE=false default-off), `src/users/dto/user-response.dto.ts` (gate `this.authSource = user.authSource` behind the env flag).
+4. Local CI gauntlet GREEN against bitbucket-pipelines.yml steps:
+   - `yarn install --frozen-lockfile` - clean
+   - `npx prisma generate` - clean
+   - `yarn format` - clean (after amend)
+   - `yarn lint` - clean
+   - `yarn test` - 5 suites / 6 tests pass
+   - `yarn build` - clean
+5. **Push to PR 212 branch BLOCKED.** Same kv_store.creds.bitbucket_api_token works for REST API (PR 212 fetched OK), git ls-remote works, but git push --dry-run returns HTTP 403. The token has read but not write scope on fireauditors1/be. Last successful push to this repo was Apr 22.
+6. Status: BE work staged locally on `a008b47`, ready to push the moment token is rotated/re-scoped. Push command: `cd ~/workspaces/ordit/be && git push origin ecodia/cognito-authsource-env-var-toggle:feat/cognito-be-integration`.
+
+**FE branch held separately:** `feat/fe-cognito-poc` at `f0ad844` (POC at /internal/cognito-poc, not customer login). Sequencing doctrine still applies: Eugene must merge PR 212 BE first + 5 open Qs need confirmation. Don't push, don't ask.

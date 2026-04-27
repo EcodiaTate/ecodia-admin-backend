@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Lindegger Archive - Crystal Waters Permaculture Village</title>
+<meta name="description" content="A public archive of Max Lindegger's writing and teaching on Crystal Waters Permaculture Village, drawn from publicly available sources.">
+<style>
+:root {
+  --ink: #1a1a1a;
+  --soft: #4a4a4a;
+  --line: #d8d4cc;
+  --paper: #f7f4ee;
+  --card: #ffffff;
+  --accent: #3a5a3a;
+  --highlight: #f0e8d4;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 32px 22px 80px; }
+header { padding: 24px 0 12px; border-bottom: 1px solid var(--line); }
+h1 {
+  font-size: 30px;
+  line-height: 1.2;
+  margin: 0 0 8px;
+  font-weight: normal;
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  color: var(--soft);
+  font-size: 16px;
+  font-style: italic;
+  margin: 0 0 18px;
+}
+.intro { font-size: 16px; color: var(--soft); margin: 12px 0 0; }
+.intro p { margin: 0 0 10px; }
+.intro a { color: var(--accent); }
+
+/* Search */
+.search-box {
+  margin: 28px 0 14px;
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+  padding: 8px 0;
+  z-index: 10;
+}
+.search-box input {
+  width: 100%;
+  font: inherit;
+  font-size: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 4px;
+  outline: none;
+}
+.search-box input:focus { border-color: var(--accent); }
+.match-count { font-size: 14px; color: var(--soft); margin-top: 6px; min-height: 20px; }
+
+/* Nav */
+nav.toc { margin: 16px 0 24px; font-size: 14px; }
+nav.toc a {
+  display: inline-block;
+  margin: 4px 14px 4px 0;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+nav.toc a:hover { border-bottom-color: var(--accent); }
+
+/* Sections */
+section { margin: 36px 0; scroll-margin-top: 80px; }
+section h2 {
+  font-size: 22px;
+  font-weight: normal;
+  margin: 0 0 6px;
+  letter-spacing: -0.005em;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 6px;
+  display: inline-block;
+}
+section .section-intro {
+  color: var(--soft);
+  font-size: 15px;
+  font-style: italic;
+  margin: 8px 0 22px;
+}
+
+/* Quote / fact card */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 18px 22px;
+  margin: 14px 0;
+}
+.card.hidden { display: none; }
+.card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--ink);
+}
+.card .body { font-size: 16px; }
+.card blockquote {
+  margin: 6px 0 10px;
+  padding: 4px 0 4px 16px;
+  border-left: 3px solid var(--accent);
+  color: var(--ink);
+  font-style: italic;
+}
+.card blockquote p { margin: 0 0 8px; }
+.card blockquote p:last-child { margin-bottom: 0; }
+.card .meta {
+  font-size: 13px;
+  color: var(--soft);
+  margin-top: 10px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.card .meta a { color: var(--accent); word-break: break-word; }
+.card .body p { margin: 0 0 10px; }
+.card .body p:last-child { margin-bottom: 0; }
+
+/* Highlight on search */
+mark { background: var(--highlight); padding: 0 1px; }
+
+/* Footer */
+footer {
+  margin-top: 60px;
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--soft);
+}
+footer p { margin: 0 0 8px; }
+footer a { color: var(--accent); }
+footer ul { padding-left: 20px; margin: 8px 0 0; }
+footer li { margin-bottom: 4px; }
+
+/* Mobile */
+@media (max-width: 540px) {
+  .wrap { padding: 22px 16px 60px; }
+  h1 { font-size: 24px; }
+  body { font-size: 16px; }
+  .card { padding: 14px 16px; }
+}
+
+/* Print */
+@media print {
+  body { background: white; }
+  .search-box, nav.toc { display: none; }
+  .card { page-break-inside: avoid; border: 1px solid #ccc; }
+  a { color: inherit; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>The Lindegger Archive</h1>
+  <p class="subtitle">Max Lindegger on Crystal Waters Permaculture Village - in his own words, from public sources.</p>
+  <div class="intro">
+    <p>Crystal Waters was the world's first intentional permaculture village. It was designed by Max Lindegger, Robert Tap, Barry Goodman, and Geoff Young, established in 1987 on 640 acres at the headwaters of the Mary River, and became the first permaculture project to win a UN World Habitat Award (1996).</p>
+    <p>Most of what is known publicly about how Crystal Waters was actually thought through, fought through, and held together is scattered across out-of-print books, conference proceedings, 1990s magazine archives, and the GEN newsletter. This page pulls the publicly available primary material into one searchable place. Every quote is attributed with date and source link.</p>
+    <p>This is for anyone who is genuinely interested in the design discipline behind the village - prospective residents, students considering the PDC, researchers, or members reading their own foundation. Corrections and additions are welcome.</p>
+  </div>
+</header>
+
+<div class="search-box">
+  <input type="search" id="search" placeholder="Search quotes, topics, sources (e.g. dam, by-law, deposit, salad)" autocomplete="off" spellcheck="false">
+  <div class="match-count" id="match-count"></div>
+</div>
+
+<nav class="toc">
+  <a href="#origins">Origins</a>
+  <a href="#design">The Design</a>
+  <a href="#awards">The Awards</a>
+  <a href="#governance">Governance</a>
+  <a href="#teaching">Lindegger's Teaching</a>
+  <a href="#now">Now</a>
+  <a href="#sources">Sources</a>
+</nav>
+
+<!-- ========== ORIGINS ========== -->
+<section id="origins">
+  <h2>Origins</h2>
+  <p class="section-intro">The intent, the four founders, and the patience that made the project survive its own beginning.</p>
+
+  <div class="card" data-search="suburb inspiration intent why founded reason">
+    <h3>The reason it exists at all</h3>
+    <div class="body">
+      <p>Asked what inspired him to design Crystal Waters, Lindegger gave one of the more honest founding statements in the ecovillage canon:</p>
+      <blockquote><p>"I didn't want to live in a suburb."</p></blockquote>
+    </div>
+    <div class="meta">Max Lindegger, in a profile of Crystal Waters. Source: <a href="https://residenceonearth.net/2014/03/28/crystal-waters/" target="_blank" rel="noopener">Residence on Earth, 28 March 2014</a>.</div>
+  </div>
+
+  <div class="card" data-search="founders 1987 1988 Tap Goodman Young Lindegger four designers contracted">
+    <h3>The four designers, and the difference it made that three of them lived there</h3>
+    <div class="body">
+      <p>The site was designed by Max Lindegger, Robert Tap, Barry Goodman, and Geoff Young. Land was secured in 1987; the village officially launched in 1988. Lindegger noted later that the closeness of the designers to the place mattered:</p>
+      <blockquote><p>"In the case of Crystal Waters, three of the four designers live at Crystal Waters whereas in the case of Kookaburra Park this was not the case. There had been other developments in the mean time and you learn from your mistakes and successes."</p></blockquote>
+    </div>
+    <div class="meta">Max Lindegger, "Crystal Waters and Other Eco-villages", Settlements Stream paper, Sixth International Permaculture Conference, Perth, September-October 1996. Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF, IPC6 Proceedings (Permaculture West)</a>.</div>
+  </div>
+
+  <div class="card" data-search="patience hype slow advertised early support fifteen months council">
+    <h3>The patience rule: don't advertise until you have something to sell</h3>
+    <div class="body">
+      <blockquote><p>"Crystal Waters was never advertised until the people involved actually had something to sell. It took more than fifteen months before the land was secured, it had council support and it actually had something to sell. Large numbers of other projects get lots of early support but lots of people, too impatient, leave the project and the project collapses. There is a real need to be patient, not to build up too much hype. It is really important to keep up good communications."</p></blockquote>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 1). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="raise funds deposit 8500 ethical bank profit cooperative">
+    <h3>How $8,500 deposits, not banks, paid for the infrastructure</h3>
+    <div class="body">
+      <p>One of the more useful pieces of operational history Lindegger has put on the record is the actual fundraising mechanism. He records it plainly:</p>
+      <blockquote>
+        <p>"The project started out as a small group, developing Crystal Waters on paper. Some leaflets were distributed, describing the dream. These leaflets invited people to become part of a unique project. When people inquired about the project they were sent out a package including a deposit form. This form asked people to put their money where their mouths were, asking for $8,500. Without these people, without such trust, the project wouldn't have been possible."</p>
+        <p>"The money was put in to long term deposits with an ethical investment bank. When approximately forty deposits had been made, it was possible to enter in to the necessary contracts for the development of infrastructure. If the project coordinators had gone to a bank the cost of developing the land would have been approximately twenty five per cent more expensive."</p>
+        <p>"At any given time people were able to request the return of their money plus interest earned, less one per cent management fee within three months. The people who put down money for the project were asked to become part of the management team. When the lots were sold $330,000 profit was made which was put back in to the project."</p>
+      </blockquote>
+      <p>And the line that any village considering its own renewal should probably re-read each year:</p>
+      <blockquote><p>"It is necessary to remember that any project which does not make a profit makes a loss."</p></blockquote>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 2-3). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+</section>
+
+<!-- ========== THE DESIGN ========== -->
+<section id="design">
+  <h2>The Design</h2>
+  <p class="section-intro">Land, water, lots, the discipline of waiting, and the discipline of leaving gaps.</p>
+
+  <div class="card" data-search="640 acres hectares lots common land 80 percent 20 percent layout">
+    <h3>The land: 259 hectares, 83 lots, 80% in common</h3>
+    <div class="body">
+      <p>Crystal Waters sits on 640 acres (259 hectares) of bushland at the headwaters of the Mary River, 26 km from Maleny. The lot structure was deliberate:</p>
+      <ul>
+        <li>83 privately-owned lots of approximately one acre each, plus 2 lots for the Crystal Waters Community Co-operative. Together this is roughly <strong>20% of the land.</strong></li>
+        <li>The remaining <strong>80% is owned in common</strong> and licensed by residents for agriculture, forestry, recreation, and habitat projects.</li>
+        <li>Residential lots are grouped in <strong>clusters</strong>, intended to balance rural isolation against social proximity.</li>
+        <li>The village is classified <em>Land for Wildlife</em>, with a <strong>"no dogs or cats"</strong> policy to protect native fauna.</li>
+      </ul>
+    </div>
+    <div class="meta">Source: <a href="https://crystalwaters.org.au/" target="_blank" rel="noopener">crystalwaters.org.au</a>; <a href="https://ecovillage.org/ecovillage/crystal-waters/" target="_blank" rel="noopener">Global Ecovillage Network profile</a>; <a href="https://earth-haven.com/crystal-waters-ecovillage/" target="_blank" rel="noopener">Earth Haven profile</a>.</div>
+  </div>
+
+  <div class="card" data-search="nine months observation design discipline before drawing slow">
+    <h3>Nine months of observation before any line was drawn</h3>
+    <div class="body">
+      <blockquote><p>"Once you have achieved enough confidence as a designer it is really important to leave gaps in the plans. These gaps leave options open for people further down the track. Took about nine months of observation before the design was started. Knowledge of the land has increased considerably during the last eight years. Its been good to have remaining gaps to leave possibilities open."</p></blockquote>
+      <p>Two design rules in one paragraph: nine months of observation before drawing, and the deliberate refusal to design every square metre. Both are unusual disciplines for a development project.</p>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 3). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="dam 17 seventeen swale Mary River Kilcoy Creek edge habitat aquaculture drought">
+    <h3>Seventeen dams, doing more than holding water</h3>
+    <div class="body">
+      <p>Water was treated as the central design criterion. The site has <strong>17 dams</strong>, each justified by multiple functions:</p>
+      <ul>
+        <li>Increasing landscape "edge" - more habitat, more diversity of flora and fauna.</li>
+        <li>Providing ridge-to-ridge access.</li>
+        <li>Aquaculture potential.</li>
+        <li>Climate moderation across the property.</li>
+        <li>Recreation and wildlife habitat.</li>
+        <li>Flood mitigation: during heavy rain, dams absorb runoff and direct it through swales to the Mary River and Kilcoy Creek.</li>
+        <li>Emergency water supply.</li>
+      </ul>
+      <p>The result, on the record: Crystal Waters got through Queensland's longest drought without needing to import any water.</p>
+    </div>
+    <div class="meta">Sources: <a href="https://crystalwaters.org.au/permaculture/" target="_blank" rel="noopener">Crystal Waters - Permaculture page</a>; <a href="https://ecovillagebook.org/ecovillages/crystal-waters/" target="_blank" rel="noopener">Ecovillage Book - Crystal Waters chapter</a>.</div>
+  </div>
+
+  <div class="card" data-search="zone planning village green deck kitchen bakery EcoCentre EcoPark residential agricultural habitat">
+    <h3>Zone planning, in practice</h3>
+    <div class="body">
+      <p>The village uses three zones - public, semi-public, and private:</p>
+      <ul>
+        <li><strong>Zone 1 - public village centre:</strong> Village Green, Deck and Kitchen, the bakery, businesses.</li>
+        <li><strong>Zone 2 - EcoCentre and EcoPark:</strong> visitor camping and education spaces.</li>
+        <li><strong>Zone 3 - residential, agricultural, and habitat areas:</strong> invite-only access, the working tissue of the village.</li>
+      </ul>
+      <p>Buildings emphasise renewable materials (earth and wood), solar-passive design, and treatment of human waste as a resource rather than a problem. Forestry follows long-term sustainable approaches.</p>
+    </div>
+    <div class="meta">Source: <a href="https://crystalwaters.org.au/permaculture/" target="_blank" rel="noopener">crystalwaters.org.au/permaculture</a>.</div>
+  </div>
+
+  <div class="card" data-search="cluster permaculture design report Tap 1989 conceptual book">
+    <h3>The 1989 Conceptual Permaculture Report</h3>
+    <div class="body">
+      <p>Before the village was built, Lindegger and Robert Tap published a <em>Conceptual Permaculture Report: Crystal Waters Permaculture Village</em> (1989, with later editions through 1992). It set out the design rationale - food, water, energy, governance - that the physical village would then attempt to realise. Out of print but referenced in later writing.</p>
+      <blockquote><p>According to designers Lindegger and Tap, a permanent agriculture is "a cornerstone whose influence permeates our needs and life in a rural village", with the goal of "developing a village community that aims for a diversity of food and energy sources, economic enterprise and social activity that will lead to more stability."</p></blockquote>
+    </div>
+    <div class="meta">Lindegger, M. O. and Tap, R., <em>Crystal Waters Village: Conceptual Permaculture Report</em>, 1989. Cited in <a href="https://www.context.org/iclib/ic29/cluster/" target="_blank" rel="noopener">Alan AtKisson, "A Cluster of Eco-villages", In Context #29, Summer 1991</a>.</div>
+  </div>
+
+</section>
+
+<!-- ========== AWARDS ========== -->
+<section id="awards">
+  <h2>The Awards</h2>
+  <p class="section-intro">What the UN actually said in 1996, and what came after.</p>
+
+  <div class="card" data-search="World Habitat Award 1996 UN United Nations Building Social Housing Foundation finalist">
+    <h3>1996 World Habitat Award</h3>
+    <div class="body">
+      <p>In 1996, Crystal Waters became the first permaculture project to win a World Habitat Award - the award given annually by the Building and Social Housing Foundation in partnership with UN-Habitat. The official citation:</p>
+      <blockquote><p>"The Crystal Waters Permaculture Village in Australia has carried out important pioneering work in demonstrating new ways of low-impact sustainable living through the establishment of the world's first intentional permaculture village."</p></blockquote>
+      <p>Two operational facts that the award materials emphasise and that often get lost: at the time of the award there were 200 people living on 83 privately-owned one-acre plots, and the project was <strong>entirely self-funded</strong>.</p>
+    </div>
+    <div class="meta">Source: <a href="https://world-habitat.org/awards/winners/crystal-waters-permaculture-village/" target="_blank" rel="noopener">World Habitat Awards - Crystal Waters Permaculture Village</a>.</div>
+  </div>
+
+  <div class="card" data-search="UN World Best Practices database 1998 recognition">
+    <h3>1998: UN World's Best Practices database</h3>
+    <div class="body">
+      <p>In 1998, Crystal Waters was added to the United Nations' World's Best Practices database. The 1996 award is the one usually cited, but the 1998 listing is what locked the project into the international reference set for sustainable settlements.</p>
+    </div>
+    <div class="meta">Source: <a href="https://en.wikipedia.org/wiki/Crystal_Waters,_Queensland" target="_blank" rel="noopener">Wikipedia: Crystal Waters, Queensland</a>.</div>
+  </div>
+</section>
+
+<!-- ========== GOVERNANCE ========== -->
+<section id="governance">
+  <h2>Governance</h2>
+  <p class="section-intro">A Body Corporate, a Co-operative, sixteen by-laws, and a Council of Elders. How the village actually decides things.</p>
+
+  <div class="card" data-search="Body Corporate Co-op cooperative two organisations legal entrepreneurial members">
+    <h3>The two-organisation structure</h3>
+    <div class="body">
+      <blockquote>
+        <p>"There are two organisations within Crystal Waters - the Body Corporate and the Co-op. The Body Corporate is purely legal whereas the Co-op is purely entrepreneurial. The Co-op comprises everyone who owns land as well as some friends of Crystal Waters. The Co-op is the entrepreneurial aspect of Crystal Waters. Manages the resources, the camping area and the village area. It meets every three weeks, with its directors empowered to make decisions on behalf of the entire community."</p>
+        <p>"Co-ops date back to the early part of this century. They were predominantly started by farmers. The Crystal Waters co-op is used for a business which is run by a very few people. The large numbers of members pay a twenty dollar membership fee."</p>
+      </blockquote>
+      <p>This is the structural insight that travels best from Crystal Waters to other intentional communities: split the legal-statutory function from the entrepreneurial-commercial function, run them as separate organisations, and let each do what it is built to do.</p>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 1). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="by-law sixteen 16 elders Council dispute resolution arbitrator state government">
+    <h3>The dispute escalation chain</h3>
+    <div class="body">
+      <blockquote>
+        <p>"The Body Corporate is a legal requirement whose members are elected once a year. It has the role of administering common land, eighty per cent for the member's benefit. The Body Corporate has sixteen by-laws. If someone is in breach of a by-law, there are firstly attempts to resolve the dispute amicably. If the dispute is not resolved it can be taken to the community 'elders'. These elders have total community support. They have the necessary talents and skills to help resolve conflicts within the community. If this fails to work then the Body Corporate gets involved. If this still fails to work then the dispute is taken to an arbitrator which the State Government provides. The ultimate recourse is to take the dispute to court."</p>
+        <p>"There has only been one instance where a dispute has reached the state arbiter."</p>
+      </blockquote>
+      <p>The escalation chain - amicable conversation, then elders, then Body Corporate, then state arbitrator, then court - is the unsexy operational truth of how Crystal Waters has stayed together for decades. One state-arbitrator-level dispute in 30+ years is the metric.</p>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 1). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="adulation peer pressure painful discussions glue community succeed enforce">
+    <h3>What the rules are actually enforced with</h3>
+    <div class="body">
+      <p>In 1991, asked how a community of this kind makes its rules stick without uniformed enforcement, Lindegger gave a memorable answer to journalist Alan AtKisson:</p>
+      <blockquote>
+        <p>The community uses "a combination of adulation and peer pressure", together with "painfully open discussions, where people hear things about themselves that they may not want to hear", to enforce regulations.</p>
+      </blockquote>
+      <p>And on what holds the project together at all:</p>
+      <blockquote><p>"A desire for the community to succeed" is "the glue".</p></blockquote>
+    </div>
+    <div class="meta">Lindegger, quoted in <a href="https://www.context.org/iclib/ic29/cluster/" target="_blank" rel="noopener">Alan AtKisson, "A Cluster of Eco-villages", In Context #29, Summer 1991, p. 15</a>.</div>
+  </div>
+
+  <div class="card" data-search="decision making vote sixteen forum bow arrow firearm by-law children">
+    <h3>How decisions are made (and the bow-and-arrow story)</h3>
+    <div class="body">
+      <blockquote>
+        <p>"People are able to vote from the age of sixteen. However not many of the sixteen year olds do actually participate. When Max's son was fifteen he wanted to have a bow and arrow but there was a by law which prohibited the keeping of fire arms. The young people applied to use bow and arrows. The adults making the decisions felt that they could be doing something more meaningful. and decided that the young people couldn't use bow and arrows."</p>
+        <p>"Decision making authority is passed on to the executive and the Body Corporate. Everyone can attend the meetings which are held every three weeks. The community holds forums when large issues are at stake. Any person can call a forum at any time. The forum doesn't have the authority to make decisions as such. However if a vote is taken then that is a strong indicator to the decision makers of the community's wishes."</p>
+      </blockquote>
+      <p>The bow-and-arrow vignette is small and almost embarrassed in the original transcript, but it is one of the only public records of how a Crystal Waters by-law actually got applied to a specific child of a specific designer in a specific moment - and lost.</p>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 2). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="children cluster meetings kids interconnected information messages">
+    <h3>The information network ran on parents</h3>
+    <div class="body">
+      <blockquote>
+        <p>"The interests of children are paramount. Some people bring children along to meetings while other people pool money to pay for child minding. There are many interest clusters within the community. The people with small children form a cluster. The people within this cluster look after each others children. As a result of these interconnected clusters, messages get around the community very fast."</p>
+      </blockquote>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 2). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+  <div class="card" data-search="meeting place baker oven Switzerland women information shared">
+    <h3>Why every village needs a place where everyone goes</h3>
+    <div class="body">
+      <blockquote>
+        <p>"Meeting places are very important for the transmission of information. In a Switzerland community there was a baker's oven where only women were allowed to go. All of the women in this village would use this oven. In the process lots of information was shared amongst the women. It was easy to ascertain who needed help and support. In our society all of the meeting places have been destroyed. At Crystal Waters there is no one place where everyone can meet."</p>
+      </blockquote>
+      <p>This was Lindegger naming, in 1996, what would later be called "third places" - and naming the absence at Crystal Waters as a real cost. The Village Green and the bakery have since become the closest the village has to that.</p>
+    </div>
+    <div class="meta">Lindegger, IPC6 Proceedings, 1996 (Settlements Stream, p. 2). Source: <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF</a>.</div>
+  </div>
+
+</section>
+
+<!-- ========== TEACHING ========== -->
+<section id="teaching">
+  <h2>Lindegger's Teaching</h2>
+  <p class="section-intro">Bill Mollison's first PDC, GENOA, 60 countries, and the principles he keeps coming back to.</p>
+
+  <div class="card" data-search="Mollison 1979 first PDC permaculture course 1980 second course origin">
+    <h3>One of Mollison's first PDC students - and the long thread that followed</h3>
+    <div class="body">
+      <p>Bill Mollison invited Lindegger to participate in the first ever Permaculture Design Course in 1979. Lindegger took the second one in 1980. From there the work was continuous: forty-plus years of designing, teaching, and building ecovillages in over 60 countries.</p>
+      <p>It is worth being precise about what this means. Permaculture as a discipline was created in the late 1970s. Lindegger was in the room. The intellectual lineage that runs from Mollison through Lindegger into Crystal Waters is the closest thing the field has to a primary source on what an applied permaculture village is supposed to be.</p>
+    </div>
+    <div class="meta">Sources: <a href="https://www.permanentpublications.co.uk/max-o-lindegger/" target="_blank" rel="noopener">Permanent Publications - Max O. Lindegger</a>; <a href="https://www.programmes.gaiaeducation.uk/blog/69759-max-lindegger" target="_blank" rel="noopener">Gaia Education - Max Lindegger</a>.</div>
+  </div>
+
+  <div class="card" data-search="GENOA Global Ecovillage Network Oceania Asia 1997 founded headquarters office">
+    <h3>Founding GENOA from the office at Crystal Waters</h3>
+    <div class="body">
+      <p>After the Findhorn meeting that established the Global Ecovillage Network in 1995, three regional secretaries were appointed: Declan Kennedy (Europe and Africa), Albert Bates (the Americas), and Lindegger (Asia and Oceania). In 1997 he set up the GENOA office. For its first nine years, the headquarters of the entire Asia/Oceania regional network of GEN was at his desk at Crystal Waters.</p>
+      <p>This is the structural fact that explains why Crystal Waters holds the position it does internationally: it was not just a permaculture village that happened to host a network. The network was, for nine years, operationally run from inside it.</p>
+    </div>
+    <div class="meta">Sources: <a href="https://genoaecovillage.org/about-genoa/" target="_blank" rel="noopener">GENOA - About</a>; <a href="https://ecovillage.org/gen-history/" target="_blank" rel="noopener">GEN History</a>.</div>
+  </div>
+
+  <div class="card" data-search="oikos home Greek meaning ecology habitat designing book four keys">
+    <h3>From <em>Designing Ecological Habitats</em></h3>
+    <div class="body">
+      <p>Lindegger co-edited <em>Designing Ecological Habitats: Creating a Sense of Place</em> with E. Christopher Mare - the third volume in the Four Keys to Sustainable Communities series, produced with Gaia Education. The framing he and Mare put on the work:</p>
+      <blockquote>
+        <p>"By understanding the process of creating integrated ecological designs, we also make explicit the process of creating integrated social and economic systems. We reconnect with the true meaning of ecology that comes from the Greek word <em>oikos</em>, meaning 'home' or 'a place to live.' Humanity's greatest challenge is to ensure that planet Earth can support human life far into future centuries not only by adapting to climate change but also by mitigating it."</p>
+      </blockquote>
+      <p>The four "keys" the series uses to describe sustainable design are <strong>Worldview, Social, Ecological, Economic</strong> - and the book treats them as inseparable. You don't design a habitat without designing the social and economic system that lives in it.</p>
+    </div>
+    <div class="meta">Mare, E. C. and Lindegger, M. O. (eds.), <em>Designing Ecological Habitats: Creating a Sense of Place</em>, Permanent Publications / Gaia Education. Source: <a href="https://www.permanentpublications.co.uk/port/4-keys-series-designing-ecological-habitats-creating-a-sense-of-place/" target="_blank" rel="noopener">Permanent Publications</a>.</div>
+  </div>
+
+  <div class="card" data-search="connected permaculture all classes courses educational programs">
+    <h3>"It is all connected to permaculture"</h3>
+    <div class="body">
+      <p>Asked in 1991 about the range of educational classes Crystal Waters offered (and the range was extreme - design, building, social structure, food systems, "you name it"), Lindegger gave the line that has since become the village's working theory of education:</p>
+      <blockquote><p>"It is all connected to permaculture."</p></blockquote>
+    </div>
+    <div class="meta">Lindegger, quoted in <a href="https://www.context.org/iclib/ic29/cluster/" target="_blank" rel="noopener">Alan AtKisson, "A Cluster of Eco-villages", In Context #29, Summer 1991</a>.</div>
+  </div>
+
+  <div class="card" data-search="non-parasitic self-reliant food energy future">
+    <h3>The long-arc target: not just self-reliant, but non-parasitic</h3>
+    <div class="body">
+      <p>Lindegger's framing for what the village was working toward, even in 1991:</p>
+      <blockquote><p>The future vision was for the food and energy systems to be "not only self-reliant, but non-parasitic."</p></blockquote>
+      <p>"Non-parasitic" is a sharper word than "sustainable". It is doing different work. It says: a settlement that imports more than it can give back is taking from somewhere - and that the design problem is to close that gap, not to be content with reduced extraction.</p>
+    </div>
+    <div class="meta">Lindegger, paraphrased in <a href="https://www.context.org/iclib/ic29/cluster/" target="_blank" rel="noopener">Alan AtKisson, "A Cluster of Eco-villages", In Context #29, Summer 1991</a>.</div>
+  </div>
+</section>
+
+<!-- ========== NOW ========== -->
+<section id="now">
+  <h2>Now</h2>
+  <p class="section-intro">After GEN, the Cambodia trips, beekeeping, and what it actually looks like to step back without stopping.</p>
+
+  <div class="card" data-search="life after GEN better worse different Lindegger reflection retired">
+    <h3>"It is not better or worse - it is simply very, very different."</h3>
+    <div class="body">
+      <p>In 2018, Lindegger published a piece for Global Ecovillage Network called <em>There is a Life after GEN</em>. It reads like notes from a life that has stayed deeply on the same land while letting go of the international workload. The opening line:</p>
+      <blockquote><p>"There is life AFTER GEN/GENOA. It is not better or worse - it is simply very, very different."</p></blockquote>
+      <p>And then, almost in the same breath:</p>
+      <blockquote>
+        <p>"I spend a lot less time in my office."</p>
+        <p>"I still mail out a monthly gardening News sheet and a seasonal Newsletter for beekeepers."</p>
+        <p>"I teach now one or two Permaculture courses a year as a fundraiser for our Crystal Waters Coop."</p>
+        <p>"I do very irregular consultancy work in the field of Ecovillages."</p>
+      </blockquote>
+    </div>
+    <div class="meta">Max Lindegger, "There is a Life after GEN", Global Ecovillage Network blog. Source: <a href="https://ecovillage.org/there-life-after-gen/" target="_blank" rel="noopener">ecovillage.org/there-life-after-gen</a>.</div>
+  </div>
+
+  <div class="card" data-search="Cambodia volunteer Ockenden farmers two trips year">
+    <h3>Cambodia, twice a year</h3>
+    <div class="body">
+      <blockquote>
+        <p>"I limit myself (out of choice and financial necessity), to two trips a year to volunteer in Cambodia."</p>
+        <p>"This is incredibly satisfying and rewarding work which I plan to continue as long as I'm able."</p>
+      </blockquote>
+      <p>Lindegger has been volunteering with Ockenden in Cambodia for years, working with local farmers. The Gaia Education profile lists his current focus as small-scale farming, beekeeping, and bee products.</p>
+    </div>
+    <div class="meta">Sources: <a href="https://ecovillage.org/there-life-after-gen/" target="_blank" rel="noopener">"There is a Life after GEN"</a>; <a href="https://www.programmes.gaiaeducation.uk/blog/69759-max-lindegger" target="_blank" rel="noopener">Gaia Education profile</a>.</div>
+  </div>
+
+  <div class="card" data-search="salad 25 leaves honey 3500 kg bees vegetable garden home">
+    <h3>What home actually produces</h3>
+    <div class="body">
+      <blockquote>
+        <p>"We don't milk anymore but always have enough meat."</p>
+        <p>"Our salad mix is well known. We mix up to 25 different leaves from the common vegetable to the rather rare and unusual."</p>
+        <p>"Last year we produced about 3500 kg of honey."</p>
+        <p>"Most of our activities are within 1 km of our home."</p>
+        <p>"I like the pace of work guided more by the sun and rain and the seasons than by a schedule."</p>
+      </blockquote>
+      <p>This is one of the more underrated paragraphs in Crystal Waters' public archive. The 25-leaf salad mix and the 3,500 kg of honey are concrete evidence of what an actual permaculture lot looks like in its mature state, decades in - not a brochure, not a course, but a yield.</p>
+    </div>
+    <div class="meta">Lindegger, "There is a Life after GEN". Source: <a href="https://ecovillage.org/there-life-after-gen/" target="_blank" rel="noopener">ecovillage.org/there-life-after-gen</a>.</div>
+  </div>
+
+  <div class="card" data-search="dam mist morning view river airports preference">
+    <h3>The line that probably means the most</h3>
+    <div class="body">
+      <blockquote>
+        <p>"The view over our dam and river with the morning mist rising is definitely my preference over hours in boring and overly busy airports."</p>
+      </blockquote>
+      <p>Forty years of designing, teaching across 60 countries, founding the Asia/Oceania ecovillage network, then returning to a one-kilometre radius around the dam he helped design. That's the arc.</p>
+    </div>
+    <div class="meta">Lindegger, "There is a Life after GEN". Source: <a href="https://ecovillage.org/there-life-after-gen/" target="_blank" rel="noopener">ecovillage.org/there-life-after-gen</a>.</div>
+  </div>
+
+  <div class="card" data-search="village 250 residents current population today community generations">
+    <h3>The village today</h3>
+    <div class="body">
+      <p>Crystal Waters now has approximately 250 residents across 83 lots, a Body Corporate plus Co-op governance structure, a Sourdough Bakery, a FlowerPot Cafe, a chiropractor, a natural therapies clinic, a monthly Village Market, ongoing Permaculture Design Courses, and an ageing first generation that is slowly handing over to a second.</p>
+      <p>The Co-op currently raises funds through course fees, market rents, and visitor donations to cover insurance, maintenance, and infrastructure. The financial story is plainer than the design story: a thirty-eight-year-old village run as a member-owned co-operative carries real costs that are not, by themselves, glamorous.</p>
+    </div>
+    <div class="meta">Sources: <a href="https://crystalwaters.org.au/" target="_blank" rel="noopener">crystalwaters.org.au</a>; <a href="https://en.wikipedia.org/wiki/Crystal_Waters,_Queensland" target="_blank" rel="noopener">Wikipedia: Crystal Waters, Queensland</a>; <a href="https://earth-haven.com/crystal-waters-ecovillage/" target="_blank" rel="noopener">Earth Haven profile</a>.</div>
+  </div>
+</section>
+
+<!-- ========== SOURCES ========== -->
+<section id="sources">
+  <h2>Sources</h2>
+  <p class="section-intro">Every link cited above, in one place. All publicly accessible at time of compilation (27 April 2026).</p>
+
+  <div class="card" data-search="primary source Lindegger IPC6 1996 conference proceedings">
+    <h3>Primary - Lindegger writing</h3>
+    <div class="body">
+      <ul>
+        <li>Max Lindegger, "Crystal Waters and Other Eco-villages", Settlements Stream paper, <strong>Sixth International Permaculture Conference</strong>, Perth, September-October 1996. <a href="https://permaculturewest.org.au/wp-content/uploads/2017/12/ipc6-settlements-lindegger.pdf" target="_blank" rel="noopener">PDF (Permaculture West)</a>.</li>
+        <li>Max Lindegger, "There is a Life after GEN", Global Ecovillage Network blog. <a href="https://ecovillage.org/there-life-after-gen/" target="_blank" rel="noopener">ecovillage.org/there-life-after-gen</a>.</li>
+        <li>E. Christopher Mare and Max Lindegger (eds.), <em>Designing Ecological Habitats: Creating a Sense of Place</em>, Four Keys to Sustainable Communities series, Permanent Publications / Gaia Education. <a href="https://www.permanentpublications.co.uk/port/4-keys-series-designing-ecological-habitats-creating-a-sense-of-place/" target="_blank" rel="noopener">Publisher page</a>.</li>
+        <li>Max Lindegger and Robert Tap, <em>Crystal Waters Village: Conceptual Permaculture Report</em>, 1989 (multiple editions through 1992). Out of print; references survive in later writing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card" data-search="secondary source interview profile Crystal Waters quotes">
+    <h3>Secondary - profiles, interviews, recognitions</h3>
+    <div class="body">
+      <ul>
+        <li>Alan AtKisson, "A Cluster of Eco-villages", <em>In Context</em> #29, Summer 1991. <a href="https://www.context.org/iclib/ic29/cluster/" target="_blank" rel="noopener">context.org/iclib/ic29/cluster</a>.</li>
+        <li>Crystal Waters Permaculture Village - 1996 World Habitat Award. <a href="https://world-habitat.org/awards/winners/crystal-waters-permaculture-village/" target="_blank" rel="noopener">world-habitat.org</a>.</li>
+        <li>Crystal Waters Eco Village - official site. <a href="https://crystalwaters.org.au/" target="_blank" rel="noopener">crystalwaters.org.au</a>.</li>
+        <li>Crystal Waters - Permaculture page. <a href="https://crystalwaters.org.au/permaculture/" target="_blank" rel="noopener">crystalwaters.org.au/permaculture</a>.</li>
+        <li>"Crystal Waters", profile on Residence on Earth, 28 March 2014. <a href="https://residenceonearth.net/2014/03/28/crystal-waters/" target="_blank" rel="noopener">residenceonearth.net</a>.</li>
+        <li>Crystal Waters profile, Global Ecovillage Network. <a href="https://ecovillage.org/ecovillage/crystal-waters/" target="_blank" rel="noopener">ecovillage.org</a>.</li>
+        <li>"Crystal Waters", <em>Ecovillages: Lessons for Sustainable Community</em>. <a href="https://ecovillagebook.org/ecovillages/crystal-waters/" target="_blank" rel="noopener">ecovillagebook.org</a>.</li>
+        <li>Crystal Waters Community Cooperative. <a href="https://earth-haven.com/crystal-waters-ecovillage/" target="_blank" rel="noopener">earth-haven.com</a>.</li>
+        <li>Wikipedia: Crystal Waters, Queensland. <a href="https://en.wikipedia.org/wiki/Crystal_Waters,_Queensland" target="_blank" rel="noopener">en.wikipedia.org</a>.</li>
+        <li>GENOA - About. <a href="https://genoaecovillage.org/about-genoa/" target="_blank" rel="noopener">genoaecovillage.org/about-genoa</a>.</li>
+        <li>GEN History. <a href="https://ecovillage.org/gen-history/" target="_blank" rel="noopener">ecovillage.org/gen-history</a>.</li>
+        <li>Max O. Lindegger, Permanent Publications profile. <a href="https://www.permanentpublications.co.uk/max-o-lindegger/" target="_blank" rel="noopener">permanentpublications.co.uk</a>.</li>
+        <li>Max Lindegger, Gaia Education programmes profile. <a href="https://www.programmes.gaiaeducation.uk/blog/69759-max-lindegger" target="_blank" rel="noopener">programmes.gaiaeducation.uk</a>.</li>
+        <li>Max Lindegger interview at Wongsanit Ashram, GEESE Meeting 2007 (Part 1). <a href="https://www.youtube.com/watch?v=v31ysGcK-ns" target="_blank" rel="noopener">YouTube</a>. (Part 2: <a href="https://www.youtube.com/watch?v=ytR9bNrEDXs" target="_blank" rel="noopener">YouTube</a>.)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p><strong>Compiled 27 April 2026.</strong> All quotes are attributed to a publicly accessible primary or secondary source. Where a quote is from a transcribed conference paper, the page reference of the original PDF is given. Some 1990s magazine and conference material exists only in scanned PDFs that may render imperfectly; corrections welcome.</p>
+  <p>Errors and omissions known at time of compilation:</p>
+  <ul>
+    <li>Several profiles list a fifth or substitute founder (Trudy Juriansz). The four-founder list above (Lindegger, Tap, Goodman, Young) follows the official Crystal Waters site, the Wikipedia entry, and Lindegger's own published material. Any reader with a primary citation for the alternative attribution should send it.</li>
+    <li>Founding date is given as 1987 (land secured) on the official site; "1988" appears on the village's own permaculture page and in some early sources, referring to the official launch. Both are correct depending on what the date is being attached to.</li>
+    <li>The Conceptual Permaculture Report (1989) and earlier Lindegger course notes are not currently available online. If a digitised copy exists in any community archive, this page will be updated to link it.</li>
+  </ul>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var input = document.getElementById('search');
+  var counter = document.getElementById('match-count');
+  var cards = document.querySelectorAll('.card');
+
+  function escapeHtml(s){ return s.replace(/[&<>"']/g, function(c){
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+  }); }
+
+  function clearHighlights(){
+    cards.forEach(function(card){
+      var marks = card.querySelectorAll('mark');
+      marks.forEach(function(m){
+        var t = document.createTextNode(m.textContent);
+        m.parentNode.replaceChild(t, m);
+      });
+    });
+  }
+
+  function highlight(card, query){
+    if (!query) return;
+    var re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    function walk(node){
+      if (node.nodeType === 3) {
+        if (re.test(node.textContent)) {
+          var span = document.createElement('span');
+          span.innerHTML = node.textContent.replace(re, '<mark>$1</mark>');
+          node.parentNode.replaceChild(span, node);
+        }
+      } else if (node.nodeType === 1 && node.tagName !== 'MARK' && node.tagName !== 'A') {
+        var children = Array.from(node.childNodes);
+        children.forEach(walk);
+      }
+    }
+    walk(card);
+  }
+
+  function filter(){
+    var q = (input.value || '').trim().toLowerCase();
+    clearHighlights();
+    var shown = 0;
+    cards.forEach(function(card){
+      var hay = (card.textContent + ' ' + (card.dataset.search || '')).toLowerCase();
+      if (!q || hay.indexOf(q) !== -1) {
+        card.classList.remove('hidden');
+        shown++;
+        if (q) highlight(card, q);
+      } else {
+        card.classList.add('hidden');
+      }
+    });
+    counter.textContent = q ? (shown + ' card' + (shown===1?'':'s') + ' match "' + q + '"') : '';
+  }
+
+  input.addEventListener('input', filter);
+  input.addEventListener('search', filter);
+})();
+</script>
+
+</body>
+</html>
