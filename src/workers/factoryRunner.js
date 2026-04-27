@@ -590,6 +590,57 @@ async function startSession(session) {
   }
   if (!cwd) cwd = process.cwd()
 
+  // ─── Worktree-reset preflight ────────────────────────────────────────
+  // Reset the codebase working directory to the default branch before
+  // spawning the CLI. Without this, if the previous dispatch left the worktree
+  // on a stale feature branch, the new session inherits that state — creating
+  // a branch from the wrong base and polluting the diff at review time.
+  // Only runs for external codebase paths, never for the EcodiaOS backend itself.
+  if (cwd && cwd !== process.cwd()) {
+    try {
+      const { execFileSync: _execFS } = require('child_process')
+      const _gitOpts = { cwd, encoding: 'utf-8', timeout: 30_000 }
+
+      // Fetch latest remote state (ignore failures — offline or no remote)
+      try {
+        _execFS('git', ['fetch', 'origin', '--quiet', '--prune'], _gitOpts)
+      } catch (fetchErr) {
+        logger.warn('Factory preflight: git fetch failed (continuing)', { sessionId: session.id, cwd, error: fetchErr.message })
+      }
+
+      // Detect default branch (main, master, etc.)
+      let _defaultBranch = 'main'
+      try {
+        const _symRef = _execFS('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], _gitOpts).trim()
+        _defaultBranch = _symRef.replace(/^origin\//, '')
+      } catch {
+        // Fall back to 'main'
+      }
+
+      // Checkout default branch — if this fails, log warning but continue dispatch
+      try {
+        _execFS('git', ['checkout', '-q', _defaultBranch], _gitOpts)
+      } catch (checkoutErr) {
+        logger.warn('Factory preflight: git checkout failed (continuing dispatch anyway)', { sessionId: session.id, cwd, branch: _defaultBranch, error: checkoutErr.message })
+      }
+
+      // Pull latest commits (ignore failures — diverged history, no network, etc.)
+      try {
+        _execFS('git', ['pull', '--ff-only', '--quiet', 'origin', _defaultBranch], _gitOpts)
+      } catch (pullErr) {
+        logger.warn('Factory preflight: git pull failed (continuing)', { sessionId: session.id, cwd, branch: _defaultBranch, error: pullErr.message })
+      }
+
+      // Log current branch as a breadcrumb for post-mortem analysis
+      try {
+        const _currentBranch = _execFS('git', ['branch', '--show-current'], _gitOpts).trim()
+        logger.info('Factory preflight: worktree reset complete', { sessionId: session.id, cwd, branch: _currentBranch })
+      } catch {}
+    } catch (preflightErr) {
+      logger.warn('Factory preflight: worktree reset failed entirely (continuing dispatch)', { sessionId: session.id, cwd, error: preflightErr.message })
+    }
+  }
+
   const args = [
     '--print',
     '--verbose',
