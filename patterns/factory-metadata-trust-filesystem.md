@@ -41,6 +41,22 @@ Both sessions were dispatched in parallel against `ecodiaos-backend` (despite th
 
 Lesson: when you realise mid-session that you dispatched two Factory jobs in parallel on the same codebase, expect the first approve to snowball everything uncommitted. Check `git log -p` on the snowball commit to confirm nothing unintended shipped. Do NOT trust the approve response alone - cross-check what actually landed in the commit.
 
+## Addendum 2 - operator-authored ambient state also triggers snowball
+
+Apr 27 2026. Factory session `aeaf1cfa-fb36-4e22-be3c-7d17c1a91edc` (kg-embed `*Run` filter + Reflection.content + listener registry dispatch fix). NO parallel Factory session was running, but the worktree had ambient untracked work I had authored myself before dispatch (5 new pattern files, drafts/yarn-and-yield/* deck materials, public/docs/quorum-of-one-003 edits, clients/macincloud-access.md, dao/dao-uups-migration-spec.md, drafts/quorum-of-one-004-draft.html, drafts/roam-iap-audit-2026-04-27.md). The session itself committed cleanly to a topic branch as `5a47b03` with exactly the three intended src/ changes. When I called `approve_factory_deploy(force=true)` the deployment service:
+
+1. Bundled all that ambient untracked state into a SECOND commit `cca296e8` on top of the session commit, with the Factory's task message as the commit message (so the commit message claimed it was the kg-embed fix when really it was 18 files of unrelated work).
+2. Failed during push or restart and returned HTTP 500.
+
+Recovery required manually: ff main from origin, ff main to topic branch HEAD, `git commit --amend` the snowball commit with an accurate message before push, then push and verify PM2 picked up the new code.
+
+**Generalised lesson:** the snowball trigger is ANY uncommitted state in the worktree at approve time - parallel Factory sessions, operator-authored drafts, my own pattern-file authoring. Either (a) commit your ambient work to a separate branch BEFORE calling approve_factory_deploy, or (b) be ready to amend the resulting commit message and split via revert+commit if the bundled scope is unacceptable. The approve API does not separate "session output" from "everything else dirty in the worktree" - it commits ALL of it under the session's task message.
+
+**Prevention checklist before calling approve_factory_deploy on ecodiaos-backend:**
+- [ ] `git status -sb` - any modified or untracked files I authored?
+- [ ] If yes and they are unrelated to the session: commit them on a separate branch first, OR accept the snowball and plan to amend message + split via revert+commit on the next push.
+- [ ] If yes and they are session-related leakage: investigate before approving.
+
 ## Related patterns
 - `factory-codebase-staleness-check-before-dispatch.md` - prevention side (clean worktree before dispatch)
 - `factory-phantom-session-no-commit.md` - when Factory reports work that produced no commit
