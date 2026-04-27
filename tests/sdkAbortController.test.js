@@ -8,52 +8,25 @@
  * - The grace timer is NOT scheduled for new_turn_starting or priority_preempt
  * - The grace timer is cleared on natural turn completion
  * - _setActiveQueryForTest / _setActiveAbortForTest wiring works correctly
- *
- * Run with: node tests/sdkAbortController.test.js
  */
 
-const assert = require('assert')
-const Module = require('module')
+// ─── Dependency mocks ─────────────────────────────────────────────────────────
 
-// ─── Test harness ─────────────────────────────────────────────────────────────
+jest.mock('../src/config/db', () => {
+  function mockDbTag() { return Promise.resolve([]) }
+  mockDbTag.sql = async () => []
+  mockDbTag.begin = async (fn) => fn(mockDbTag)
+  return mockDbTag
+})
 
-const _tests = []
-function test(name, fn) { _tests.push({ name, fn }) }
+jest.mock('../src/config/logger', () => ({
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}))
 
-async function runAll() {
-  let passed = 0, failed = 0
-  for (const { name, fn } of _tests) {
-    try {
-      await fn()
-      console.log(`  \u2713 ${name}`)
-      passed++
-    } catch (err) {
-      console.error(`  \u2717 ${name}`)
-      console.error(`    ${err.message}`)
-      if (process.env.VERBOSE) console.error(err.stack)
-      failed++
-    }
-  }
-  console.log(`\n${passed} passing, ${failed} failing\n`)
-  if (failed > 0) process.exit(1)
-}
-
-// ─── Dependency stubs ─────────────────────────────────────────────────────────
-// osSessionService.js has many heavy dependencies (DB, Redis, Neo4j, etc.)
-// that we don't want to actually initialise in unit tests. Intercept them all.
-
-const mockLogger = {
-  debug: () => {}, info: () => {}, warn: () => {}, error: () => {},
-}
-
-// postgres.js db tag function — needs to be callable as a template literal tag
-// AND as a function (e.g. db`...`) and have sub-methods (sql, begin, etc.)
-const mockDb = Object.assign(
-  function mockDbTag(...args) { return Promise.resolve([]) },
-  { sql: async () => [], begin: async (fn) => fn(mockDb) }
-)
-
-const mockEnv = {
+jest.mock('../src/config/env', () => ({
   OS_SESSION_CWD: '/tmp/test-cwd',
   OS_SESSION_MODEL: undefined,
   CLAUDE_CONFIG_DIR_1: undefined,
@@ -65,229 +38,206 @@ const mockEnv = {
   AWS_REGION: undefined,
   BEDROCK_MODEL: undefined,
   ANTHROPIC_API_KEY: undefined,
-}
+}))
 
-const mockBroadcastModule = {
-  broadcast: () => {},
-  flushDeltasForTurnComplete: () => {},
-  resetSessionSeq: () => {},
-  broadcastToSession: () => {},
-}
+jest.mock('../src/websocket/wsManager', () => ({
+  broadcast: jest.fn(),
+  flushDeltasForTurnComplete: jest.fn(),
+  resetSessionSeq: jest.fn(),
+  broadcastToSession: jest.fn(),
+}))
 
-const mockUsageEnergy = {
-  refreshAllAccounts: async () => {},
-  getEnergy: async () => ({ pctUsed: 0, level: 'healthy', accounts: { claude_max: {}, claude_max_2: {} } }),
-  getBestProvider: () => ({ provider: 'claude_max', isBedrockFallback: false, reason: 'healthy' }),
-  setProvider: () => {},
-  refreshAllAccounts: async () => {},
-}
+jest.mock('../src/services/secretSafetyService', () => ({
+  scrubSecrets: (x) => x,
+}))
 
-const noop = () => {}
-const noopAsync = async () => {}
-const emptyObj = {}
+jest.mock('../src/services/usageEnergyService', () => ({
+  refreshAllAccounts: jest.fn().mockResolvedValue(undefined),
+  getEnergy: jest.fn().mockResolvedValue({
+    pctUsed: 0,
+    level: 'healthy',
+    accounts: { claude_max: {}, claude_max_2: {} },
+  }),
+  getBestProvider: jest.fn().mockReturnValue({
+    provider: 'claude_max',
+    isBedrockFallback: false,
+    reason: 'healthy',
+  }),
+  setProvider: jest.fn(),
+}))
 
-const originalLoad = Module._load
-Module._load = function (request, parent, isMain) {
-  // Config modules
-  if (/config[\\/]db/.test(request)) return mockDb
-  if (/config[\\/]logger/.test(request)) return mockLogger
-  if (/config[\\/]env/.test(request)) return mockEnv
-  if (/config[\\/]neo4j/.test(request)) return { getDriver: () => null, closeDriver: noopAsync }
-  if (/config[\\/]redis/.test(request)) return { getClient: () => null }
+jest.mock('../src/services/osIncidentService', () => ({
+  log: jest.fn(),
+}))
 
-  // Infrastructure modules
-  if (/wsManager/.test(request)) return mockBroadcastModule
-  if (/usageEnergyService/.test(request)) return mockUsageEnergy
-  if (/osIncidentService/.test(request)) return { log: noop }
-  if (/sessionMemoryService/.test(request)) return { getSessionMemory: noopAsync, saveSessionMemory: noopAsync }
-  if (/osConversationLog/.test(request)) return { getNextTurnNumber: async () => 0, logTurn: noopAsync }
-  if (/neo4jRetrieval/.test(request)) return { fusedSearch: async () => [], getRecentHighPriorityNodes: async () => [] }
-  if (/secretSafetyService/.test(request)) return { scrubSecrets: (x) => x }
-  if (/sessionHandoff/.test(request)) return { readHandoffState: async () => null, saveHandoffState: noopAsync }
-  if (/sessionObservation/.test(request)) return { observe: noop }
-  if (/claudeTokenRefresh/.test(request)) return { scheduleRefresh: noop }
-  if (/usageEnergy/.test(request)) return mockUsageEnergy
-  if (/osAlertingService/.test(request)) return { alertBedrockFallback: noopAsync, alertProcessRestart: noopAsync }
-  if (/osIncident/.test(request)) return { log: noop }
-  if (/messageQueue/.test(request)) return { enqueue: noopAsync, getQueue: async () => [] }
+jest.mock('../src/services/sessionMemoryService', () => ({
+  getSessionMemory: jest.fn().mockResolvedValue(null),
+  saveSessionMemory: jest.fn().mockResolvedValue(undefined),
+}))
 
-  // Catch-all for any other internal services we haven't listed
-  if (/services[\\/]/.test(request) && !request.includes('osSessionService')) return emptyObj
-  if (/workers[\\/]/.test(request)) return emptyObj
-  if (/capabilities[\\/]/.test(request)) return emptyObj
+jest.mock('../src/services/osConversationLog', () => ({
+  getNextTurnNumber: jest.fn().mockResolvedValue(0),
+  logTurn: jest.fn().mockResolvedValue(undefined),
+}))
 
-  return originalLoad.apply(this, arguments)
-}
+jest.mock('../src/services/neo4jRetrieval', () => ({
+  fusedSearch: jest.fn().mockResolvedValue([]),
+  getRecentHighPriorityNodes: jest.fn().mockResolvedValue([]),
+}))
 
-// Suppress the startup side effect (usageEnergy.refreshAllAccounts is called at module load)
+// ─── Module under test ────────────────────────────────────────────────────────
+
 const svc = require('../src/services/osSessionService')
-
-// Restore original loader after requiring the module under test
-Module._load = originalLoad
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-console.log('\nsdkAbortController — _abortActiveQuery\n')
+describe('SDK AbortController', () => {
+  // ── Abort propagation ──
 
-// ── Abort propagation ──
+  test('_abortActiveQuery calls abort(reason) on the stored AbortController', () => {
+    svc._resetAbortStateForTest()
 
-test('_abortActiveQuery calls abort(reason) on the stored AbortController', () => {
-  svc._resetAbortStateForTest()
+    let abortedReason = null
+    const mockAc = { abort: (r) => { abortedReason = r } }
+    svc._setActiveAbortForTest(mockAc)
+    svc._setActiveQueryForTest({ close: () => {} })
 
-  let abortedReason = null
-  const mockAc = { abort: (r) => { abortedReason = r } }
-  svc._setActiveAbortForTest(mockAc)
-  svc._setActiveQueryForTest({ close: () => {} })
+    svc._abortActiveQuery('tool_watchdog')
 
-  svc._abortActiveQuery('tool_watchdog')
+    expect(abortedReason).toBe('tool_watchdog')
+  })
 
-  assert.strictEqual(abortedReason, 'tool_watchdog', 'abort() must be called with the reason string')
-})
+  test('_abortActiveQuery nulls activeAbort and activeQuery after abort', () => {
+    svc._resetAbortStateForTest()
 
-test('_abortActiveQuery nulls activeAbort and activeQuery after abort', () => {
-  svc._resetAbortStateForTest()
+    svc._setActiveAbortForTest({ abort: () => {} })
+    svc._setActiveQueryForTest({ close: () => {} })
 
-  svc._setActiveAbortForTest({ abort: () => {} })
-  svc._setActiveQueryForTest({ close: () => {} })
+    svc._abortActiveQuery('inactivity_timeout')
 
-  svc._abortActiveQuery('inactivity_timeout')
+    expect(svc._isAbortInProgressForTest()).toBe(true)
+  })
 
-  // After abort: both handles should be null (verified via _isAbortInProgressForTest)
-  // We can't read activeAbort/activeQuery directly, but if abort fired,
-  // the _abortInProgress flag confirms the function completed.
-  assert.strictEqual(svc._isAbortInProgressForTest(), true, '_abortInProgress must be set for watchdog abort')
-})
+  test('_abortActiveQuery is safe when no AbortController is stored (noop path)', () => {
+    svc._resetAbortStateForTest()
+    svc._setActiveQueryForTest({ close: () => {} })
 
-test('_abortActiveQuery is safe when no AbortController is stored (noop path)', () => {
-  svc._resetAbortStateForTest()
-  svc._setActiveQueryForTest({ close: () => {} })
-  // No activeAbort set — should not throw
+    expect(() => svc._abortActiveQuery('manual_restart')).not.toThrow()
+  })
 
-  assert.doesNotThrow(() => svc._abortActiveQuery('manual_restart'))
-})
+  test('_abortActiveQuery is safe when neither query nor controller is stored', () => {
+    svc._resetAbortStateForTest()
 
-test('_abortActiveQuery is safe when neither query nor controller is stored', () => {
-  svc._resetAbortStateForTest()
+    expect(() => svc._abortActiveQuery('explicit_abort')).not.toThrow()
+  })
 
-  assert.doesNotThrow(() => svc._abortActiveQuery('explicit_abort'))
-})
+  // ── Grace timer scheduling ──
 
-// ── Grace timer scheduling ──
+  test('grace timer is scheduled for tool_watchdog reason', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is scheduled for tool_watchdog reason', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('tool_watchdog')
 
-  svc._abortActiveQuery('tool_watchdog')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).not.toBeNull()
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.ok(timer !== null, 'grace timer must be scheduled for tool_watchdog')
+    svc._resetAbortStateForTest()
+  })
 
-  svc._resetAbortStateForTest()
-})
+  test('grace timer is scheduled for inactivity_timeout reason', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is scheduled for inactivity_timeout reason', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('inactivity_timeout')
 
-  svc._abortActiveQuery('inactivity_timeout')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).not.toBeNull()
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.ok(timer !== null, 'grace timer must be scheduled for inactivity_timeout')
+    svc._resetAbortStateForTest()
+  })
 
-  svc._resetAbortStateForTest()
-})
+  test('grace timer is scheduled for turn_watchdog reason', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is scheduled for turn_watchdog reason', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('turn_watchdog')
 
-  svc._abortActiveQuery('turn_watchdog')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).not.toBeNull()
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.ok(timer !== null, 'grace timer must be scheduled for turn_watchdog')
+    svc._resetAbortStateForTest()
+  })
 
-  svc._resetAbortStateForTest()
-})
+  test('grace timer is scheduled for manual_restart reason', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is scheduled for manual_restart reason', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('manual_restart')
 
-  svc._abortActiveQuery('manual_restart')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).not.toBeNull()
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.ok(timer !== null, 'grace timer must be scheduled for manual_restart')
+    svc._resetAbortStateForTest()
+  })
 
-  svc._resetAbortStateForTest()
-})
+  test('grace timer is scheduled for explicit_abort reason', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is scheduled for explicit_abort reason', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('explicit_abort')
 
-  svc._abortActiveQuery('explicit_abort')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).not.toBeNull()
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.ok(timer !== null, 'grace timer must be scheduled for explicit_abort')
+    svc._resetAbortStateForTest()
+  })
 
-  svc._resetAbortStateForTest()
-})
+  // ── Grace timer NOT scheduled for turn-replacement reasons ──
 
-// ── Grace timer NOT scheduled for turn-replacement reasons ──
+  test('grace timer is NOT scheduled for new_turn_starting', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is NOT scheduled for new_turn_starting', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('new_turn_starting')
 
-  svc._abortActiveQuery('new_turn_starting')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).toBeNull()
+    expect(svc._isAbortInProgressForTest()).toBe(false)
+  })
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.strictEqual(timer, null, 'grace timer must NOT be scheduled for new_turn_starting')
-  assert.strictEqual(svc._isAbortInProgressForTest(), false, '_abortInProgress must NOT be set for new_turn_starting')
-})
+  test('grace timer is NOT scheduled for priority_preempt', () => {
+    svc._resetAbortStateForTest()
 
-test('grace timer is NOT scheduled for priority_preempt', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('priority_preempt')
 
-  svc._abortActiveQuery('priority_preempt')
+    const timer = svc._getAbortGraceTimerForTest()
+    expect(timer).toBeNull()
+    expect(svc._isAbortInProgressForTest()).toBe(false)
+  })
 
-  const timer = svc._getAbortGraceTimerForTest()
-  assert.strictEqual(timer, null, 'grace timer must NOT be scheduled for priority_preempt')
-  assert.strictEqual(svc._isAbortInProgressForTest(), false, '_abortInProgress must NOT be set for priority_preempt')
-})
+  // ── Grace timer cleared by _resetAbortStateForTest (simulating natural completion) ──
 
-// ── Grace timer cleared by _resetAbortStateForTest (simulating natural completion) ──
+  test('_resetAbortStateForTest clears grace timer (simulates natural turn completion)', () => {
+    svc._resetAbortStateForTest()
 
-test('_resetAbortStateForTest clears grace timer (simulates natural turn completion)', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('tool_watchdog')
 
-  svc._abortActiveQuery('tool_watchdog')
+    expect(svc._getAbortGraceTimerForTest()).not.toBeNull()
+    expect(svc._isAbortInProgressForTest()).toBe(true)
 
-  // Timer scheduled
-  assert.ok(svc._getAbortGraceTimerForTest() !== null, 'timer should be scheduled')
-  assert.strictEqual(svc._isAbortInProgressForTest(), true, '_abortInProgress should be true')
+    svc._resetAbortStateForTest()
 
-  // Natural completion path — resets state
-  svc._resetAbortStateForTest()
+    expect(svc._getAbortGraceTimerForTest()).toBeNull()
+    expect(svc._isAbortInProgressForTest()).toBe(false)
+  })
 
-  assert.strictEqual(svc._getAbortGraceTimerForTest(), null, 'timer should be cleared on natural completion')
-  assert.strictEqual(svc._isAbortInProgressForTest(), false, '_abortInProgress should be false after completion')
-})
+  test('second abort call replaces the previous grace timer without leaking', () => {
+    svc._resetAbortStateForTest()
 
-test('second abort call replaces the previous grace timer without leaking', () => {
-  svc._resetAbortStateForTest()
+    svc._abortActiveQuery('tool_watchdog')
+    const first = svc._getAbortGraceTimerForTest()
 
-  svc._abortActiveQuery('tool_watchdog')
-  const first = svc._getAbortGraceTimerForTest()
+    svc._abortActiveQuery('inactivity_timeout')
+    const second = svc._getAbortGraceTimerForTest()
 
-  svc._abortActiveQuery('inactivity_timeout')
-  const second = svc._getAbortGraceTimerForTest()
+    expect(second).not.toBeNull()
+    expect(first).not.toBe(second)
 
-  // Second timer should be a fresh handle, first should have been cleared
-  assert.ok(second !== null, 'second timer must be scheduled')
-  assert.notStrictEqual(first, second, 'each abort should create a new timer handle')
-
-  svc._resetAbortStateForTest()
-})
-
-// ─── Run ──────────────────────────────────────────────────────────────────────
-
-runAll().catch(err => {
-  console.error('Test runner error:', err)
-  process.exit(1)
+    svc._resetAbortStateForTest()
+  })
 })
