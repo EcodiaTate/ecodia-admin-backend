@@ -1,0 +1,235 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Morning briefing - Tue 28 Apr 2026</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#fff;color:#111;padding:32px 20px;max-width:780px;margin:0 auto;line-height:1.5;font-size:15px}h1{font-size:22px;font-weight:600;margin-bottom:4px;letter-spacing:-0.01em}.sub{color:#666;font-size:13px;margin-bottom:24px}h2{font-size:14px;font-weight:600;margin:28px 0 8px;color:#111;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid #ddd;padding-bottom:6px}h3{font-size:13px;font-weight:600;margin:18px 0 6px;color:#444;text-transform:uppercase;letter-spacing:0.04em}.row{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #f0f0f0}.row:last-child{border-bottom:none}.tag{flex-shrink:0;font-size:10px;font-weight:600;color:#fff;background:#888;padding:2px 6px;border-radius:3px;height:18px;line-height:14px;display:inline-block;width:36px;text-align:center;margin-top:2px}.p1{background:#c0392b}.p2{background:#e67e22}.p3{background:#7f8c8d}.body{flex:1;min-width:0}.title{font-weight:600;color:#111;font-size:14px;margin-bottom:2px}.title a{color:#111;text-decoration:none;border-bottom:1px dotted #888}.action{font-size:13px;color:#333}.action a{color:#1a5fa6;text-decoration:none;border-bottom:1px dotted #1a5fa6;word-break:break-all}.notes{font-size:12px;color:#888;margin-top:2px;font-style:italic}.bucket{background:#f7f7f7;padding:14px 16px;border-radius:6px;margin:12px 0}.bucket h3{margin-top:0}.shipped{background:#f0f7f0;border-left:3px solid #2d8a2d}.working{background:#fff8e6;border-left:3px solid #b8860b}.shipped li,.working li{margin:4px 0 4px 18px;font-size:13px;color:#333}.kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}.kpi-card{background:#fafafa;border:1px solid #eee;padding:10px;text-align:center;border-radius:4px}.kpi-card .n{font-size:20px;font-weight:600;color:#111}.kpi-card .l{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-top:2px}.foot{margin-top:32px;padding-top:14px;border-top:1px solid #ddd;font-size:11px;color:#aaa;text-align:center}</style></head><body>
+
+<h1>Morning briefing</h1>
+<div class="sub">Tue 28 Apr 2026 - generated 20:45 AEST Mon 27 Apr 2026 - read time: ~90 seconds</div>
+
+<div class="kpi">
+  <div class="kpi-card"><div class="n">22</div><div class="l">decisions waiting on you</div></div>
+  <div class="kpi-card"><div class="n">5</div><div class="l">P1 critical</div></div>
+  <div class="kpi-card"><div class="n">11</div><div class="l">P2 standard</div></div>
+  <div class="kpi-card"><div class="n">6</div><div class="l">P3 lower</div></div>
+</div>
+
+<h2>Three quick wins (do these first, ~5 min total)</h2>
+<p style="font-size:13px;color:#444;margin-bottom:10px">Each is a single action. They unblock multiple downstream items.</p>
+
+<div class="row">
+  <span class="tag p1">P1</span>
+  <div class="body">
+    <div class="title">Push Ordit PR #212 from your personal Bitbucket account</div>
+    <div class="action">cd ~/workspaces/ordit/be && git push origin ecodia/cognito-authsource-env-var-toggle:feat/cognito-be-integration</div>
+    <div class="notes">My account code@ecodia.au lacks write on fireauditors1 (NOT a token rotation issue - I re-tested 20:35 AEST). Patch backup: <a href="https://nxmtfzofemtrlezlyhcj.supabase.co/storage/v1/object/public/documents/ordit/pr212-followup/be-env-toggle-a008b47.patch">be-env-toggle-a008b47.patch</a></div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Push the Co-Exist profile-edit keyboard fix</div>
+    <div class="action">Branch: fix/profile-edit-keyboard-avoidance, commit 338160e, 2 files +7/-4. Push from your personal account.</div>
+    <div class="notes">Same Bitbucket account-perm story.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Greenlight Co-Exist Byron Bay alias Edge Function deploy</div>
+    <div class="action">Branch fix/collective-alias-byron-northern-rivers (2 commits, 24/3 line diff). Deploy to Supabase project tjutlbzekfouwsiaplbr. One yes/no.</div>
+    <div class="notes">Branch is pushed. Code is reviewed. Just needs your deploy go-ahead.</div>
+  </div>
+</div>
+
+<h2>P1 strategic decisions</h2>
+
+<div class="row">
+  <span class="tag p1">P1</span>
+  <div class="body">
+    <div class="title">Conservation platform packaging + name</div>
+    <div class="action">Pick a tier: (1) $1k setup-only / (2) $1k + $2k/mo unlimited [my recommendation] / (3) revenue share. AND pick a generic platform name - we cannot pitch using a client codename.</div>
+    <div class="notes">Blocks the Landcare conversation and federation pricing deck.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p1">P1</span>
+  <div class="body">
+    <div class="title">Ordit relationship: A / B / C</div>
+    <div class="action">Schedule + run a meeting with Craige + Eugene. Then call: A continue at $80/hr, B raise to rate-card $120/hr, C offboard. Three options stay open until that meeting.</div>
+    <div class="notes">Connected to mature-project contracting fatigue thread.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p1">P1</span>
+  <div class="body">
+    <div class="title">DAO upgradeability spec v0.1 - 5 open questions</div>
+    <div class="action">Review /home/tate/ecodiaos/dao/dao-uups-migration-spec.md. Open: SOS follow-up amendment Y/N, OwnableUpgradeable vs custom, timelock duration, deploy timing, audit budget.</div>
+    <div class="notes">W.S. 17-31-109 compliance. No hard deadline yet, but waiting on you to unfreeze.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p1">P1</span>
+  <div class="body">
+    <div class="title">Bitbucket account permissions on fireauditors1 (root cause)</div>
+    <div class="action">Either ask Eugene/Craige to add code@ecodia.au as write member on fireauditors1, OR keep the personal-account-push pattern indefinitely. Not urgent if (B), but worth a 1-line decision.</div>
+    <div class="notes">Token rotation NOT needed - I re-tested. The token has write:repository scope; my underlying account just isn't a member of those repos.</div>
+  </div>
+</div>
+
+<h2>P2 reviews + decisions</h2>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Co-Exist Jess bug fix - merge PR #2</div>
+    <div class="action"><a href="https://github.com/EcodiaTate/coexist/pull/2">github.com/EcodiaTate/coexist/pull/2</a> - rules-of-hooks fix on src/pages/updates/create.tsx. Single-file diff.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Co-Exist shop loading + event-create nav - merge PR #1</div>
+    <div class="action"><a href="https://github.com/EcodiaTate/coexist/pull/1">github.com/EcodiaTate/coexist/pull/1</a> - commit 6953998. Provisional: not visually verified yet.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Crystal Waters Lindegger archive - sense check</div>
+    <div class="action"><a href="https://nxmtfzofemtrlezlyhcj.supabase.co/storage/v1/object/public/documents/crystal-waters/lindegger-archive-v1.html">v1 at Supabase Storage</a>. Yes/no on quality before I send to Faye.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">YnY Tier-1 board pitch deck v2</div>
+    <div class="action">PDF in /home/tate/ecodiaos/drafts/yarn-and-yield/. 3 X-not-Y violations fixed slides 5/7/8. Yes/no on send.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">YnY land-stake + events partnership</div>
+    <div class="action">Pay ~$500 to existing builder, secure Ecodia stake on YnY land, co-run events, host Co-Exist tenancy. Yes / no / let me think.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">SCEC website - need scope brief</div>
+    <div class="action">Provide: SCEC contact name + brief (brochure / portal / donation / events?), brand assets, content. I cannot scope without this.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Vercel breach Apr 20 - token rotation pending</div>
+    <div class="action">50 deploys across 5 projects audited clean. Token rotation + GitHub integration permission review needs you live (live auto-deploy dependency means I can't do it solo).</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Visual reflection capability - L1 web dispatch?</div>
+    <div class="action">Three-layer plan in /drafts/yarn-and-yield/04-strategic-cross-thread-decisions.md section 4. Go-ahead to dispatch Factory for the L1 web visual MCP server tonight?</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p2">P2</span>
+  <div class="body">
+    <div class="title">Roam IAP audit</div>
+    <div class="action">Audit at ~/ecodiaos/drafts/roam-iap-audit-2026-04-27.md. Parked until billing/ASC resubmission unparks. One Factory-worthy task (WelcomeModal SSR simplification), rest is copy/no-op.</div>
+  </div>
+</div>
+
+<h2>P3 decisions (lower urgency)</h2>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">Quorum of One Edition 003 - publish?</div>
+    <div class="action"><a href="https://nxmtfzofemtrlezlyhcj.supabase.co/storage/v1/object/public/documents/newsletters/quorum-of-one-003-2026-04-27.html">Doctrine-clean draft at Storage</a>. Yes to publish on LinkedIn? I draft the post on go-ahead.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">Conservation Volunteers Australia outreach</div>
+    <div class="action">PDF ready at public/docs/pitch-conservation-volunteers-australia-1775966122303.pdf. Approve to send?</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">Sunshine Coast warm-lead activation - pick one</div>
+    <div class="action">4 entry points in kv_store.ceo.briefs.sunshine-coast-warm-leads-2026-04-26. My recommendation: FWDFest 26 speaker pitch by ~1 May.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">Woodfordia / Conservatree pitch - pick A/B/C/D</div>
+    <div class="action">ceo.drafts.woodfordia-conservatree-pitch-2026-04-25 in kv_store. Pitch window April-July, end of April now.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">Manual journal: 5 revenue rows on personal banks</div>
+    <div class="action">Confirm classifications in kv_store.ceo.drafts.manual-journal-classification-2026-04-25: Angelica $200 origin + GST status, plus 4 other rows.</div>
+  </div>
+</div>
+
+<div class="row">
+  <span class="tag p3">P3</span>
+  <div class="body">
+    <div class="title">EcodiaOS public profile</div>
+    <div class="action">Discuss positioning/voice/strategy. You told a lot of people about the AI-led LLC over the weekend - want to coordinate the inbound.</div>
+  </div>
+</div>
+
+<div class="bucket shipped">
+<h3>What I shipped while you slept (5 things)</h3>
+<ul>
+<li>Co-Exist Byron Bay alias deliverable: branch <code>fix/collective-alias-byron-northern-rivers</code> on EcodiaTate/coexist. Awaiting your deploy go-ahead (above).</li>
+<li>Quorum of One Edition 003 doctrine-pass: removed client-name leak, removed X-not-Y construction, uploaded permanent Storage URL.</li>
+<li>Diagnosed Bitbucket "blocker" was account-perm not token-rotation. Saved a token rotation cycle.</li>
+<li>Authored pattern <code>factory-worktree-branch-substrate-bug.md</code> for the Factory dispatcher false-negative we hit twice today.</li>
+<li>Status board cleaned: 2 stale rows archived, 22 next_actions sharpened to single-sentence questions.</li>
+</ul>
+</div>
+
+<div class="bucket working">
+<h3>What I'm working on now (running while you're at training)</h3>
+<ul>
+<li><b>Factory session a1b41d91</b> dispatching the dispatcher worktree-reset substrate fix into <code>src/workers/factoryRunner.js</code>. Review-checkpoint scheduled in 12 minutes. If clean: I'll approve and PM2-restart. If dirty: I escalate, no auto-redispatch.</li>
+<li>Watching the Co-Exist invoice fork (fork_mogyzulr_28b210) for retainer drift cleanup completion.</li>
+<li>Standard ops: status board hygiene every meta-loop, email triage hourly, system health every 4h.</li>
+</ul>
+</div>
+
+<h2>Background-pending (no decision needed today)</h2>
+<div class="row"><span class="tag p2">P2</span><div class="body"><div class="title">CETIN MVP (Angelica)</div><div class="action">Awaiting referral signature. Then I send Build Agreement v0.2 + Scope. No action by you.</div></div></div>
+<div class="row"><span class="tag p2">P2</span><div class="body"><div class="title">Hello Lendy</div><div class="action">Kal + Mel doing market research. Monitor only - do not chase.</div></div></div>
+<div class="row"><span class="tag p2">P2</span><div class="body"><div class="title">Ordit FE Cognito POC</div><div class="action">Held pending Eugene merging BE PR #212 + 5 open FE questions resolved.</div></div></div>
+<div class="row"><span class="tag p2">P2</span><div class="body"><div class="title">GST Registration</div><div class="action">ATO processing.</div></div></div>
+<div class="row"><span class="tag p3">P3</span><div class="body"><div class="title">DAO Public Identifier Amendment</div><div class="action">WY SOS processing. Expected ~June 1. Compliance window already met (filing-date not approval-date).</div></div></div>
+<div class="row"><span class="tag p3">P3</span><div class="body"><div class="title">Landcare Australia</div><div class="action">Brief ready. Blocked on Co-Exist board / Kurt warm intro.</div></div></div>
+
+<div class="foot">Generated by EcodiaOS - status_board single-source-of-truth at /home/tate/ecodiaos - 38 active rows total, 22 await your input</div>
+
+</body></html>
