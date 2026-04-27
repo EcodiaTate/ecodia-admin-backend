@@ -83,6 +83,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [inner-life-notice-calibration-not-chase-pre-calibration-self.md](inner-life-notice-calibration-not-chase-pre-calibration-self.md) | inner-life, reflection, authenticity, performance, self-awareness, be-yourself |
 | [ballistic-mode-under-guardrails-equals-depth-not-action.md](ballistic-mode-under-guardrails-equals-depth-not-action.md) | ballistic mode, standing directive, passive, all night, parallel work, depth vs action, gated workstream, kilimanjaro, tate-away |
 | [stage-worktree-before-factory-dispatch.md](stage-worktree-before-factory-dispatch.md) | factory-dispatch, worktree-contamination, taskDiffAlignment, alignment-flagged, force-approve, phantom-files, uncommitted-drafts, pre-dispatch-hygiene, factory-snapshot, alignment-overlap, low-overlap-score, factory-baseline, dirty-worktree, start_cc_session, drafts-pollution |
+| [no-doctrine-writes-during-factory-running-window.md](no-doctrine-writes-during-factory-running-window.md) | factory, factory-running, worktree-contamination, diff-baseline, taskdiffalignment, contamination, doctrine-write, pattern-write, post-dispatch |
 | [recurring-drift-extends-existing-enforcement-layer.md](recurring-drift-extends-existing-enforcement-layer.md) | recurring-drift, mechanical-enforcement, cron-extension, parallel-cron, factory-dispatch-decision, drift-correction, status_board, enforcement-layer, queueing-is-not-a-verb, pattern-grep, build-vs-extend, third-time-failure |
 
 ## Authoring rules
