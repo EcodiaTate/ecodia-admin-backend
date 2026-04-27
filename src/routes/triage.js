@@ -41,6 +41,30 @@ router.get('/logs', (req, res) => {
   res.json({ count: entries.length, entries })
 })
 
+// Trim pm2 jlist down to the fields a diagnostician actually reads.
+// Raw `pm2 jlist` dumps every env var and every pm2 axm metric for each
+// process — easily 10KB of noise per proc that obscures the signal
+// (status, restart count, memory, uptime).
+function _pm2Summary() {
+  const raw = _safeExec('pm2', ['jlist'])
+  if (raw.startsWith('[exec failed')) return raw
+  let parsed
+  try { parsed = JSON.parse(raw) } catch { return '[pm2 jlist parse failed]' }
+  if (!Array.isArray(parsed)) return '[pm2 jlist not an array]'
+  return parsed.map(p => ({
+    name: p.name,
+    pid: p.pid,
+    status: p.pm2_env?.status,
+    restarts: p.pm2_env?.restart_time,
+    unstable_restarts: p.pm2_env?.unstable_restarts,
+    uptime_ms: p.pm2_env?.pm_uptime ? Date.now() - p.pm2_env.pm_uptime : null,
+    memory_mb: p.monit?.memory ? Math.round(p.monit.memory / 1024 / 1024) : null,
+    cpu_pct: p.monit?.cpu,
+    exec_mode: p.pm2_env?.exec_mode,
+    node_version: p.pm2_env?.node_version,
+  }))
+}
+
 // One-shot snapshot of everything a diagnostician would want.
 router.get('/dump', async (_req, res, next) => {
   try {
@@ -53,7 +77,7 @@ router.get('/dump', async (_req, res, next) => {
         version: process.version,
       },
       logs: logger.getRecentLogs ? logger.getRecentLogs(300) : [],
-      pm2: _safeExec('pm2', ['jlist']).slice(0, 10000),
+      pm2: _pm2Summary(),
       disk: _safeExec('df', ['-h', '/home']),
       memFree: _safeExec('free', ['-h']),
     }
@@ -66,12 +90,17 @@ router.get('/dump', async (_req, res, next) => {
       snapshot.osSession = { error: err.message }
     }
 
-    // Last 20 app_errors rows (if DB reachable).
+    // Last 20 actual problems from app_errors (warn+ only).
+    // The table stores every level — migrations, neo4j-init, debug breadcrumbs
+    // — because it's the "session sees its own failures" surface for the OS.
+    // For human triage we only care about warn+ so real errors aren't buried
+    // in migration chatter.
     try {
       const db = require('../config/db')
       const rows = await db`
         SELECT level, message, module, path, method, created_at
         FROM app_errors
+        WHERE level IN ('error', 'warn')
         ORDER BY created_at DESC
         LIMIT 20
       `.catch(() => null)
@@ -80,10 +109,14 @@ router.get('/dump', async (_req, res, next) => {
       snapshot.appErrors = { error: err.message }
     }
 
-    // Rescue state, if rescue is up.
+    // Rescue state — use the probing variant so a fresh api process that
+    // booted after rescue's initial `ready` broadcast still reports rescue
+    // as alive. Falls back to plain getStatus if probing isn't available.
     try {
       const rescue = require('../services/rescueService')
-      snapshot.rescue = rescue.getStatus()
+      snapshot.rescue = rescue.getStatusWithProbe
+        ? await rescue.getStatusWithProbe()
+        : rescue.getStatus()
     } catch (err) {
       snapshot.rescue = { error: err.message }
     }

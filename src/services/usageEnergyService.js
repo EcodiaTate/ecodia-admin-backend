@@ -152,7 +152,18 @@ function _getConfigDir(account) {
   return process.env.CLAUDE_CONFIG_DIR_1 || path.join(home, '.claude')
 }
 
-function _readOAuthToken(configDir) {
+function _readOAuthToken(configDir, account) {
+  // Long-lived env-var tokens (from `claude setup-token`) take precedence
+  // over file-based credentials. The file-based path is legacy; if tokens
+  // are only in env vars, checking files returns null and spams "no OAuth
+  // token found" warnings even though the OS is happily using the env token.
+  if (account === 'claude_max' && process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE) {
+    return process.env.CLAUDE_CODE_OAUTH_TOKEN_TATE
+  }
+  if (account === 'claude_max_2' && process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE) {
+    return process.env.CLAUDE_CODE_OAUTH_TOKEN_CODE
+  }
+
   if (!configDir) return null
 
   const credCandidates = [
@@ -204,7 +215,7 @@ async function _doQuotaCheck(account) {
       return
     }
 
-    const oauthToken = _readOAuthToken(configDir)
+    const oauthToken = _readOAuthToken(configDir, account)
     if (!oauthToken) {
       logger.warn('quota-check: no OAuth token found', { account, configDir })
       return
