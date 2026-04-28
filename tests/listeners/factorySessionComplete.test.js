@@ -22,7 +22,7 @@ const makeEvent = (overrides = {}) => ({
     row: {
       id: 'session-uuid-1',
       status: 'complete',
-      pipeline_stage: 'deployed',
+      pipeline_stage: 'awaiting_review',
     },
     ts: Date.now() / 1000,
     ...overrides,
@@ -113,6 +113,53 @@ describe('factorySessionComplete', () => {
       threw = true
     }
     expect(threw).toBe(false)
+  })
+
+  // ---- stage allowlist ----
+
+  test('relevanceFilter: returns false for pipeline_stage=testing (post-approval churn)', () => {
+    const event = makeEvent({ row: { id: 'stage-testing', status: 'complete', pipeline_stage: 'testing' } })
+    expect(listener.relevanceFilter(event)).toBe(false)
+  })
+
+  test('relevanceFilter: returns false for pipeline_stage=deploying (post-approval churn)', () => {
+    const event = makeEvent({ row: { id: 'stage-deploying', status: 'complete', pipeline_stage: 'deploying' } })
+    expect(listener.relevanceFilter(event)).toBe(false)
+  })
+
+  test('relevanceFilter: returns false for pipeline_stage=executing (post-approval churn)', () => {
+    const event = makeEvent({ row: { id: 'stage-executing', status: 'complete', pipeline_stage: 'executing' } })
+    expect(listener.relevanceFilter(event)).toBe(false)
+  })
+
+  test('relevanceFilter: returns true for pipeline_stage=awaiting_review', () => {
+    const event = makeEvent({ row: { id: 'stage-awaiting-review', status: 'complete', pipeline_stage: 'awaiting_review' } })
+    expect(listener.relevanceFilter(event)).toBe(true)
+  })
+
+  test('relevanceFilter: returns true for pipeline_stage=complete', () => {
+    const event = makeEvent({ row: { id: 'stage-complete', status: 'complete', pipeline_stage: 'complete' } })
+    expect(listener.relevanceFilter(event)).toBe(true)
+  })
+
+  // ---- dedupe ----
+
+  test('dedupe: same sessionId within 60s is skipped on second call', () => {
+    const event = makeEvent({ row: { id: 'dedup-within-60s', status: 'complete', pipeline_stage: 'awaiting_review' } })
+    expect(listener.relevanceFilter(event)).toBe(true)
+    expect(listener.relevanceFilter(event)).toBe(false)
+  })
+
+  test('dedupe: same sessionId past 60s fires again', () => {
+    jest.useFakeTimers()
+    try {
+      const event = makeEvent({ row: { id: 'dedup-past-60s', status: 'complete', pipeline_stage: 'awaiting_review' } })
+      expect(listener.relevanceFilter(event)).toBe(true)
+      jest.advanceTimersByTime(61 * 1000)
+      expect(listener.relevanceFilter(event)).toBe(true)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   // ---- module shape ----
