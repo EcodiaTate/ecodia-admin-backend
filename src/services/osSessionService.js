@@ -890,10 +890,10 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
     let searchOpts
     if (useFused) {
       searchFn = neo4jRetrieval.fusedSearch
-      searchOpts = { limit: 5 }
+      searchOpts = { limit: 3 }
     } else if (useNeighborhood) {
       searchFn = neo4jRetrieval.semanticSearchWithNeighborhood
-      searchOpts = { limit: 3 }
+      searchOpts = { limit: 3, maxNeighboursPerHit: 2 }
     } else {
       searchFn = neo4jRetrieval.semanticSearch
       searchOpts = { limit: 3 }
@@ -917,7 +917,7 @@ async function _injectRelevantMemory(userMessage, lastAssistantTail) {
     if (!results || results.length === 0) return null
 
     const lines = results.map((r, i) => {
-      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim()}` : ''
+      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim().slice(0, 200)}` : ''
       const sig = r.signals
         ? ` (sig: v=${r.signals.vector != null ? r.signals.vector.toFixed(2) : '-'}, k=${r.signals.keyword ?? '-'})`
         : ''
@@ -950,7 +950,7 @@ async function _injectRecentDoctrine() {
   try {
     const t0 = Date.now()
     const results = await Promise.race([
-      neo4jRetrieval.getRecentHighPriorityNodes({ days: 14, limit: 5 }),
+      neo4jRetrieval.getRecentHighPriorityNodes({ days: 14, limit: 3 }),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('neo4j doctrine timeout')), 2000)
       ),
@@ -963,7 +963,7 @@ async function _injectRecentDoctrine() {
     const lines = results.map((r, i) => {
       const when = r.date ? r.date.slice(0, 10) : ''
       const prio = r.priority ? ` [${r.priority}]` : ''
-      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim().slice(0, 280)}` : ''
+      const desc = r.description ? `: ${r.description.replace(/\s+/g, ' ').trim().slice(0, 200)}` : ''
       return `${i + 1}. ${when} ${r.label}${prio} ${r.name}${desc}`
     })
     return `<recent_doctrine>\n${lines.join('\n')}\n</recent_doctrine>`
@@ -1605,6 +1605,60 @@ async function _sendMessageImpl(content, opts = {}) {
   }
   try { _doctrineBlock = await _doctrineBlockPromise } catch (err) {
     logger.debug('OS Session: doctrine injection failed', { error: err.message })
+  }
+  // Dedup: a recent high-priority Decision can surface in BOTH _doctrineBlock
+  // and _memoryBlock when the current turn is semantically similar to it. The
+  // doctrine block is unconditional and ordered by recency; the memory block
+  // is by relevance. When the same `[label] name` head appears in both, drop
+  // the memory copy. This is string-only manipulation - we don't restructure
+  // the upstream injectors. If filtering empties the memory block entirely,
+  // null it so it isn't injected at all.
+  if (_doctrineBlock && _memoryBlock) {
+    const headKey = (s) => {
+      const m = s.match(/^\d+\.\s+(?:[\d-]+\s+)?\[([^\]]+)\][^\s]*\s+(.+?)(?:\s*:|\s*$)/)
+      if (!m) return null
+      return `${m[1]}|${m[2].trim()}`
+    }
+    const docKeys = new Set()
+    for (const line of _doctrineBlock.split('\n')) {
+      const k = headKey(line)
+      if (k) docKeys.add(k)
+    }
+    if (docKeys.size > 0) {
+      const memLines = _memoryBlock.split('\n')
+      const kept = []
+      let inSkip = false
+      for (const line of memLines) {
+        if (line.startsWith('<relevant_memory>') || line.startsWith('</relevant_memory>')) {
+          kept.push(line)
+          inSkip = false
+          continue
+        }
+        if (/^\d+\.\s+\[/.test(line)) {
+          const k = headKey(line)
+          inSkip = (k && docKeys.has(k))
+          if (!inSkip) kept.push(line)
+        } else {
+          if (!inSkip) kept.push(line)
+        }
+      }
+      // Renumber kept item lines (1..N)
+      let n = 0
+      const renumbered = kept.map(line => {
+        const numMatch = line.match(/^(\d+)\.\s+\[/)
+        if (numMatch) {
+          n += 1
+          return line.replace(/^\d+\./, `${n}.`)
+        }
+        return line
+      })
+      // If only the wrapper tags remain (n === 0), null the block.
+      if (n === 0) {
+        _memoryBlock = null
+      } else {
+        _memoryBlock = renumbered.join('\n')
+      }
+    }
   }
   if (_memoryBlock) {
     continuityParts.splice(1, 0, _memoryBlock)

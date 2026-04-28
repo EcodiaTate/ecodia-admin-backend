@@ -712,15 +712,15 @@ async function forksRollup({ includeRecentDone = true } = {}) {
     } catch { recent = [] }
     if (!recent.length) return null
     const lines = recent.map(r => {
-      const head = `${r.fork_id} [${r.status}] brief="${(r.brief || '').slice(0, 80)}"`
-      const tail = r.next_step ? `  next_step: ${r.next_step}` : (r.result ? `  result: ${(r.result || '').slice(0, 120)}` : '')
+      const head = `${r.fork_id} [${r.status}] brief="${(r.brief || '').slice(0, 60)}"`
+      const tail = r.next_step ? `  next_step: ${r.next_step}` : ''
       return `- ${head}${tail ? '\n' + tail : ''}`
     })
     return `<forks_rollup>\nNo active forks. Recently finished:\n${lines.join('\n')}\n</forks_rollup>`
   }
   const lines = live.map(f => {
     const ageSec = f.started_at ? Math.round((Date.now() - new Date(f.started_at).getTime()) / 1000) : 0
-    return `- ${f.fork_id} [${f.status}] (${ageSec}s, ${f.tool_calls} tools) brief="${(f.brief || '').slice(0, 80)}"\n    position: ${(f.position || '').slice(0, 160)}`
+    return `- ${f.fork_id} [${f.status}] (${ageSec}s, ${f.tool_calls} tools) brief="${(f.brief || '').slice(0, 60)}"\n    position: ${(f.position || '').slice(0, 100)}`
   })
   return `<forks_rollup>\nActive forks (${live.length}/${HARD_FORK_CAP}):\n${lines.join('\n')}\n</forks_rollup>`
 }
