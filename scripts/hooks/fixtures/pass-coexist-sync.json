@@ -1,0 +1,6 @@
+{
+  "tool_name": "mcp__forks__spawn_fork",
+  "tool_input": {
+    "brief": "BRIEF (fork fork_moj9aqod_05ffb0, context_mode=brief):\n\nGoal: Definitive fix for Coexist Excel sync - migrate any remaining unmigrated forms and ensure jobid 9 and 10 fire on schedule with the documented invariants intact.\n\n**Architectural invariant:** Coexist is a multi-tenant platform. forms_migrated_at is the canonical migration cursor. Once forms_migrated_at is set on a row, that row is authoritative and the legacy Excel snapshot is read-only. Every row has tenant_id and is RLS-scoped. jobid 9 (forms migration) and jobid 10 (post-migration verification) are tenant-aware and must NEVER cross-tenant.\n\nAcceptance criteria:\n1. All forms with forms_migrated_at IS NULL get migrated under their correct tenant_id.\n2. RLS policy on forms still enforced; no tenant-A admin can see tenant-B rows post-migration.\n3. jobid 9 and jobid 10 run to completion in staging; poll Vercel READY status after the deploy of any code changes before declaring done.\n4. Migration is idempotent - re-running does not duplicate or corrupt rows.\n\nDoctrine pointers:\n- ~/ecodiaos/patterns/coexist-excel-sync-invariants.md\n- ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md\n- ~/ecodiaos/clients/coexist.md\n\nBranch: fix/excel-sync-definitive-2026-04-29."
+  }
+}

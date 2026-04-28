@@ -1,0 +1,6 @@
+{
+  "tool_name": "mcp__forks__spawn_fork",
+  "tool_input": {
+    "brief": "BRIEF (fork fork_moj9fiex_f0ed8b, context_mode=brief):\n\n**Architecture invariant:** ecodiaos-backend is the EcodiaOS conductor service running on the VPS under PM2 (NOT Vercel-linked, NOT a client codebase). The brief-consistency-check.sh hook is a pre-tool-use hook called by the SDK harness BEFORE every spawn_fork to flag briefs that lack key doctrine markers.\n\nGoal: tune the brief-consistency-check.sh hook to eliminate false positives.\n\nThis fork is doctrine-clean: ecodiaos-internal scope, no client codebase touched, no PM2 restart required."
+  }
+}
