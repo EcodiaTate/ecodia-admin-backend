@@ -66,7 +66,11 @@ fi
 
 # --- Check 3: Vercel-linked codebase touched without DEPLOY VERIFY section ---
 if echo "$brief" | grep -qiE '(\bvercel\b|frontend|ecodiaos-frontend|roam-frontend|coexist|chambers|ordit-frontend|next\.js|nextjs)'; then
-  if ! echo "$brief" | grep -qE 'DEPLOY[ _-]?VERIFY'; then
+  # Negation guard: skip Check 3 if the brief explicitly states a non-Vercel deployment posture.
+  # Prevents false-positive on briefs that mention "Vercel" only to negate it.
+  if echo "$brief" | grep -qiE '(PM2[ -]?managed|not Vercel[ -]?linked|VPS[ -]?only|no Vercel deploy|ecodiaos backend is PM2)'; then
+    : # explicitly non-Vercel - skip Check 3
+  elif ! echo "$brief" | grep -qE 'DEPLOY[ _-]?VERIFY'; then
     warnings+=("[BRIEF-CHECK WARN] anti-pattern: vercel-linked-no-deploy-verify in ${tool_name} - brief touches a Vercel-linked codebase but lacks a DEPLOY VERIFY section. The fork is not done at git push - it must poll Vercel until READY. See ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md")
   fi
 fi
