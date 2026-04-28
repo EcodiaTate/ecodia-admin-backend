@@ -17,6 +17,18 @@ async function startListenerSubsystem() {
     const listeners = registry.loadListeners()
     registry.registerAll()
 
+    // Call start() on any listener that exports it (e.g. timer-based listeners).
+    // Failures are non-fatal - the rest of the subsystem continues.
+    for (const listener of listeners) {
+      if (typeof listener.start === 'function') {
+        try {
+          await listener.start()
+        } catch (startErr) {
+          logger.warn(`listener subsystem: start() failed for ${listener.name} (non-fatal)`, { error: startErr.message })
+        }
+      }
+    }
+
     // Start the DB event bridge - connects via LISTEN/NOTIFY and routes DB
     // state changes into the in-process listener registry. Failure is
     // non-fatal: the listener subsystem continues without the db bridge.
