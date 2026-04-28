@@ -88,6 +88,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [positive-synthesis-pattern-authoring.md](positive-synthesis-pattern-authoring.md) | positive-synthesis, pattern-authoring, sunday-synthesis, doctrine-cadence, generalisation, weekly-reflection, claude-md-reflection, inner-life |
 | [multi-tenant-brief-must-enumerate-customisation-surface.md](multi-tenant-brief-must-enumerate-customisation-surface.md) | multi-tenant, multitenant, platform, tenant, chambers, federation, white-label, saas, brand, branding, theming, customisation, customization, per-tenant, brief, dispatch, fork, factory, scope, scope-discipline |
 | [public-site-wedge-must-surface-in-v1.md](public-site-wedge-must-surface-in-v1.md) | marketing-site, marketing, public-site, landing-page, vercel, brand, attribution, ecodia, ecodia-attribution, wedge, web-build, frontend, factory-dispatch, copy, generic-site, bare-site, piercing-uniquity, site-rebuild, chambers-platform-site, ecodiasite, ecodia-site, public-web, sales-site, marketing-copy, hero-copy, b2b-saas, scaffold |
+| [check-pre-kill-commits-before-redispatch.md](check-pre-kill-commits-before-redispatch.md) | pm2_restart, factory-redispatch, killed-session, cleanup-on-shutdown, cc_cli_session_id, pre-kill-commit, phantom-redispatch, no-changes, empty-diff, factory-no-op, redispatch, branch-already-shipped, force-approve, factory-metadata-trust-filesystem |
 
 ## Authoring rules
 
