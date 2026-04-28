@@ -1,0 +1,6 @@
+{
+  "tool_name": "mcp__forks__spawn_fork",
+  "tool_input": {
+    "brief": "Goal: build out the Acme platform's reporting page. Add charts for monthly active users, revenue by region, and churn. Use Recharts. Ship it to the staging URL. Make sure the export-to-CSV button works on each chart. Tests are not required for this iteration. Should take an afternoon."
+  }
+}
