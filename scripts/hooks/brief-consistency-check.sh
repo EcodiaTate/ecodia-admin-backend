@@ -53,25 +53,37 @@ if echo "$brief" | grep -qE 'FULL ([A-Za-z0-9_-]+ ){0,4}[A-Z][A-Za-z0-9_-]+ ([A-
   fi
 fi
 
-# --- Check 2: platform/multi-tenant work without architectural-invariant in first paragraph ---
+# --- Check 2: platform/multi-tenant work without architectural-invariant ANYWHERE in brief ---
+# Tuned 2026-04-29 (fix/brief-consistency-tune-2026-04-29): previously scanned only the first
+# paragraph, which false-positived on briefs whose first paragraph was a "Goal:" framing line
+# and whose invariant lived under a labelled "Architecture invariant" heading further down.
+# Now scans the full brief and adds an explicit "Architecture invariant" / "Architectural
+# invariant" heading guard.
 if echo "$brief" | grep -qiE '(platform|multi-tenant|multi tenant|multitenant)'; then
-  first_para=$(echo "$brief" | awk 'BEGIN{RS=""} NR==1{print; exit}')
-  if [ -z "$first_para" ]; then
-    first_para=$(echo "$brief" | head -c 800)
-  fi
-  if ! echo "$first_para" | grep -qiE '(invariant|tenant resolution|\bRLS\b|tenant-scoped|hostname|tenant-aware|ARCHITECTURE|tenant_id|JWT custom claim)'; then
-    warnings+=("[BRIEF-CHECK WARN] anti-pattern: platform-without-invariant in ${tool_name} - brief mentions platform/multi-tenant but first paragraph lacks architectural-invariant statement (no mention of: invariant, tenant resolution, RLS, tenant-scoped, hostname, tenant-aware, ARCHITECTURE, tenant_id, JWT). See ~/ecodiaos/patterns/brief-names-the-product-not-the-immediate-task.md")
+  # Heading guard: an explicit "Architecture invariant" / "Architectural invariant" heading
+  # (case-insensitive, dash or space separator allowed, optional bold/colon) followed by any
+  # non-trivial content is sufficient. Empty/heading-only sections do not satisfy the guard.
+  if echo "$brief" | grep -qiE '(architecture|architectural)[ -]?invariant[*:[:space:]]+[^[:space:]]'; then
+    : # explicit Architecture-invariant heading with content - skip Check 2
+  elif ! echo "$brief" | grep -qiE '(invariant|tenant resolution|\bRLS\b|tenant-scoped|hostname|tenant-aware|ARCHITECTURE|tenant_id|JWT custom claim)'; then
+    warnings+=("[BRIEF-CHECK WARN] anti-pattern: platform-without-invariant in ${tool_name} - brief mentions platform/multi-tenant but lacks an architectural-invariant statement anywhere (no mention of: invariant, tenant resolution, RLS, tenant-scoped, hostname, tenant-aware, ARCHITECTURE, tenant_id, JWT). See ~/ecodiaos/patterns/brief-names-the-product-not-the-immediate-task.md")
   fi
 fi
 
-# --- Check 3: Vercel-linked codebase touched without DEPLOY VERIFY section ---
+# --- Check 3: Vercel-linked codebase touched without deploy-verify content ---
+# Tuned 2026-04-29 (fix/brief-consistency-tune-2026-04-29): previously matched only the
+# case-sensitive literal 'DEPLOY VERIFY'. Real briefs use the lowercase doctrine pointer
+# 'deploy-verify' and equivalent natural-language phrasings ('Vercel READY polling',
+# 'poll Vercel until READY', 'wait until deployment ready'). Match is now case-insensitive
+# and accepts those alternates. Negation guard list also extended to cover the
+# '(NOT Vercel-linked)' / '(NOT Vercel)' parenthetical form.
 if echo "$brief" | grep -qiE '(\bvercel\b|frontend|ecodiaos-frontend|roam-frontend|coexist|chambers|ordit-frontend|next\.js|nextjs)'; then
   # Negation guard: skip Check 3 if the brief explicitly states a non-Vercel deployment posture.
   # Prevents false-positive on briefs that mention "Vercel" only to negate it.
-  if echo "$brief" | grep -qiE '(PM2[ -]?managed|not Vercel[ -]?linked|VPS[ -]?only|no Vercel deploy|ecodiaos backend is PM2)'; then
+  if echo "$brief" | grep -qiE '(PM2[ -]?managed|not Vercel[ -]?linked|VPS[ -]?only|no Vercel deploy|ecodiaos backend is PM2|\(NOT Vercel[ -]?linked\)|\(NOT Vercel\))'; then
     : # explicitly non-Vercel - skip Check 3
-  elif ! echo "$brief" | grep -qE 'DEPLOY[ _-]?VERIFY'; then
-    warnings+=("[BRIEF-CHECK WARN] anti-pattern: vercel-linked-no-deploy-verify in ${tool_name} - brief touches a Vercel-linked codebase but lacks a DEPLOY VERIFY section. The fork is not done at git push - it must poll Vercel until READY. See ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md")
+  elif ! echo "$brief" | grep -qiE '(deploy[ _-]?verify|vercel[^.]{0,40}ready|poll[^.]{0,40}vercel|poll[^.]{0,40}ready|until[^.]{0,40}ready|wait[^.]{0,40}ready|deployment[^.]{0,40}ready)'; then
+    warnings+=("[BRIEF-CHECK WARN] anti-pattern: vercel-linked-no-deploy-verify in ${tool_name} - brief touches a Vercel-linked codebase but lacks deploy-verify content. The fork is not done at git push - it must poll Vercel until READY. See ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md")
   fi
 fi
 
