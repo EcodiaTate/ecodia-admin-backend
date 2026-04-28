@@ -72,8 +72,30 @@ function ageSuffix(queuedAt) {
 
 // Numbered list line for delivered/drained queues. Shared so the two callers
 // (deliverPending, drainIntoDirectMessage) render identical output.
+// Tate-sourced rows render unlabelled (default voice). Anything else (e.g.
+// 'fork:<id>') gets a [source] prefix so the OS session can tell who spoke.
 function formatQueuedItem(row, index) {
-  return `${index + 1}. ${row.body} (${ageSuffix(row.queued_at)})`
+  const src = row.source || 'tate'
+  if (src === 'tate') {
+    return `${index + 1}. ${row.body} (${ageSuffix(row.queued_at)})`
+  }
+  return `${index + 1}. [${src}] ${row.body} (${ageSuffix(row.queued_at)})`
+}
+
+// Classify a batch of pending rows by source so the intro line can reflect
+// whether this is Tate, forks, or a mix. Returns 'tate' | 'fork' | 'mixed'.
+function classifyOrigin(pending) {
+  let sawTate = false
+  let sawFork = false
+  for (const row of pending) {
+    const src = row.source || 'tate'
+    if (src.startsWith('fork:')) sawFork = true
+    else if (src === 'tate') sawTate = true
+    else sawTate = true // unknown sources default to tate-bucket so we don't drop them
+  }
+  if (sawTate && sawFork) return 'mixed'
+  if (sawFork) return 'fork'
+  return 'tate'
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -142,9 +164,25 @@ async function deliverPending({ summary = null, turn_id = null, ids = null } = {
 
   if (pending.length === 0) return { delivered: 0 }
 
-  const intro = summary
-    ? `[Queued by Tate, delivering now. I just finished: ${summary}]\n\n`
-    : '[Queued messages from Tate, delivering now]\n\n'
+  const origin = classifyOrigin(pending)
+  let intro
+  if (summary) {
+    if (origin === 'fork') {
+      intro = `[Queued fork reports, delivering now. I just finished: ${summary}]\n\n`
+    } else if (origin === 'mixed') {
+      intro = `[Queued inbox (Tate + forks), delivering now. I just finished: ${summary}]\n\n`
+    } else {
+      intro = `[Queued by Tate, delivering now. I just finished: ${summary}]\n\n`
+    }
+  } else {
+    if (origin === 'fork') {
+      intro = '[Queued fork reports, delivering now]\n\n'
+    } else if (origin === 'mixed') {
+      intro = '[Queued inbox (Tate + forks), delivering now]\n\n'
+    } else {
+      intro = '[Queued messages from Tate, delivering now]\n\n'
+    }
+  }
 
   const items = pending.map(formatQueuedItem)
   const bodies = pending.map(r => r.body)
