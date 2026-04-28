@@ -13,7 +13,7 @@
     "testEnvironment": "node"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.92",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.121",
     "@anthropic-ai/sdk": "^0.80.0",
     "@supabase/supabase-js": "^2.49.0",
     "axios": "^1.7.0",
