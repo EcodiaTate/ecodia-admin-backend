@@ -183,6 +183,16 @@ async function processThread(gmail, inbox, threadId) {
 
   const client = await findClientByEmail(fromEmail)
 
+  // ─── Listener producer: emit email_events rows for inbound messages ──
+  // Wires the emailArrival listener (subscribesTo db:event on email_events INSERT)
+  // to actual Gmail traffic. Idempotency: ON CONFLICT (gmail_message_id) DO NOTHING
+  // means the AFTER INSERT trigger only fires for genuinely-new messages, so the
+  // listener will only fire once per message even if processThread is re-run on
+  // every poll. SENT messages are skipped (no need to wake the OS for our own outbound).
+  // Hybrid mode: this runs side-by-side with the existing cron-driven triagePendingEmails
+  // path. Cron is decommissioned in a later wave.
+  await _emitEmailEvents({ messages, inbox, fallbackFrom: fromEmail, fallbackSubject: subject, clientId: client?.id || null })
+
   const [existing] = await db`SELECT id FROM email_threads WHERE gmail_thread_id = ${threadId}`
 
   if (existing) {
@@ -697,6 +707,49 @@ async function sendReply(threadId, body) {
 
   await db`UPDATE email_threads SET status = 'replied', updated_at = now() WHERE gmail_thread_id = ${threadId}`
   logger.info(`Reply sent from ${inbox} to ${thread.from_email}`)
+}
+
+// ─── Listener Producer ──────────────────────────────────────────────────────
+// Insert one email_events row per inbound message. Idempotent via UNIQUE
+// constraint on gmail_message_id - ON CONFLICT DO NOTHING means the trigger
+// (AFTER INSERT) fires only for genuinely-new rows, so the emailArrival
+// listener wakes the OS exactly once per email arrival.
+async function _emitEmailEvents({ messages, inbox, fallbackFrom, fallbackSubject, clientId }) {
+  if (!messages || messages.length === 0) return
+  for (const msg of messages) {
+    try {
+      const labels = msg.labelIds || []
+      // Skip outbound (sent), drafts, chat, spam, trash - we only wake the OS
+      // for genuinely-new inbound traffic that needs triage.
+      if (labels.includes('SENT') || labels.includes('DRAFT') || labels.includes('CHAT')) continue
+      if (labels.includes('TRASH') || labels.includes('SPAM')) continue
+
+      const msgHeaders = msg.payload?.headers || []
+      const getMsgHeader = (n) => msgHeaders.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || ''
+      const fromRaw = getMsgHeader('From')
+      const fromEmail = fromRaw.match(/<(.+)>/)?.[1] || fromRaw || fallbackFrom || 'unknown@unknown'
+      const subject = getMsgHeader('Subject') || fallbackSubject || ''
+      const bodyPreview = (msg.snippet || '').slice(0, 500)
+      const receivedAt = msg.internalDate ? new Date(parseInt(msg.internalDate)) : new Date()
+
+      // category is NOT NULL - set 'pending' to indicate the row hasn't been classified
+      // by triage yet. Downstream consumers (listener -> OS triage) update this later.
+      await db`
+        INSERT INTO email_events (
+          inbox, gmail_message_id, from_address, to_address,
+          subject, body_preview, received_at, category, client_id, processed
+        ) VALUES (
+          ${inbox}, ${msg.id}, ${fromEmail}, ${inbox},
+          ${subject}, ${bodyPreview}, ${receivedAt}, 'pending', ${clientId}, false
+        )
+        ON CONFLICT (gmail_message_id) DO NOTHING
+      `
+    } catch (err) {
+      // Producer failures are non-blocking - the cron-driven triagePendingEmails
+      // path still handles the email even if the listener wake fails.
+      logger.warn(`email_events producer: insert failed for msg ${msg?.id}`, { error: err.message })
+    }
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
