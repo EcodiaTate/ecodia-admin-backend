@@ -168,6 +168,21 @@ Auto-deploys from main branch. Push to GitHub, Vercel handles the rest.
 ## 2026-04-23 21:50 AEST - SKIP_LINT=1 bypass on fix/mobile-padding-audit push
 Reason: main had 184 pre-existing lint errors (not introduced by this PR). Padding commit 9bf9003 touched 20 layout/spacing files only, no code logic. Build green, 158 tests green, only lint skipped via documented targeted flag. Branch pushed at 11:50 UTC. Separate cleanup PR needed to resolve main's lint debt before SKIP_LINT can be retired.
 
+## 2026-04-28: Admin account provisioned for paulplakkaljohn@coexistaus.org
+Created via Supabase admin API per Tate directive 2026-04-28 12:39 AEST. auth.users id `7c003bc2-36d0-45a6-938e-82e981c2e6e6`. profiles.role = `admin` (one of admin / manager / leader / national_leader / co_leader / assist_leader / participant - the public.user_role enum; there is no `super_admin` or `coordinator`). No staff_roles row added (granular permissions can be layered if Paul ever needs scoped controls; admin role itself appears to bypass them based on Tate's setup). No email sent (Path B - direct create + temp password). Credentials in kv_store `coexist.temp_credentials.paul_plakkaljohn` (7-day TTL note, Paul to change on first login). Delivered to Tate via fork report - per zero unilateral client contact rule, Tate forwards. Fork fork_moi0r0fh_ed7f7f.
+
+Note: a related Google-signed Paul account already exists (`paulpplakkal@gmail.com`, auth id `31f4ac81-11a8-432c-9aa0-687914742a73`, role=participant from 2026-04-27) - this is Paul's personal Gmail. The new `@coexistaus.org` account is the work-email admin login Tate asked for.
+
+## Account-creation procedure (codified for next time)
+1. Check existence: query `auth.users` for the email via service_role admin API or direct DB. Brief domain `@coexistaus.org` = staff (bulk batch on 2026-03-30 seeded core team).
+2. Path A (cleanest if email is acceptable): `POST /auth/v1/admin/generate_link` type=invite. WARNING: this sends an email from the Supabase auth project. Do NOT use unless Tate has explicitly authorised contact.
+3. Path B (default for client-staff onboarding under no-client-contact rule): `POST /auth/v1/admin/users` with `email`, `password`, `email_confirm: true`, `user_metadata`. No email is sent. Returns auth_user_id.
+4. UPDATE the auto-created `public.profiles` row: set `email`, `first_name`, `last_name`, `display_name`, and `role` (enum: admin/manager/leader/national_leader/co_leader/assist_leader/participant). Default for client-org staff = `admin`.
+5. Optional `staff_roles` row for granular permissions: `{manage_users, manage_email, manage_merch, manage_charity, manage_partners, manage_challenges, send_announcements}` plus `managed_collectives` UUID array.
+6. Store temp password in kv_store `coexist.temp_credentials.{slug}` with TTL note. Never log password to Neo4j or status_board.
+7. Insert status_board row entity_type='task', next_action_by='tate'.
+8. Tate forwards credentials to user. Paul / user changes on first login.
+
 ## 2026-04-27 20:25 AEST - SKIP_COEXIST_PREFLIGHT=1 bypass on fix/collective-alias-byron-northern-rivers push
 Reason: same lint-debt blocker. Pre-push preflight stops on 180 pre-existing eslint errors (all in files this branch did not touch). Branch is 2 commits ahead of origin/main, single-file diff to `supabase/functions/excel-sync/index.ts` (24 inserts, 3 deletes - alias map const + lookup + em-dash to hyphen in error string). Vitest 17 files / 158 tests green pre-push. Awaiting Tate go-ahead to deploy Edge Function (Supabase project ref `tjutlbzekfouwsiaplbr`).
 
