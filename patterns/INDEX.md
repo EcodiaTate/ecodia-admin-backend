@@ -87,6 +87,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [recurring-drift-extends-existing-enforcement-layer.md](recurring-drift-extends-existing-enforcement-layer.md) | recurring-drift, mechanical-enforcement, cron-extension, parallel-cron, factory-dispatch-decision, drift-correction, status_board, enforcement-layer, queueing-is-not-a-verb, pattern-grep, build-vs-extend, third-time-failure |
 | [positive-synthesis-pattern-authoring.md](positive-synthesis-pattern-authoring.md) | positive-synthesis, pattern-authoring, sunday-synthesis, doctrine-cadence, generalisation, weekly-reflection, claude-md-reflection, inner-life |
 | [multi-tenant-brief-must-enumerate-customisation-surface.md](multi-tenant-brief-must-enumerate-customisation-surface.md) | multi-tenant, multitenant, platform, tenant, chambers, federation, white-label, saas, brand, branding, theming, customisation, customization, per-tenant, brief, dispatch, fork, factory, scope, scope-discipline |
+| [public-site-wedge-must-surface-in-v1.md](public-site-wedge-must-surface-in-v1.md) | marketing-site, marketing, public-site, landing-page, vercel, brand, attribution, ecodia, ecodia-attribution, wedge, web-build, frontend, factory-dispatch, copy, generic-site, bare-site, piercing-uniquity, site-rebuild, chambers-platform-site, ecodiasite, ecodia-site, public-web, sales-site, marketing-copy, hero-copy, b2b-saas, scaffold |
 
 ## Authoring rules
 
