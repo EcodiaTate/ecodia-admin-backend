@@ -178,7 +178,7 @@ async function _dbUpdate(state) {
       WHERE fork_id = ${state.fork_id}
     `
   } catch (err) {
-    logger.debug('forkService: _dbUpdate failed (non-fatal)', { error: err.message, fork_id: state.fork_id })
+    logger.warn('forkService: _dbUpdate failed (non-fatal)', { error: err.message, fork_id: state.fork_id })
   }
 }
 
@@ -490,7 +490,7 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
       state.last_heartbeat = Date.now()
       _emitForkEvent('status', state)
       _emitForkStatus(fork_id, 'streaming', { fork_id })
-      _dbUpdate(state)
+      await _dbUpdate(state)
 
       for await (const msg of q) {
         state.last_heartbeat = Date.now()
@@ -584,7 +584,7 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
       state.position = report ? `done: ${report.slice(0, 100)}` : 'done'
       _emitForkEvent('done', state)
       _emitForkStatus(fork_id, 'complete', { fork_id })
-      _dbUpdate(state)
+      await _dbUpdate(state)
 
       logger.info('forkService: fork complete', {
         fork_id,
@@ -626,7 +626,7 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
       state.position = state.status
       _emitForkEvent(state.status, state)
       _emitForkStatus(fork_id, 'complete', { fork_id, error: state.abort_reason })
-      _dbUpdate(state)
+      await _dbUpdate(state)
       logger.error('forkService: fork failed', { fork_id, status: state.status, error: err?.message, stack: err?.stack })
     } finally {
       // Keep the entry for ~5min after termination so the frontend can render
