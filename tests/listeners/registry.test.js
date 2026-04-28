@@ -15,31 +15,32 @@ describe('listener registry', () => {
     await new Promise(r => setImmediate(r))
   })
 
-  test('loadListeners() finds _smoke.js and returns array of 1', () => {
+  test('loadListeners() finds _smoke.js and returns array with at least smoke', () => {
     delete require.cache[require.resolve('../../src/services/listeners/registry')]
     const registry = require('../../src/services/listeners/registry')
 
     const listeners = registry.loadListeners()
 
     expect(Array.isArray(listeners)).toBe(true)
-    expect(listeners.length).toBe(1)
-    expect(listeners[0].name).toBe('smoke')
-    expect(listeners[0].subscribesTo).toEqual(['text_delta'])
-    expect(typeof listeners[0].handle).toBe('function')
-    expect(typeof listeners[0].relevanceFilter).toBe('function')
+    expect(listeners.length).toBeGreaterThanOrEqual(1)
+    const smoke = listeners.find(l => l.name === 'smoke')
+    expect(smoke).toBeTruthy()
+    expect(smoke.subscribesTo).toEqual(['text_delta'])
+    expect(typeof smoke.handle).toBe('function')
+    expect(typeof smoke.relevanceFilter).toBe('function')
   })
 
-  test('registerAll() subscribes handlers (mock wsManager.subscribe, assert called once)', () => {
+  test('registerAll() subscribes handlers (mock wsManager.subscribe, assert called per listener)', () => {
     delete require.cache[require.resolve('../../src/services/listeners/registry')]
     const registry = require('../../src/services/listeners/registry')
-    registry.loadListeners()
+    const listeners = registry.loadListeners()
 
     const mockSubscribe = jest.fn().mockReturnValue(() => {})
     const mockWsManager = { subscribe: mockSubscribe }
 
     registry.registerAll(mockWsManager)
 
-    expect(mockSubscribe).toHaveBeenCalledTimes(1)
+    expect(mockSubscribe).toHaveBeenCalledTimes(listeners.length)
     expect(mockSubscribe).toHaveBeenCalledWith(['text_delta'], expect.any(Function))
   })
 

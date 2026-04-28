@@ -16,7 +16,18 @@ async function startListenerSubsystem() {
   try {
     const listeners = registry.loadListeners()
     registry.registerAll()
-    logger.info(`listener subsystem: started with ${listeners.length} listeners`)
+
+    // Start the DB event bridge - connects via LISTEN/NOTIFY and routes DB
+    // state changes into the in-process listener registry. Failure is
+    // non-fatal: the listener subsystem continues without the db bridge.
+    try {
+      await require('./dbBridge').start()
+      logger.info(`listener subsystem: started with ${listeners.length} listeners + db bridge`)
+    } catch (bridgeErr) {
+      logger.warn('listener subsystem: db bridge failed to start (non-fatal)', { error: bridgeErr.message })
+      logger.info(`listener subsystem: started with ${listeners.length} listeners (no db bridge)`)
+    }
+
     return registry
   } catch (err) {
     logger.error('listener subsystem: failed to start', { error: err.message })
