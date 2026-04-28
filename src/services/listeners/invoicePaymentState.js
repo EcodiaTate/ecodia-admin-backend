@@ -6,9 +6,10 @@
  * Fires on every staged_transactions INSERT where amount_cents > 0
  * (i.e. an incoming payment, not an expense or refund).
  *
- * Reads open invoices from kv_store key 'invoices.open' and matches
- * the incoming payment using two heuristics:
- *   - amount_cents matches invoice.amount_cents_inc_gst exactly → amount match
+ * Queries the public.invoices table at fire-time for open invoices
+ * (status NOT IN paid/void/cancelled) and matches the incoming payment
+ * using two heuristics:
+ *   - amount_cents matches invoice.total_cents exactly → amount match
  *   - description contains a significant token from invoice.client_name → name match
  *
  * Confidence levels:
@@ -19,8 +20,13 @@
  * On high or medium confidence: inserts a row into invoice_payment_matches
  * and wakes the OS session via HTTP POST so it can mark the invoice paid.
  *
- * TODO (overdue check): add a separate timer/channel that fires when an invoice
- * in invoices.open passes its due_date without a match — not implemented here.
+ * Producer-feed note: the listener queries invoices directly rather than
+ * reading a projected kv_store key. Single source of truth = public.invoices.
+ * The listener only fires on staged_transactions INSERT (rare event, bank
+ * imports), so the per-fire SELECT is cheap.
+ *
+ * TODO (overdue check): add a separate timer/channel that fires when an open
+ * invoice passes its due_date without a match — not implemented here.
  *
  * Wakes the OS via HTTP POST — never imports the session service directly.
  */
@@ -46,9 +52,12 @@ async function _wakeOsSession(message, transactionId) {
 
 /**
  * Returns 'high', 'medium', 'low', or null for no match.
+ *
+ * `invoice.total_cents` is the GST-inclusive total (matches what an Australian
+ * bank line-item shows for a paid invoice).
  */
 function _matchConfidence(payment, invoice) {
-  const amountMatch = payment.amount_cents === invoice.amount_cents_inc_gst
+  const amountMatch = payment.amount_cents === invoice.total_cents
 
   // Tokenise client_name: take any word longer than 2 chars as a search token
   const clientWords = (invoice.client_name || '')
@@ -63,6 +72,7 @@ function _matchConfidence(payment, invoice) {
   if (nameMatch) return 'low'
   return null
 }
+
 
 module.exports = {
   name: 'invoicePaymentState',
@@ -83,26 +93,26 @@ module.exports = {
     const transactionId = row.id
 
     try {
-      // Read open invoices from kv_store
-      const kvRows = await db`SELECT value FROM kv_store WHERE key = 'invoices.open'`
-      if (!kvRows || kvRows.length === 0) {
-        logger.info('invoicePaymentState: invoices.open not in kv_store, skipping', { transactionId })
+      // Query open invoices directly from public.invoices.
+      // Producer-feed = the invoice writer (Stripe webhook / bookkeeping flow);
+      // we just read at fire-time so there's no projection drift.
+      let invoices
+      try {
+        invoices = await db`
+          SELECT invoice_number, client_name, total_cents
+          FROM invoices
+          WHERE status NOT IN ('paid', 'void', 'cancelled')
+        `
+      } catch (queryErr) {
+        logger.warn('invoicePaymentState: open-invoices query failed, skipping', {
+          error: queryErr.message,
+          transactionId,
+        })
         return
       }
 
-      // value is JSONB (auto-parsed by postgres.js), but guard for TEXT legacy path
-      let invoices = kvRows[0].value
-      if (typeof invoices === 'string') {
-        try {
-          invoices = JSON.parse(invoices)
-        } catch {
-          logger.warn('invoicePaymentState: invoices.open contains invalid JSON, skipping', { transactionId })
-          return
-        }
-      }
-
       if (!Array.isArray(invoices) || invoices.length === 0) {
-        logger.info('invoicePaymentState: invoices.open is empty, skipping', { transactionId })
+        logger.info('invoicePaymentState: no open invoices, skipping', { transactionId })
         return
       }
 
