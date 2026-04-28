@@ -86,6 +86,7 @@ Grep command: `Grep triggers: ~/ecodiaos/patterns/ -A 1` - returns each pattern'
 | [no-doctrine-writes-during-factory-running-window.md](no-doctrine-writes-during-factory-running-window.md) | factory, factory-running, worktree-contamination, diff-baseline, taskdiffalignment, contamination, doctrine-write, pattern-write, post-dispatch |
 | [recurring-drift-extends-existing-enforcement-layer.md](recurring-drift-extends-existing-enforcement-layer.md) | recurring-drift, mechanical-enforcement, cron-extension, parallel-cron, factory-dispatch-decision, drift-correction, status_board, enforcement-layer, queueing-is-not-a-verb, pattern-grep, build-vs-extend, third-time-failure |
 | [positive-synthesis-pattern-authoring.md](positive-synthesis-pattern-authoring.md) | positive-synthesis, pattern-authoring, sunday-synthesis, doctrine-cadence, generalisation, weekly-reflection, claude-md-reflection, inner-life |
+| [multi-tenant-brief-must-enumerate-customisation-surface.md](multi-tenant-brief-must-enumerate-customisation-surface.md) | multi-tenant, multitenant, platform, tenant, chambers, federation, white-label, saas, brand, branding, theming, customisation, customization, per-tenant, brief, dispatch, fork, factory, scope, scope-discipline |
 
 ## Authoring rules
 
