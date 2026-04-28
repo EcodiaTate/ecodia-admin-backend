@@ -8,6 +8,16 @@ triggers: pr, merge, review, vercel, preview, ready, approval, ship, deploy, for
 
 **When a fork ships a PR with a Vercel preview READY, my job is NOT to surface "PR open, awaiting your review" to Tate. My job is to visually verify the preview works, then merge it myself. If visual verification fails, THAT is when Tate sees it (with screenshots + concrete repro). Otherwise he never hears about the PR until it's already in main.**
 
+## RELIGIOUS-TAILSCALE EMPHASIS (28 Apr 2026 23:08 AEST, Tate after 6-PR-night)
+
+> "The visual testing is amazing for quality control and absolutely you need to be religiously using tailscale I reckon. you can also just use my browser with the profile that has all the passwords stored."
+
+**The Corazon laptop agent (Tailscale 100.114.219.69:7456) with its persistent browser profile (`~/.eos-browser`, accessed via `browser.enableCDP()`) is the canonical visual-verification surface for ANY UI-touching change.** It has Tate's logged-in sessions for every client app already in cookies. It has stored passwords. It is always reachable when Corazon is on.
+
+The default-on stance: every fork brief that touches frontend code MUST include a visual-verify step that calls Corazon. Curl/headless-Chrome fallback is for emergencies (laptop offline). The fact that the visual-verify worked clean for the 5 PRs that landed tonight (focal-point, leaflet realtime, reactions, NE VIC pin, /map deletion) is not a coincidence — it's the protocol working. Skipping it once is enough to lose the trust loop.
+
+When in doubt, USE TAILSCALE. The fallback paths exist for resilience, not as preference.
+
 The old shape (Tate-as-approver) is wrong:
 - Fork opens PR → I tell Tate "PR #X open, please review and merge" → Tate context-switches → opens GitHub → reads diff → manually checks preview → merges. **This makes me a notification daemon and Tate a bottleneck.**
 
