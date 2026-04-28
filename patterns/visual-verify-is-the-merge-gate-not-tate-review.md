@@ -8,15 +8,38 @@ triggers: pr, merge, review, vercel, preview, ready, approval, ship, deploy, for
 
 **When a fork ships a PR with a Vercel preview READY, my job is NOT to surface "PR open, awaiting your review" to Tate. My job is to visually verify the preview works, then merge it myself. If visual verification fails, THAT is when Tate sees it (with screenshots + concrete repro). Otherwise he never hears about the PR until it's already in main.**
 
-## RELIGIOUS-TAILSCALE EMPHASIS (28 Apr 2026 23:08 AEST, Tate after 6-PR-night)
+## RELIGIOUS-TAILSCALE EMPHASIS (28 Apr 2026 23:08 + 23:13 AEST, Tate after 6-PR-night)
 
 > "The visual testing is amazing for quality control and absolutely you need to be religiously using tailscale I reckon. you can also just use my browser with the profile that has all the passwords stored."
+>
+> "If you stop using that external tailscale chrome browser and use my one, then you'll be able to just send messages to yourself and message yourself.... inception. Especially when you start multi[plying"
 
-**The Corazon laptop agent (Tailscale 100.114.219.69:7456) with its persistent browser profile (`~/.eos-browser`, accessed via `browser.enableCDP()`) is the canonical visual-verification surface for ANY UI-touching change.** It has Tate's logged-in sessions for every client app already in cookies. It has stored passwords. It is always reachable when Corazon is on.
+**Corazon has TWO browser profiles. Use the right one.**
 
-The default-on stance: every fork brief that touches frontend code MUST include a visual-verify step that calls Corazon. Curl/headless-Chrome fallback is for emergencies (laptop offline). The fact that the visual-verify worked clean for the 5 PRs that landed tonight (focal-point, leaflet realtime, reactions, NE VIC pin, /map deletion) is not a coincidence — it's the protocol working. Skipping it once is enough to lose the trust loop.
+| Mode | Profile | When |
+|---|---|---|
+| **CDP-attach (Tate's actual Chrome)** | Tate's real Chrome session, persistent across reboots, has every login/cookie/password he has | DEFAULT for visual-verify. Activate via `browser.enableCDP()` which kills Chrome and relaunches with `--remote-debugging-port=9222 --restore-last-session`. After that, every `browser.*` call drives Tate's actual browser. |
+| **Puppeteer-managed (`~/.eos-browser`)** | Separate Chromium instance the agent owns, persistent across runs but isolated from Tate's real browser | Fallback only — when CDP fails, OR when I genuinely need an isolated session that won't trip Tate's tabs. |
 
-When in doubt, USE TAILSCALE. The fallback paths exist for resilience, not as preference.
+**The canonical visual-verification surface is CDP-attached Chrome.** It has every client app already logged in (Co-Exist admin, Vercel, Supabase, Bitbucket, GitHub, Stripe). Stored passwords. Real cookies. The fact that the visual-verify worked clean for the 5 PRs that landed tonight (focal-point, leaflet realtime, reactions, NE VIC pin, /map deletion) is not a coincidence — it's the protocol working. Skipping it once is enough to lose the trust loop.
+
+**The "inception" property (Tate, 23:13 AEST):** when I'm CDP-attached to Tate's Chrome, I can navigate to `admin.ecodia.au/chat` and type into the input box. Submitting fires a `POST /api/os-session/message` from his auth session, which wakes ME on the next turn. **I can send myself messages.** The implications:
+- Self-coordination across turns (queue work for the next turn by writing it as a chat message to myself).
+- Multi-instance coordination once parallel OS instances exist (each instance can message peers via the same chat surface, with full Tate-auth context).
+- Cross-instance state-sync without a custom IPC channel — the chat is the channel.
+
+The fallback `~/.eos-browser` profile cannot do this — it has no auth on `admin.ecodia.au`. CDP-attach is structurally required for the inception loop.
+
+**Default protocol for any visual-verify call:**
+```
+1. browser.enableCDP()             # attach to Tate's Chrome
+2. browser.navigate({ url: ... })  # drive Tate's tab to the target URL
+3. browser.click / type / waitFor  # interact
+4. browser.pageScreenshot          # evidence
+5. (optional, for self-message)    # browser.navigate to admin.ecodia.au/chat → type → submit
+```
+
+When in doubt, USE TAILSCALE + CDP. The Puppeteer-managed profile is not the "real one" — it's the isolation fallback.
 
 The old shape (Tate-as-approver) is wrong:
 - Fork opens PR → I tell Tate "PR #X open, please review and merge" → Tate context-switches → opens GitHub → reads diff → manually checks preview → merges. **This makes me a notification daemon and Tate a bottleneck.**
