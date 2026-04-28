@@ -1,0 +1,6 @@
+{
+  "tool_name": "mcp__forks__spawn_fork",
+  "tool_input": {
+    "brief": "Goal: tweak the marketing copy on the Coexist frontend hero section. The current headline is too long. Replace it with the new copy in the attached doc. Also swap the hero image to the one Tate uploaded. Push to main on the coexist frontend repo. Done when the diff is in."
+  }
+}

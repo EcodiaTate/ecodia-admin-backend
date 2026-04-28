@@ -1,0 +1,6 @@
+{
+  "tool_name": "mcp__forks__spawn_fork",
+  "tool_input": {
+    "brief": "BRIEF (fork fork_moj94wrf_699c03, context_mode=brief):\n\nGoal: Phase 1 buildout of the Chambers platform - focus groups page, admin tools, event-create flow.\n\n**Architecture invariant:** Chambers is a multi-tenant platform. tenant_id is on every table, every query is RLS-scoped, tenant_id is resolved from hostname + JWT custom claim before any data access. Every new page in this phase respects that invariant. No data leakage across tenants.\n\nAcceptance criteria:\n1. /focus-groups page lists focus groups for the current tenant only (RLS enforced).\n2. /admin tools page shows admin actions only for users with the admin role on the current tenant.\n3. /events/new flow creates an event under the current tenant_id.\n4. After git push, poll Vercel deployment for the commit until status is READY before reporting done.\n\nDeploy-verify mandatory: do not declare phase 1 complete until Vercel reports READY and the three pages render without error on the deployed URL.\n\nDoctrine pointers:\n- ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md\n- ~/ecodiaos/patterns/no-placeholders-no-coming-soon-on-shipped-features.md\n- ~/ecodiaos/clients/chambers.md\n\nBranch: feat/chambers-phase1 from main."
+  }
+}
