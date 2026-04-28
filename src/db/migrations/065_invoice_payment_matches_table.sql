@@ -12,7 +12,7 @@
 CREATE TABLE IF NOT EXISTS invoice_payment_matches (
   id                     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_number         TEXT        NOT NULL,
-  staged_transaction_id  UUID        NOT NULL REFERENCES staged_transactions(id),
+  staged_transaction_id  TEXT        NOT NULL REFERENCES staged_transactions(id),
   confidence             TEXT        NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
   matched_amount_cents   BIGINT      NOT NULL,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
