@@ -25,6 +25,7 @@ const auth = require('../middleware/auth')
 const decisionQualityService = require('../services/telemetry/decisionQualityService')
 const dispatchEventConsumer = require('../services/telemetry/dispatchEventConsumer')
 const outcomeInference = require('../services/telemetry/outcomeInference')
+const episodeResurface = require('../services/episodeResurface')
 
 router.use(auth)
 
@@ -61,6 +62,83 @@ router.post('/consume', async (_req, res, next) => {
 router.post('/infer-outcomes', async (_req, res, next) => {
   try {
     const result = await outcomeInference.runOnce()
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// ─── Phase F (Layer 7) — Episode resurfacing ────────────────────────────
+
+// GET /api/telemetry/episode-resurface?days=7
+// Layer-7 dashboard: resurface frequency by hook + repeated-failure rate.
+// See: ~/ecodiaos/patterns/decision-quality-self-optimization-architecture.md
+router.get('/episode-resurface', async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 7))
+    const [byHook, healthMetric] = await Promise.all([
+      episodeResurface.getResurfaceFrequency({ days }),
+      episodeResurface.getRepeatedFailureRate({ days: Math.max(days, 30) }),
+    ])
+    res.json({
+      window_days: days,
+      by_hook: byHook,
+      health: healthMetric,
+    })
+  } catch (err) { next(err) }
+})
+
+// POST /api/telemetry/episode-resurface/run
+// Run a Layer-7 semantic search for the supplied query text and (optionally)
+// record the resurface_event rows. Caller passes:
+//   { queryText, dispatchEventId?, hookName?, toolName?, limit?, minScore?,
+//     metadataExtra?, recordRows?: boolean (default true) }
+router.post('/episode-resurface/run', async (req, res, next) => {
+  try {
+    const body = req.body || {}
+    const queryText = body.queryText || ''
+    if (!queryText || typeof queryText !== 'string') {
+      return res.status(400).json({ error: 'queryText (string) is required' })
+    }
+    const recordRows = body.recordRows !== false
+    if (recordRows) {
+      const result = await episodeResurface.runForDispatch({
+        queryText,
+        dispatchEventId: body.dispatchEventId,
+        hookName: body.hookName,
+        toolName: body.toolName,
+        limit: body.limit,
+        minScore: body.minScore,
+        metadataExtra: body.metadataExtra,
+      })
+      return res.json(result)
+    }
+    const hits = await episodeResurface.resurfaceEpisodes(queryText, {
+      limit: body.limit,
+      minScore: body.minScore,
+    })
+    res.json({ hits, recorded: { inserted: 0, ids: [] } })
+  } catch (err) { next(err) }
+})
+
+// POST /api/telemetry/episode-resurface/:id/acknowledge
+// Body: { ack: boolean }
+router.post('/episode-resurface/:id/acknowledge', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' })
+    const ack = req.body && req.body.ack === true
+    const result = await episodeResurface.markAcknowledgement({ id, ack })
+    res.json(result)
+  } catch (err) { next(err) }
+})
+
+// POST /api/telemetry/episode-resurface/:id/repeated-failure
+// Body: { repeated: boolean }
+router.post('/episode-resurface/:id/repeated-failure', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' })
+    const repeated = req.body && req.body.repeated === true
+    const result = await episodeResurface.markRepeatedFailure({ id, repeated })
     res.json(result)
   } catch (err) { next(err) }
 })
