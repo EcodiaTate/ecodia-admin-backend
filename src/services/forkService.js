@@ -410,7 +410,8 @@ async function spawnFork({ brief, context_mode = 'recent' } = {}) {
   }
   _forks.set(fork_id, state)
   _emitForkEvent('spawned', state)
-  _dbInsert(state)
+  // must await: ensures row exists before run-loop UPDATEs (sibling fix to e4bd2a7)
+  await _dbInsert(state)
 
   // Build SDK options. We deliberately reuse main's pattern (custom systemPrompt
   // string, conductor MCP, agents) so behaviour is symmetrical, then layer on
