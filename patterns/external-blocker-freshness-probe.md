@@ -1,5 +1,5 @@
 ---
-triggers: status_board, next_action_by=external, external blocker, stale blocker, GST, ATO, ABR, Apple Paid Apps, Stripe, ASIC, IRS, awaiting response, blocker drift, awaiting reply, blocked on client
+triggers: next_action_by=external, external-blocker, stale-external-blocker, GST-blocker, ATO-blocker, ABR-blocker, Apple-Paid-Apps, ASIC-blocker, IRS-blocker, blocker-drift, blocked-on-external, external-freshness-probe
 ---
 
 # External-blocker freshness probe - any external-blocked status_board row idle >14 days needs a real-world verification

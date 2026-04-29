@@ -1,5 +1,5 @@
 ---
-triggers: brief, fork brief, factory brief, dispatch brief, spawn_fork, start_cc_session, scope, scope inversion, scope drift, deliverable, target tenant, single tenant, multi-tenant, platform, scaffold, primary tenant, first tenant, demo tenant, seed tenant, tenant zero, scycc, chambers, MVP, full implementation, FULL X implementation, product framing, architectural invariant, brief-doctrine consistency, doctrine-brief mismatch, scope inversion, brief slippage, third strike, consistency check, what-i-say-vs-what-i-do
+triggers: fork-brief, factory-brief, dispatch-brief, spawn_fork, start_cc_session, brief-scope-inversion, scope-inversion, brief-scope-drift, target-tenant, single-tenant-brief, multi-tenant-brief, primary-tenant, demo-tenant, seed-tenant, tenant-zero, scycc, FULL-X-implementation, product-framing, architectural-invariant, brief-doctrine-consistency, doctrine-brief-mismatch, brief-slippage, brief-consistency-check
 ---
 
 # The brief names the product, not the immediate task

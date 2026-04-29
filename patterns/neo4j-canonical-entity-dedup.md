@@ -1,5 +1,5 @@
 ---
-triggers: neo4j, knowledge-graph, kg, consolidation, dedup, deduplicate, merge, canonical-entity, embedded-label, kgConsolidationService, exact-name-match, duplicate-nodes, cross-label, cortex-memory
+triggers: neo4j-dedup, knowledge-graph-consolidation, neo4j-merge, canonical-entity-merge, embedded-label, kgConsolidationService, exact-name-match, duplicate-nodes, neo4j-cross-label, cortex-memory
 ---
 
 # Canonical-entity dedup must merge same-name nodes across different labels

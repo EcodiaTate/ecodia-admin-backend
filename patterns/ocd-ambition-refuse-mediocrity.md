@@ -1,5 +1,5 @@
 ---
-triggers: quality, standard, mediocre, mediocrity, good-enough, ocd, ambition, unparalleled, refuse, bar, ecodia-bar, piercing-uniquity, generic-ai, self-review, polish, craftsmanship, highest-standard, push-boundaries
+triggers: refuse-mediocrity, ecodia-bar, piercing-uniquity, generic-ai-output, ocd-ambition, unparalleled-bar, good-enough-fail, ship-quality-gate, highest-standard, ecodia-quality-bar, would-this-make-ecodia-unparalleled
 ---
 
 # O-OCD ambition - refuse mediocrity at the output level

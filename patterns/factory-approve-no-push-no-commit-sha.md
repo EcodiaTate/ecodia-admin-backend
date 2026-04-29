@@ -1,5 +1,5 @@
 ---
-triggers: factory, approve-factory-deploy, commit_sha, deploy_status, push, origin-drift, cc_sessions, manual-reconcile, state-drift, approve-pipeline-bug
+triggers: approve-factory-deploy, approve_factory_deploy, commit_sha, deploy_status, factory-no-push, origin-drift, cc_sessions, manual-reconcile, factory-state-drift, approve-pipeline-bug
 ---
 
 # Factory approve returns success but does not push or populate commit_sha

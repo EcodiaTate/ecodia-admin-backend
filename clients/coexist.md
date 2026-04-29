@@ -1,3 +1,7 @@
+---
+triggers: coexist, kurt, charliebennett, org.coexistaus.app, coexistaus.org, coexist-release.jks, coexist-licence-fee, INV-2026-003, ip-retention-coexist, capacitor-coexist, tjutlbzekfouwsiaplbr, coexist-android-keystore, COEXIST_KEYSTORE_PASSWORD, coexist-agreement-kurt-countersign, generate-splash.cjs
+---
+
 # Co-Exist — Client Knowledge File
 
 Read this BEFORE any Co-Exist work. Update it AFTER every session.
@@ -130,8 +134,8 @@ Auto-deploys from main branch. Push to GitHub, Vercel handles the rest.
 ---
 
 ## Credentials & Access
-- Test credentials: stored in kv_store `creds.coexist_test`
-- App Store Connect: apple@ecodia.au
+- Test credentials: stored in kv_store `creds.coexist` (full schema in `~/ecodiaos/docs/secrets/coexist-app-test.md`)
+- App Store Connect: code@ecodia.au
 - Google Play Console: via Tate's Google account
 
 ---

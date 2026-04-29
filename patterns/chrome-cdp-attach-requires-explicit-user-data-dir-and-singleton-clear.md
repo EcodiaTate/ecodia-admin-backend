@@ -1,5 +1,5 @@
 ---
-triggers: chrome, cdp, enableCDP, browser.navigate, devtools, port-9222, browser-attach, puppeteer-connect, singleton-lock, user-data-dir, chrome-debug-port, cdp-not-binding, browser-tool-failed-to-attach, fetch-failed, json-version-unavailable, do-not-de-elevate, restore-last-session, multi-account-chrome, profile-directory
+triggers: chrome-cdp, enableCDP, browser.navigate, devtools-9222, port-9222, browser-attach, puppeteer-connect, SingletonLock, user-data-dir, chrome-debug-port, cdp-not-binding, browser-tool-failed-to-attach, json-version-unavailable, do-not-de-elevate, restore-last-session, multi-account-chrome, profile-directory
 ---
 
 # Chrome CDP attach: --remote-debugging-port alone is not enough. You also need explicit --user-data-dir AND cleared SingletonLock.

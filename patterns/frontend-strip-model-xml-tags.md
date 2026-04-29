@@ -1,5 +1,5 @@
 ---
-triggers: frontend, chat, render, xml, tag, analysis, thinking, scratchpad, reasoning, reflection, ReactMarkdown, rehypeRaw, TextBlock, model-output, sanitise
+triggers: frontend-chat-render, model-xml-tags, scaffold-tag-strip, analysis-tag, thinking-tag, scratchpad-tag, reasoning-tag, reflection-tag, ReactMarkdown, rehypeRaw, TextBlock, model-output-sanitise, escaped-angle-brackets
 ---
 
 # Strip / collapse model XML-style scaffold tags before rendering chat content

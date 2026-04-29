@@ -1,5 +1,5 @@
 ---
-triggers: multi-tenant, multitenant, multi tenant, platform, tenant, chambers, federation, white-label, whitelabel, white label, saas, brand, branding, theming, customisation, customization, per-tenant, scoped, brief, dispatch, fork, factory, scope, scope-discipline
+triggers: multi-tenant-brief, multitenant-brief, white-label-brief, per-tenant-customisation, customisation-surface, tenant-brand, tenant-theming, multi-tenant-scope-inversion, chambers-federation, platform-brief-scope, PER-TENANT-CUSTOMISATION
 ---
 
 # Multi-tenant briefs MUST enumerate the per-tenant customisation surface area

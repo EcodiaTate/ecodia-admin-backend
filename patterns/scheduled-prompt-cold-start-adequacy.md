@@ -1,4 +1,4 @@
-triggers: schedule_delayed, schedule_chain, scheduled-task, cron-prompt, prompt-adequacy, cold-start, future-fire, zero-context, os_scheduled_tasks, self-loop, recurring-task
+triggers: schedule_delayed, schedule_chain, cron-prompt, scheduled-prompt-adequacy, cold-start-prompt, future-fire-prompt, zero-context-prompt, os_scheduled_tasks, scheduled-self-loop, scheduled-recurring-task, 5-gate-cold-start
 
 # Scheduled prompts must pass the 5-gate cold-start check BEFORE the schedule call lands
 

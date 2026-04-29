@@ -1,5 +1,5 @@
 ---
-triggers: doctrine, neo4j, synthesis, learning, evolution, pattern-corpus, self-evolution, weekly-synthesis, accumulated, logged, episode-mining, consolidation, log-and-forget, reflexive, doctrine-rot, pattern-mining, decision-mining, weekly-cadence, strategic-thinking
+triggers: doctrine-corpus, weekly-synthesis, doctrine-evolution, pattern-corpus, self-evolution-cadence, episode-mining, log-and-forget, reflexive-doctrine, doctrine-rot, pattern-mining, decision-mining, weekly-cadence, sunday-synthesis
 ---
 
 # Doctrine corpus is for evolution, not archive - weekly synthesis cadence

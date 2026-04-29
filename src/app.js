@@ -125,6 +125,7 @@ app.use('/api/docs', require('./routes/documents'))
 app.use('/api/dashboard', require('./routes/dashboard'))
 app.use('/api/rescue', require('./routes/rescue'))
 app.use('/api/triage', require('./routes/triage'))
+app.use('/api/telemetry', require('./routes/telemetry'))
 
 // Error handler (must be last)
 app.use(errorHandler)

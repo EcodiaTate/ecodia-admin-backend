@@ -1,5 +1,5 @@
 ---
-triggers: tate-live, tate-sunday, ask-tate, awaiting-tate, readonly, prep, dig-first, invoice-history, classification, cognitive-load, drift-audit, meta-loop, status-board, next-action
+triggers: tate-live-prep, tate-sunday, ask-tate-when-back, awaiting-tate, readonly-prep, dig-first, invoice-history-prep, pre-classification, cognitive-load-reduce, drift-audit-prep, ask-tate-OR-dig
 ---
 
 # Preempt Tate-live escalations with read-only prep work

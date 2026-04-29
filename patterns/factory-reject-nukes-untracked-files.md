@@ -1,5 +1,5 @@
 ---
-triggers: factory, reject_factory_session, factory-reject, untracked-files, git-reset, worktree-clean, untracked-loss, dirty-worktree-dispatch, pre-dispatch-commit, factory-cleanup, lost-work, untracked-deleted
+triggers: reject_factory_session, factory-reject, untracked-files, git-reset, worktree-clean, untracked-loss, dirty-worktree-dispatch, pre-dispatch-commit, factory-cleanup, factory-untracked-deleted
 ---
 
 # Always commit pre-existing untracked files BEFORE dispatching Factory

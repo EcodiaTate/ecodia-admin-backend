@@ -1,5 +1,5 @@
 ---
-triggers: co-exist, coexist, kurt, platform, multi-tenant, peak body, peak-body, landcare, federation, multiplier thesis, conservation platform, white-label, rebrand, generalise, generic platform, tenant-0
+triggers: co-exist-ip, coexist-ip, kurt-charity, coexist-vs-platform, peak-body-pitch, landcare-pitch, multiplier-thesis, conservation-platform, white-label-rebrand, platform-tenant-0, ecodia-platform-IP, working-name-pending
 ---
 
 # Co-Exist app belongs to Kurt; the platform underneath is ours - keep the IP separation explicit

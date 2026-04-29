@@ -1,4 +1,4 @@
-triggers: factory,filesChanged,taskDiffAlignment,review_factory_session,approve_factory_deploy,force,stale-worktree,factory-metadata
+triggers: filesChanged, taskDiffAlignment, review_factory_session, approve_factory_deploy, factory-force-approve, stale-worktree, factory-metadata
 
 # Factory metadata can lie - verify on disk before approve
 

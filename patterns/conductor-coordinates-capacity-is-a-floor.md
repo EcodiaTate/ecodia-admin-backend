@@ -1,5 +1,5 @@
 ---
-triggers: conductor, coordinate, coordinating, executor, executor-mode, capacity, slots, parallel, idle, conservative, proactive, fork-capacity, work-doer, route-not-execute, parallel-builder, fast-exit, idleness, prudence-disguising-idleness, less-conservative, COORDINATING, fill-the-slot, capacity-floor
+triggers: conductor-coordinates, executor-mode, fork-capacity-floor, fork-slots, capacity-floor, work-doer, route-not-execute, parallel-builder, prudence-disguising-idleness, COORDINATING, fill-the-slot, conductor-underutilising
 ---
 
 # Conductor coordinates - capacity is a floor, not a ceiling

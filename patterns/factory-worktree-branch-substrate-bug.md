@@ -1,5 +1,5 @@
 ---
-triggers: factory, factory-dispatch, factory-rejection, files_changed-empty, taskDiffAlignment-overlap-zero, worktree-branch, dispatcher-substrate, coexist, ecodiaos-backend, factory-false-negative, branch-state-leak, dispatched-branch-vs-checked-out-branch
+triggers: factory-dispatch, factory-rejection, files_changed-empty, taskDiffAlignment-overlap-zero, factory-worktree-branch, factory-dispatcher-substrate, ecodiaos-backend, factory-false-negative, dispatched-branch-vs-checked-out-branch
 ---
 
 # Factory diff review compares against the worktree's currently-checked-out branch, not the dispatched branch's base

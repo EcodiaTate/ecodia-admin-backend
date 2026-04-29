@@ -1,5 +1,5 @@
 ---
-triggers: scheduler, schedulerPollerService, isTateActive, defer, deferred, cron-defer, cron-skip, cron-not-firing, scheduler-defer, scheduler-active-window, tate-active-gate, pre-gate, queue-vs-fire, idle-initialise, cron-initialisation
+triggers: schedulerPollerService, isTateActive, scheduler-defer, cron-defer, cron-skip, cron-not-firing, scheduler-active-window, tate-active-gate, scheduler-pre-gate, queue-vs-fire, idle-initialise, cron-initialisation
 ---
 
 # Scheduler must not pre-gate on isTateActive - trust /api/os-session/message to queue or initialise

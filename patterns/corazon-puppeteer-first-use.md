@@ -1,5 +1,5 @@
 ---
-triggers: corazon, tailscale, puppeteer, browser, laptop-agent, screenshot, visual-verification, dashboard, admin-ui, oauth-flow, signup-flow, persistent-login, multi-step-web, 100.114.219.69, eos-laptop-agent, mac-agent, sy094, visual-monitoring, curl-alternative, headless-browser
+triggers: corazon, tailscale, puppeteer-first, laptop-agent-default, screenshot.screenshot, visual-verification, admin-ui-puppeteer, oauth-flow-puppeteer, signup-flow-puppeteer, persistent-login, multi-step-web, 100.114.219.69, eos-laptop-agent, mac-agent, sy094, visual-monitoring, curl-alternative, corazon-first
 ---
 
 # Corazon + Puppeteer first, not as a fallback

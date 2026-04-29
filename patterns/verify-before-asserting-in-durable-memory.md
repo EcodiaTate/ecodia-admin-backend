@@ -1,5 +1,5 @@
 ---
-triggers: neo4j, graph_reflect, reflection, episode, durable-memory, cold-start, speculation, assertion, zero-count, null-count, kv_store-handoff, memory-integrity
+triggers: graph_reflect, durable-memory-write, durable-assertion, zero-count-claim, null-count-claim, kv_store-handoff, memory-integrity, verify-before-asserting
 ---
 
 # Verify counts and facts before asserting them in a durable memory node

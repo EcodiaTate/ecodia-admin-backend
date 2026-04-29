@@ -1,5 +1,5 @@
 ---
-triggers: marketing-site, marketing, public-site, landing-page, vercel, brand, attribution, ecodia, ecodia-attribution, wedge, web-build, frontend, factory-dispatch, copy, generic-site, bare-site, piercing-uniquity, site-rebuild, chambers-platform-site, ecodiasite, ecodia-site, public-web, sales-site, marketing-copy, hero-copy, b2b-saas, scaffold
+triggers: marketing-site, public-site-wedge, landing-page-wedge, ecodia-attribution, public-web-wedge, generic-site, bare-site, piercing-wedge-v1, site-rebuild, chambers-platform-site, ecodiasite, ecodia-site, sales-site, marketing-copy-wedge, hero-copy-wedge, b2b-saas-site, site-scaffold-brief
 ---
 
 # Public-facing web properties must surface the piercing wedge in v1, not v2

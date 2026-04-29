@@ -1,5 +1,5 @@
 ---
-triggers: client email, client comms, reply to client, ekerner, eugene, craige, ordit, fireauditors, vikki, angelica, coexist, landcare, resonaverde, client, external contact, forwarded from tate
+triggers: client email, client comms, reply to client, client-facing email, ekerner, eugene, craige, vikki, angelica, kurt, client-contact, external-counterparty-contact, no-client-contact, forwarded-from-tate, unilateral-client-contact, client-bitbucket-comment, zernio-client-dm
 ---
 
 # Zero unilateral client contact - Tate authorises every client-facing message

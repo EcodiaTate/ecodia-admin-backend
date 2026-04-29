@@ -1,5 +1,5 @@
 ---
-triggers: vercel-project, project-name, naming, vercel-link, vercel-create, project-naming, deploy-target, repo-name, project-mirror, fe-project, be-project, naming-convention, vercel-cli-link, projectName, scaffold-naming
+triggers: vercel-project-name, vercel-cli-link, vercel-link-cli, vercel-project-create, project-naming, project-naming-mirrors-repo, fe-project-name, be-project-name, vercel-naming-convention, projectName, vercel-scaffold-naming, PROJECT_NAMING
 ---
 
 # Vercel projects (and any cloud project name) mirror the GitHub repo name. Never `fe`, never `be`, never the directory's relative name.

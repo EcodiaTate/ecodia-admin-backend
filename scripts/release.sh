@@ -287,7 +287,7 @@ if [[ "$PLATFORM" == "ios" ]]; then
   if [[ -z "$APPLE_TEAM" ]]; then
     APPLE_TEAM="$(kv_get_scalar 'creds.apple.team_id')"
   fi
-  [[ -n "$APPLE_TEAM" ]] || require_cred 'creds.apple.team_id' 'Tate must provide the 10-char Apple team ID. Source: developer.apple.com > Membership page (visible after signing in to apple@ecodia.au). Store in kv_store as creds.apple = jsonb {"team_id":"XXXXXXXXXX"} or as the scalar key creds.apple.team_id. See app-release-flow-ios.md Step 0.'
+  [[ -n "$APPLE_TEAM" ]] || require_cred 'creds.apple.team_id' 'Tate must provide the 10-char Apple team ID. Source: developer.apple.com > Membership page (visible after signing in to code@ecodia.au). Store in kv_store as creds.apple = jsonb {"team_id":"XXXXXXXXXX"} or as the scalar key creds.apple.team_id. See app-release-flow-ios.md Step 0.'
 
   # ASC API key bundle.
   # Required only on the altool fallback path. On the macro path, the upload

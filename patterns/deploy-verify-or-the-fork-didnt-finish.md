@@ -1,5 +1,5 @@
 ---
-triggers: deploy, vercel, deployment, fork-deploy, push, git-push, build-failure, deploy-verify, fork-report, post-deploy, READY, ERROR, build-error, half-finished, dies-after-push, deployment-pipeline, deploy-loop, ship-broken, broken-deploy
+triggers: deploy-verify, vercel-deploy-poll, fork-deploy-verify, git-push-not-deliverable, deploy-build-failure, FORK_REPORT, post-deploy-poll, vercel-READY, vercel-ERROR, build-error-vercel, half-finished, dies-after-push, deploy-pipeline-poll, ship-broken, broken-deploy-state
 ---
 
 # A fork that pushes is not a fork that finished. Verify deploy READY before [FORK_REPORT].

@@ -1,5 +1,5 @@
 ---
-triggers: neo4j, episode, prior_episode, follows, chain, graph_merge_node, graph_create_relationship, episode-chain
+triggers: prior_episode, FOLLOWS-relationship, graph_merge_node, graph_create_relationship, neo4j-episode-chain
 ---
 
 # Neo4j Episodes must chain via :FOLLOWS relationships, not string prior_episode properties alone

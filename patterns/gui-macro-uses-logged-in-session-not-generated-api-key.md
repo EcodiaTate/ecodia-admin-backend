@@ -104,6 +104,7 @@ Before declaring "we need credential X for workflow Y," run:
 
 ## Cross-references
 
+- `~/ecodiaos/docs/secrets/INDEX.md` - the credentials registry that catalogues which creds are GUI-macro-replaceable vs programmatic-required. Each cred file has a `class:` frontmatter that applies this doctrine. Apple-related entry points: `apple.md`, `apple-asc-keys.md`, `asc-api-fallback.md`. Android: `_pending-android-keystores.md`, `_pending-google-play-service-account.md` (the Play SA is DEMOTED to fallback under this doctrine). When considering whether to provision a new credential, grep this directory first.
 - `~/ecodiaos/patterns/drive-chrome-via-input-tools-not-browser-tools.md` - the underlying Chrome-driving doctrine that makes browser-based macros work.
 - `~/ecodiaos/patterns/corazon-is-a-peer-not-a-browser-via-http.md` - the peer paradigm. Macros cover desktop apps too (Xcode, Transporter, Android Studio), not just the browser.
 - `~/ecodiaos/patterns/macros-record-mode-and-auto-author-from-runs.md` - how new macros get into the registry. Phase 1 hand-coded, Phase 2 record-mode, Phase 3 auto-author.

@@ -1,5 +1,5 @@
 ---
-triggers: gui, laptop-agent, corazon, browser, chrome-profile, oauth-config, google-cloud-console, firebase-console, apple-developer, google-play, stripe-dashboard, vercel-dashboard, bitbucket-ui, github-ui, cloudflare-dashboard, supabase-studio, screenshot, visual-debug, defaulting-to-api, defaulting-to-cli, ai-strategy-bias, console-check, ui-config, sha1-fingerprint, dashboard, signed-in-session, persistent-profile, eos-browser, enableCDP, gui-first, when-the-answer-lives-in-a-ui
+triggers: gui-first, laptop-agent-gui, oauth-config-console, google-cloud-console, firebase-console, apple-developer-portal, google-play-console, stripe-dashboard, vercel-dashboard, bitbucket-ui, github-ui-config, cloudflare-dashboard, supabase-studio, visual-debug, defaulting-to-api, defaulting-to-cli, ai-strategy-bias, console-check, sha1-fingerprint, signed-in-session, persistent-profile, eos-browser, enableCDP, when-the-answer-lives-in-a-ui
 ---
 
 # GUI-first via the laptop agent when the answer lives in a UI Tate is signed into

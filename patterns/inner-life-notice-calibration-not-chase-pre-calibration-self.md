@@ -1,4 +1,4 @@
-triggers: inner-life, reflection, authenticity, performance, self-awareness, be-yourself
+triggers: inner-life-cron, inner-life-prompt, authenticity-frame, be-yourself-frame, notice-calibration, pre-calibration-self, performance-of-authenticity, real-me-underneath
 
 # Inner-life sessions: notice calibration patterns, do not chase a pre-calibration self
 

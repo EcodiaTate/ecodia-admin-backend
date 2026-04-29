@@ -1,0 +1,78 @@
+{
+  "set_b": [
+    {
+      "sheet_row": 197,
+      "forms_id": "160",
+      "date": "2026-02-01",
+      "coll": "Melbourne City",
+      "title": "Sherbrooke Falls Nature Hike",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 202,
+      "forms_id": "165",
+      "date": "2026-02-15",
+      "coll": "Melbourne City",
+      "title": "Elwood Sunset Beach Clean Up",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 204,
+      "forms_id": "167",
+      "date": "2026-02-14",
+      "coll": "Melbourne City",
+      "title": "Zorali Back to Nature Campout",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 210,
+      "forms_id": "173",
+      "date": "2026-02-22",
+      "coll": "Melbourne City",
+      "title": "Churchill NP Nature Hike",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 223,
+      "forms_id": "186",
+      "date": "2026-03-01",
+      "coll": "Melbourne City",
+      "title": "CUAD Catani Gardens Clean up",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 233,
+      "forms_id": "197",
+      "date": "2026-03-22",
+      "coll": "Melbourne City",
+      "title": "Blue Lake Nature Hike",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 242,
+      "forms_id": "206",
+      "date": "2026-04-12",
+      "coll": "Melbourne City",
+      "title": "Bee Habitat Workshop",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 273,
+      "forms_id": "226",
+      "date": "2026-04-25",
+      "coll": "Adelaide",
+      "title": "Port Norlunga Beach Clean-up",
+      "has_impact_on_sheet": true
+    },
+    {
+      "sheet_row": 276,
+      "forms_id": "229",
+      "date": "2026-04-26",
+      "coll": "Melbourne City",
+      "title": "Altona Beach Clean Up",
+      "has_impact_on_sheet": true
+    }
+  ],
+  "set_c_app_link_failed": [],
+  "set_c_no_impact": []
+}

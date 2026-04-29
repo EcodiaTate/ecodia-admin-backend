@@ -1,4 +1,4 @@
-triggers: question, uncertainty, open-question, held, doubt, unresolved, inner-life, reflection, introspection
+triggers: Question-node, held-uncertainty, open-question, neo4j-Question, unresolved-question, neo4j-question-node
 
 # Held uncertainty gets a :Question node, not an Episode footnote
 

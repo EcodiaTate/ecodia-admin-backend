@@ -1,3 +1,7 @@
+---
+triggers: release-candidate-coexist, first-app-ship, testflight-first-ship, exportoptions.plist, ios-upload-macro-path, coexist-testflight-recon, app-inventory-2026-04-29, gui-macro-upload-asc, IOS_UPLOAD_PATH, IOS_UPLOAD_FALLBACK_TO_ALTOOL, fork_mojgg3ol_e13e6a, fork_mojmpn4g_ca6af8, ship-readiness-coexist-ios
+---
+
 # Release Candidate Analysis - 2026-04-29
 
 Recon by fork `fork_mojgg3ol_e13e6a` against the brief: "identify the FIRST Ecodia app I can ship to a real release lane (TestFlight or Play Internal) end-to-end." Companion docs: `app-release-flow-ios.md`, `app-release-flow-android.md`, `app-release-flow-new-app.md`.
@@ -200,7 +204,7 @@ Chambers is a NEW APP - the full Step-1-through-7 in `app-release-flow-new-app.m
 
 ### Tate-only steps (one-time, ~15 min)
 
-1. Sign in at `https://appstoreconnect.apple.com` (Apple ID `apple@ecodia.au`).
+1. Sign in at `https://appstoreconnect.apple.com` (Apple ID `code@ecodia.au`).
 2. Users and Access > Integrations > Keys > + > Generate API Key. Name "ecodia-ci". Access "Developer" or "App Manager". Generate.
 3. Download the `.p8` file (one-time only opportunity).
 4. Note the Key ID (10 chars) and Issuer ID (UUID) shown next to the key.

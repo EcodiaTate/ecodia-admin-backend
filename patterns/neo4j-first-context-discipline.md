@@ -1,5 +1,5 @@
 ---
-triggers: neo4j, context, orientation, restart, handoff, kv_store, stale-state, retrieval, memory, continuity, directive, decision, episode, cold-start, auto-wake, before-acting, after-directive, turn-open, turn-close
+triggers: neo4j-first-orientation, session-restart, kv_store-handoff, handoff_state, stale-state, retrieval-discipline, decision-vs-episode, cold-start, auto-wake, before-acting, after-directive, turn-open, turn-close, neo4j-vs-kv_store
 ---
 
 # Neo4j-first context discipline
