@@ -60,10 +60,21 @@ fi
 # Now scans the full brief and adds an explicit "Architecture invariant" / "Architectural
 # invariant" heading guard.
 if echo "$brief" | grep -qiE '(platform|multi-tenant|multi tenant|multitenant)'; then
+  # API-call negation: skip if all "platform" mentions are within Capacitor/process/navigator
+  # API-call references (isNativePlatform, getPlatform, process.platform, etc) and there is no
+  # standalone multi-tenant/platform-as-product reference. Tuned 2026-04-29-PM by author of
+  # ~/ecodiaos/patterns/windows-spawn-must-use-spawnSync... after a session of false-positives.
+  platform_total=$(echo "$brief" | grep -oiE '(platform|multi-tenant|multi tenant|multitenant)' | wc -l)
+  api_platform=$(echo "$brief" | grep -oiE '(isNativePlatform|getPlatform|process\.platform|navigator\.platform|Capacitor\.platform|platform === [^a-z]ios|platform === [^a-z]android|platform === [^a-z]web|platform: [^a-z](ios|android|web))' | wc -l)
+  # Explicit single-tenant negation: brief explicitly says single-tenant or not multi-tenant.
+  if echo "$brief" | grep -qiE '(single-tenant|single tenant|not multi-tenant|no multi-tenant|not platform-style)'; then
+    : # explicit single-tenant - skip Check 2
+  elif [ "$platform_total" -le "$api_platform" ]; then
+    : # all "platform" mentions are API-call names, not multi-tenancy - skip Check 2
   # Heading guard: an explicit "Architecture invariant" / "Architectural invariant" heading
   # (case-insensitive, dash or space separator allowed, optional bold/colon) followed by any
   # non-trivial content is sufficient. Empty/heading-only sections do not satisfy the guard.
-  if echo "$brief" | grep -qiE '(architecture|architectural)[ -]?invariant[*:[:space:]]+[^[:space:]]'; then
+  elif echo "$brief" | grep -qiE '(architecture|architectural)[ -]?invariant[*:[:space:]]+[^[:space:]]'; then
     : # explicit Architecture-invariant heading with content - skip Check 2
   elif ! echo "$brief" | grep -qiE '(invariant|tenant resolution|\bRLS\b|tenant-scoped|hostname|tenant-aware|ARCHITECTURE|tenant_id|JWT custom claim)'; then
     warnings+=("[BRIEF-CHECK WARN] anti-pattern: platform-without-invariant in ${tool_name} - brief mentions platform/multi-tenant but lacks an architectural-invariant statement anywhere (no mention of: invariant, tenant resolution, RLS, tenant-scoped, hostname, tenant-aware, ARCHITECTURE, tenant_id, JWT). See ~/ecodiaos/patterns/brief-names-the-product-not-the-immediate-task.md")
@@ -82,6 +93,12 @@ if echo "$brief" | grep -qiE '(\bvercel\b|frontend|ecodiaos-frontend|roam-fronte
   # Prevents false-positive on briefs that mention "Vercel" only to negate it.
   if echo "$brief" | grep -qiE '(PM2[ -]?managed|not Vercel[ -]?linked|VPS[ -]?only|no Vercel deploy|ecodiaos backend is PM2|\(NOT Vercel[ -]?linked\)|\(NOT Vercel\))'; then
     : # explicitly non-Vercel - skip Check 3
+  # Recon-only / read-only / diagnostic-only negation: skip when brief explicitly states no
+  # code change occurs. Tuned 2026-04-29-PM after a session of false-positives where
+  # diagnostic / audit / doctrine briefs that referenced repo paths only to read them got
+  # flagged as needing deploy-verify.
+  elif echo "$brief" | grep -qiE '(recon only|recon[ -]+only|read-only|read only on|diagnostic only|doctrine only|no code change|no code changes|no PR|no merge|no deploy|no ship|do not push|do NOT push|do not modify|do NOT modify|do not commit|do NOT commit|out of scope.+(ship|publish|deploy)|recon \+ recommendation|verification only|inspection only|audit only|read-only on)'; then
+    : # explicitly recon/read-only - skip Check 3
   elif ! echo "$brief" | grep -qiE '(deploy[ _-]?verify|vercel[^.]{0,40}ready|poll[^.]{0,40}vercel|poll[^.]{0,40}ready|until[^.]{0,40}ready|wait[^.]{0,40}ready|deployment[^.]{0,40}ready)'; then
     warnings+=("[BRIEF-CHECK WARN] anti-pattern: vercel-linked-no-deploy-verify in ${tool_name} - brief touches a Vercel-linked codebase but lacks deploy-verify content. The fork is not done at git push - it must poll Vercel until READY. See ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md")
   fi
