@@ -1,3 +1,16 @@
+// Sync deps if package-lock.json changed since last run. Cheap no-op when
+// nothing's changed (one sha256sum). Runs once per `pm2 start/restart/reload`
+// invocation, not once per app, because the config is evaluated once.
+// See scripts/ensure-deps.sh.
+try {
+  require('child_process').execFileSync('bash', ['scripts/ensure-deps.sh'], {
+    cwd: '/home/tate/ecodiaos',
+    stdio: 'inherit',
+  })
+} catch (err) {
+  console.error('[ecosystem] ensure-deps failed — continuing anyway:', err.message)
+}
+
 const COMMON = {
   cwd: '/home/tate/ecodiaos',
   watch: false,
