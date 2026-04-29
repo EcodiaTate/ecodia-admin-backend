@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# abort-macro - set the kv_store abort flag for a (runbook, run_id) pair.
+#
+# Usage:
+#   abort-macro <runbook_name> <run_id>
+#
+# Posts to the conductor backend (http://localhost:3001) which upserts
+# kv_store.macros.aborts.<runbook_name>.<run_id> = 'true'. The macro
+# executor's `abort.check` step polls that key and halts gracefully on
+# next check. This is Tate's stop button when something looks wrong.
+#
+# See:
+#   - ~/ecodiaos/src/routes/runbooks.js (the abort route + validator)
+#   - ~/ecodiaos/clients/corazon-peer-architecture-2026-04-29.md
+#     ("Macro action vocabulary" section)
+#
+# Shipped 29 Apr 2026 (fork_mojuu72x_5decc8).
+
+set -euo pipefail
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: abort-macro <runbook_name> <run_id>" >&2
+  exit 2
+fi
+
+NAME="$1"
+RUN_ID="$2"
+BACKEND="${ECODIAOS_BACKEND_URL:-http://localhost:3001}"
+
+resp=$(curl -sS -X POST \
+  -H 'Content-Type: application/json' \
+  -d "$(printf '{"run_id":"%s"}' "$RUN_ID")" \
+  "$BACKEND/api/runbooks/$NAME/abort")
+
+echo "$resp"
