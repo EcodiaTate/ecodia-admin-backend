@@ -237,6 +237,41 @@ if [[ "$PLATFORM" == "ios" ]]; then
 
   step "iOS pre-flight: reading creds from kv_store"
 
+  # =========================================================================
+  # iOS upload path selection.
+  #
+  # PRIMARY (default):    GUI-macro path. Uploads via Xcode Organizer or
+  #                       Transporter on the Mac (Tate's logged-in Apple ID).
+  #                       No ASC API key required.
+  #                       Doctrine: ~/ecodiaos/patterns/gui-macro-uses-logged-in-session-not-generated-api-key.md
+  #                       Strategic_Direction: "GUI macros replace API keys for
+  #                       autonomous releases - use logged-in user sessions over
+  #                       generated programmatic credentials when both work."
+  #
+  # FALLBACK:             ASC API key path. xcrun altool --apiKey/--apiIssuer.
+  #                       Engaged only if (a) IOS_UPLOAD_PATH=altool env override,
+  #                       OR (b) creds.asc_api_key_p8 + key_id + issuer_id all
+  #                       present AND no macro path is available, OR (c) the
+  #                       macro upload step fails AND fallback is opted-in via
+  #                       IOS_UPLOAD_FALLBACK_TO_ALTOOL=1.
+  #
+  # See ~/ecodiaos/clients/release-candidate-analysis-2026-04-29.md and
+  # ~/ecodiaos/drafts/macro-architecture-roadmap-2026-04-29.md for the
+  # full path-selection rationale and the macro handler specs.
+  # =========================================================================
+
+  IOS_UPLOAD_PATH="${IOS_UPLOAD_PATH:-macro}"
+  case "$IOS_UPLOAD_PATH" in
+    macro|altool) ;;
+    *) die "IOS_UPLOAD_PATH must be 'macro' (default) or 'altool' (fallback). Got: '$IOS_UPLOAD_PATH'." ;;
+  esac
+  echo "ios_upload_path: $IOS_UPLOAD_PATH"
+
+  # Macro target host - which agent runs the GUI-macro upload.
+  # Default: SY094 (MacInCloud Mac, has Xcode Organizer + Transporter).
+  # Override: IOS_MACRO_HOST=corazon if Apple workflows have moved to Corazon.
+  IOS_MACRO_HOST="${IOS_MACRO_HOST:-sy094}"
+
   # creds.macincloud is a JSON object: {username, password, hostname, agent_token, ...}
   MAC_USER="$(kv_get_field 'creds.macincloud' 'username')"
   MAC_PASS="$(kv_get_field 'creds.macincloud' 'password')"
@@ -255,14 +290,22 @@ if [[ "$PLATFORM" == "ios" ]]; then
   [[ -n "$APPLE_TEAM" ]] || require_cred 'creds.apple.team_id' 'Tate must provide the 10-char Apple team ID. Source: developer.apple.com > Membership page (visible after signing in to apple@ecodia.au). Store in kv_store as creds.apple = jsonb {"team_id":"XXXXXXXXXX"} or as the scalar key creds.apple.team_id. See app-release-flow-ios.md Step 0.'
 
   # ASC API key bundle.
-  ASC_KEY_ID="$(kv_get_scalar 'creds.asc_api_key_id')"
-  [[ -n "$ASC_KEY_ID" ]] || require_cred 'creds.asc_api_key_id' 'Tate must generate the App Store Connect API key at appstoreconnect.apple.com > Users and Access > Integrations > Keys > +. Store the 10-char Key ID at creds.asc_api_key_id. See ios-signing-credential-paths.md path 1.'
+  # Required only on the altool fallback path. On the macro path, the upload
+  # uses Tate's logged-in Apple ID (Xcode Keychain or Transporter session) and
+  # no programmatic API key is needed.
+  ASC_KEY_ID=""
+  ASC_ISSUER=""
+  ASC_P8=""
+  if [[ "$IOS_UPLOAD_PATH" == "altool" ]]; then
+    ASC_KEY_ID="$(kv_get_scalar 'creds.asc_api_key_id')"
+    [[ -n "$ASC_KEY_ID" ]] || require_cred 'creds.asc_api_key_id' 'Tate must generate the App Store Connect API key at appstoreconnect.apple.com > Users and Access > Integrations > Keys > +. Store the 10-char Key ID at creds.asc_api_key_id. See ios-signing-credential-paths.md path 1. NOTE: prefer the GUI-macro upload path (default) which does not require this key - see ~/ecodiaos/patterns/gui-macro-uses-logged-in-session-not-generated-api-key.md.'
 
-  ASC_ISSUER="$(kv_get_scalar 'creds.asc_api_issuer_id')"
-  [[ -n "$ASC_ISSUER" ]] || require_cred 'creds.asc_api_issuer_id' 'Issuer ID (UUID) shown on the same App Store Connect Keys page as the API key. Store at creds.asc_api_issuer_id.'
+    ASC_ISSUER="$(kv_get_scalar 'creds.asc_api_issuer_id')"
+    [[ -n "$ASC_ISSUER" ]] || require_cred 'creds.asc_api_issuer_id' 'Issuer ID (UUID) shown on the same App Store Connect Keys page as the API key. Store at creds.asc_api_issuer_id.'
 
-  ASC_P8="$(kv_get_scalar 'creds.asc_api_key_p8')"
-  [[ -n "$ASC_P8" ]] || require_cred 'creds.asc_api_key_p8' 'The .p8 file is downloadable ONCE when the API key is generated. Store full file contents (BEGIN/END lines included) at creds.asc_api_key_p8. If lost, revoke and regenerate the key.'
+    ASC_P8="$(kv_get_scalar 'creds.asc_api_key_p8')"
+    [[ -n "$ASC_P8" ]] || require_cred 'creds.asc_api_key_p8' 'The .p8 file is downloadable ONCE when the API key is generated. Store full file contents (BEGIN/END lines included) at creds.asc_api_key_p8. If lost, revoke and regenerate the key. NOTE: prefer the GUI-macro upload path (default) which does not require this key.'
+  fi
 
   step "iOS: SSH preflight to $MAC_USER@$MAC_HOST"
 
@@ -283,20 +326,31 @@ if [[ "$PLATFORM" == "ios" ]]; then
     die "SSH to $MAC_USER@$MAC_HOST failed. Verify creds.macincloud.password is current; the panel rotates it."
   fi
 
-  step "iOS: stage ASC API key on SY094 (~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8)"
-  # Per app-release-flow-ios.md Step 1.
-  # Pipe via stdin to avoid embedding the .p8 contents in a heredoc that ssh-quoting would mangle.
-  printf '%s' "$ASC_P8" | ssh_mac "
-    set -e
-    mkdir -p ~/.appstoreconnect/private_keys
-    cat > ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
-    chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
-  "
+  if [[ "$IOS_UPLOAD_PATH" == "altool" ]]; then
+    step "iOS [altool fallback]: stage ASC API key on SY094 (~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8)"
+    # Per app-release-flow-ios.md Step 1.
+    # Pipe via stdin to avoid embedding the .p8 contents in a heredoc that ssh-quoting would mangle.
+    printf '%s' "$ASC_P8" | ssh_mac "
+      set -e
+      mkdir -p ~/.appstoreconnect/private_keys
+      cat > ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+      chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+    "
 
-  step "iOS: verify ASC key works (xcrun altool --list-providers)"
-  if ! ssh_mac "xcrun altool --list-providers --apiKey '$ASC_KEY_ID' --apiIssuer '$ASC_ISSUER' 2>&1" | tee /tmp/asc-providers.log | grep -qi 'Provider'; then
-    cat /tmp/asc-providers.log >&2 || true
-    die "ASC API key validation failed. Common causes: wrong Key ID/Issuer, key revoked, .p8 malformed. Re-stage from kv_store or regenerate."
+    step "iOS [altool fallback]: verify ASC key works (xcrun altool --list-providers)"
+    if ! ssh_mac "xcrun altool --list-providers --apiKey '$ASC_KEY_ID' --apiIssuer '$ASC_ISSUER' 2>&1" | tee /tmp/asc-providers.log | grep -qi 'Provider'; then
+      cat /tmp/asc-providers.log >&2 || true
+      die "ASC API key validation failed. Common causes: wrong Key ID/Issuer, key revoked, .p8 malformed. Re-stage from kv_store or regenerate. Or switch to IOS_UPLOAD_PATH=macro (default) to skip the API key entirely."
+    fi
+  else
+    step "iOS [macro path]: skipping ASC API key staging (using Tate's logged-in Apple ID via Xcode Organizer or Transporter macro)"
+    # Per ~/ecodiaos/patterns/gui-macro-uses-logged-in-session-not-generated-api-key.md
+    # The macro target Mac (SY094 or Corazon) must have:
+    #   - Xcode Organizer reachable (one-time Apple ID login already done in Xcode Settings > Accounts), OR
+    #   - Transporter app installed with Apple ID signed in.
+    # The signing identities live in the Mac keychain; xcodebuild archive +
+    # exportArchive work without -authenticationKey* flags as long as Xcode has
+    # an active session.
   fi
 
   step "iOS: build web assets on VPS, then sync to SY094"
@@ -343,52 +397,160 @@ if [[ "$PLATFORM" == "ios" ]]; then
 
   step "iOS: xcodebuild archive (slow, 5-15 min)"
   # Per app-release-flow-ios.md Step 4.
+  # On the macro path the archive does NOT pass -authenticationKey* flags;
+  # Xcode uses the Apple ID session in the Mac's keychain (one-time login).
+  # On the altool fallback path we still pass the .p8 + Key/Issuer for
+  # provisioning-profile fetch via -allowProvisioningUpdates.
   ARCHIVE_PATH="\$HOME/projects/$SLUG/ios/App/build/$SLUG.xcarchive"
-  ssh_mac "set -e
-    cd ~/projects/$SLUG/ios/App
-    rm -rf build/
-    xcodebuild \
-      -workspace App.xcworkspace \
-      -scheme App \
-      -configuration Release \
-      -archivePath build/$SLUG.xcarchive \
-      -destination 'generic/platform=iOS' \
-      -allowProvisioningUpdates \
-      -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
-      -authenticationKeyID '$ASC_KEY_ID' \
-      -authenticationKeyIssuerID '$ASC_ISSUER' \
-      DEVELOPMENT_TEAM='$APPLE_TEAM' \
-      archive
-  " || die "xcodebuild archive failed. Check the SSH output above for the actual cause. Common fixes in app-release-flow-ios.md 'Common failure modes' table."
+  if [[ "$IOS_UPLOAD_PATH" == "altool" ]]; then
+    ssh_mac "set -e
+      cd ~/projects/$SLUG/ios/App
+      rm -rf build/
+      xcodebuild \
+        -workspace App.xcworkspace \
+        -scheme App \
+        -configuration Release \
+        -archivePath build/$SLUG.xcarchive \
+        -destination 'generic/platform=iOS' \
+        -allowProvisioningUpdates \
+        -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+        -authenticationKeyID '$ASC_KEY_ID' \
+        -authenticationKeyIssuerID '$ASC_ISSUER' \
+        DEVELOPMENT_TEAM='$APPLE_TEAM' \
+        archive
+    " || die "xcodebuild archive failed. Check the SSH output above for the actual cause. Common fixes in app-release-flow-ios.md 'Common failure modes' table."
+  else
+    ssh_mac "set -e
+      cd ~/projects/$SLUG/ios/App
+      rm -rf build/
+      xcodebuild \
+        -workspace App.xcworkspace \
+        -scheme App \
+        -configuration Release \
+        -archivePath build/$SLUG.xcarchive \
+        -destination 'generic/platform=iOS' \
+        -allowProvisioningUpdates \
+        DEVELOPMENT_TEAM='$APPLE_TEAM' \
+        archive
+    " || die "xcodebuild archive failed. On the GUI-macro path Xcode must have an active Apple ID session (Xcode > Settings > Accounts). If the failure is 'No Accounts' or 'No profiles for' errors, either (a) one-time Tate Xcode login on $IOS_MACRO_HOST, or (b) re-run with IOS_UPLOAD_PATH=altool to use the ASC API key fallback."
+  fi
 
   step "iOS: xcodebuild -exportArchive (produce .ipa)"
   # Per app-release-flow-ios.md Step 5. ExportOptions.plist must be committed
   # to the repo at ios/App/ExportOptions.plist (per Co-Exist PR #14 reference).
-  ssh_mac "set -e
-    cd ~/projects/$SLUG/ios/App
-    test -f ExportOptions.plist || { echo 'ExportOptions.plist missing in ios/App/'; exit 1; }
-    xcodebuild -exportArchive \
-      -archivePath build/$SLUG.xcarchive \
-      -exportOptionsPlist ExportOptions.plist \
-      -exportPath build/export \
-      -allowProvisioningUpdates \
-      -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
-      -authenticationKeyID '$ASC_KEY_ID' \
-      -authenticationKeyIssuerID '$ASC_ISSUER'
-  " || die "xcodebuild -exportArchive failed. Verify ios/App/ExportOptions.plist is committed and contains the correct teamID."
+  if [[ "$IOS_UPLOAD_PATH" == "altool" ]]; then
+    ssh_mac "set -e
+      cd ~/projects/$SLUG/ios/App
+      test -f ExportOptions.plist || { echo 'ExportOptions.plist missing in ios/App/'; exit 1; }
+      xcodebuild -exportArchive \
+        -archivePath build/$SLUG.xcarchive \
+        -exportOptionsPlist ExportOptions.plist \
+        -exportPath build/export \
+        -allowProvisioningUpdates \
+        -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8 \
+        -authenticationKeyID '$ASC_KEY_ID' \
+        -authenticationKeyIssuerID '$ASC_ISSUER'
+    " || die "xcodebuild -exportArchive failed. Verify ios/App/ExportOptions.plist is committed and contains the correct teamID."
+  else
+    ssh_mac "set -e
+      cd ~/projects/$SLUG/ios/App
+      test -f ExportOptions.plist || { echo 'ExportOptions.plist missing in ios/App/'; exit 1; }
+      xcodebuild -exportArchive \
+        -archivePath build/$SLUG.xcarchive \
+        -exportOptionsPlist ExportOptions.plist \
+        -exportPath build/export \
+        -allowProvisioningUpdates
+    " || die "xcodebuild -exportArchive failed (GUI-macro path). Verify ios/App/ExportOptions.plist is committed and contains the correct teamID. If signing identity is the issue, re-run with IOS_UPLOAD_PATH=altool."
+  fi
 
-  step "iOS: upload IPA to App Store Connect (xcrun altool)"
+  step "iOS: upload IPA to App Store Connect"
   # Per app-release-flow-ios.md Step 6.
-  ssh_mac "set -e
-    cd ~/projects/$SLUG/ios/App
-    IPA=\$(ls build/export/*.ipa | head -1)
-    test -n \"\$IPA\" || { echo 'No .ipa produced in build/export/'; exit 1; }
-    xcrun altool --upload-app \
-      --type ios \
-      --file \"\$IPA\" \
-      --apiKey '$ASC_KEY_ID' \
-      --apiIssuer '$ASC_ISSUER'
-  " || die "altool --upload-app failed. Check ASC for processing errors. If 'Authentication failed (-22938)' the API key was rotated; re-stage."
+  # PRIMARY (macro path): drive Xcode Organizer or Transporter via the laptop
+  # agent's macro layer. Doctrine: ~/ecodiaos/patterns/gui-macro-uses-logged-in-session-not-generated-api-key.md
+  # FALLBACK (altool): xcrun altool --upload-app with ASC API key.
+  #
+  # The macro path requires:
+  #   1. The macro registry on the target host has 'xcode-organizer-upload' OR
+  #      'transporter-upload' registered. See Phase 1 macro fork (mojldsgx).
+  #   2. The eos-laptop-agent on the target host is reachable.
+  #   3. Tate has an active Apple ID session in Xcode (one-time login).
+  if [[ "$IOS_UPLOAD_PATH" == "altool" ]]; then
+    ssh_mac "set -e
+      cd ~/projects/$SLUG/ios/App
+      IPA=\$(ls build/export/*.ipa | head -1)
+      test -n \"\$IPA\" || { echo 'No .ipa produced in build/export/'; exit 1; }
+      xcrun altool --upload-app \
+        --type ios \
+        --file \"\$IPA\" \
+        --apiKey '$ASC_KEY_ID' \
+        --apiIssuer '$ASC_ISSUER'
+    " || die "altool --upload-app failed. Check ASC for processing errors. If 'Authentication failed (-22938)' the API key was rotated; re-stage."
+  else
+    # Resolve the .ipa path on the Mac, then dispatch the macro through the
+    # ecodiaos-backend laptop-agent gateway. The gateway routes by IOS_MACRO_HOST.
+    IPA_REMOTE_PATH="$(ssh_mac "cd ~/projects/$SLUG/ios/App && ls build/export/*.ipa | head -1" || true)"
+    if [[ -z "$IPA_REMOTE_PATH" ]]; then
+      die "No .ipa produced in build/export/ on $IOS_MACRO_HOST. Check the exportArchive step output."
+    fi
+    echo "ipa_remote: $IPA_REMOTE_PATH"
+
+    # The dispatch happens via the ecodiaos-backend macro proxy at
+    # /api/macro/run, which routes to the appropriate laptop-agent host.
+    # Body: {"host":"sy094","name":"xcode-organizer-upload","params":{"ipa_path":"..."}}.
+    # Fallback macro name: 'transporter-upload' (same params shape).
+    MACRO_NAME="${IOS_MACRO_NAME:-xcode-organizer-upload}"
+    case "$MACRO_NAME" in
+      xcode-organizer-upload|transporter-upload) ;;
+      *) die "IOS_MACRO_NAME must be 'xcode-organizer-upload' or 'transporter-upload'. Got: '$MACRO_NAME'." ;;
+    esac
+
+    if ! command -v curl >/dev/null 2>&1; then
+      die "curl not on PATH. Required to dispatch the iOS upload macro."
+    fi
+    EOS_API_BASE="${EOS_API_BASE:-http://localhost:3001}"
+    MACRO_PAYLOAD=$(python3 - <<PYEOF
+import json
+print(json.dumps({
+    "host": "$IOS_MACRO_HOST",
+    "name": "$MACRO_NAME",
+    "params": {"ipa_path": "$IPA_REMOTE_PATH"}
+}))
+PYEOF
+)
+    MACRO_RESP="$(curl -sS -X POST "$EOS_API_BASE/api/macro/run" -H "Content-Type: application/json" -d "$MACRO_PAYLOAD" || true)"
+    if [[ -z "$MACRO_RESP" ]] || ! printf '%s' "$MACRO_RESP" | grep -q '"ok":true'; then
+      err "macro $MACRO_NAME failed or returned non-ok: $MACRO_RESP"
+      if [[ "${IOS_UPLOAD_FALLBACK_TO_ALTOOL:-0}" == "1" ]]; then
+        err "IOS_UPLOAD_FALLBACK_TO_ALTOOL=1 set; falling through to altool path."
+        # Re-resolve creds since they were not loaded on the macro path.
+        ASC_KEY_ID="$(kv_get_scalar 'creds.asc_api_key_id')"
+        ASC_ISSUER="$(kv_get_scalar 'creds.asc_api_issuer_id')"
+        ASC_P8="$(kv_get_scalar 'creds.asc_api_key_p8')"
+        if [[ -z "$ASC_KEY_ID" || -z "$ASC_ISSUER" || -z "$ASC_P8" ]]; then
+          die "Macro upload failed AND fallback ASC creds missing. See ~/ecodiaos/patterns/gui-macro-uses-logged-in-session-not-generated-api-key.md for the macro-handler authoring path."
+        fi
+        printf '%s' "$ASC_P8" | ssh_mac "
+          set -e
+          mkdir -p ~/.appstoreconnect/private_keys
+          cat > ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+        "
+        ssh_mac "set -e
+          cd ~/projects/$SLUG/ios/App
+          IPA=\$(ls build/export/*.ipa | head -1)
+          xcrun altool --upload-app \
+            --type ios \
+            --file \"\$IPA\" \
+            --apiKey '$ASC_KEY_ID' \
+            --apiIssuer '$ASC_ISSUER'
+        " || die "Both macro AND altool fallback failed. See ASC and laptop-agent logs."
+      else
+        die "macro $MACRO_NAME failed. To fall through to altool automatically, set IOS_UPLOAD_FALLBACK_TO_ALTOOL=1. To author the macro handler, see ~/ecodiaos/drafts/macro-architecture-roadmap-2026-04-29.md."
+      fi
+    else
+      echo "macro_resp: $MACRO_RESP"
+    fi
+  fi
 
   if [[ "$ENV_TARGET" == "prod" ]]; then
     cat <<EOF
