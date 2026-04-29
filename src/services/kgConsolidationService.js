@@ -68,17 +68,25 @@ async function deduplicateNodes({ dryRun = false, skipEmbeddingSimilarity = fals
     }
   }
 
-  const merged = []
-
-  // Breadcrumb: record dedup ran even if zero merges happened. Without this,
-  // consolidated_at only moves when a merge succeeds — making a perfectly-
-  // healthy graph with no dupes look identical to a broken pipeline.
+  // Wrap the entire critical section in try/finally so the lock is ALWAYS
+  // released — even when the labelCounts query, embedding-similarity loop,
+  // relationship transfer, or any merge-write throws. Without this, an
+  // exception leaves a :__ConsolidationLock__{phase:'dedup'} node in Neo4j
+  // and every subsequent dedup cycle returns early until the 5-min TTL
+  // expires (or a release on a later successful run clears it). With ~6h
+  // cron cadence and an exception in the dedup path, the cron starves.
   try {
-    await runQuery(`
-      MERGE (m:DedupRun {singleton: true})
-      SET m.last_run_at = datetime(), m.run_count = coalesce(m.run_count, 0) + 1
-    `)
-  } catch {}
+    const merged = []
+
+    // Breadcrumb: record dedup ran even if zero merges happened. Without this,
+    // consolidated_at only moves when a merge succeeds — making a perfectly-
+    // healthy graph with no dupes look identical to a broken pipeline.
+    try {
+      await runQuery(`
+        MERGE (m:DedupRun {singleton: true})
+        SET m.last_run_at = datetime(), m.run_count = coalesce(m.run_count, 0) + 1
+      `)
+    } catch {}
 
   // Strategy 1: Exact name match after normalization — partitioned by label to avoid O(n²) cross-join.
   // First get all labels that have >1 node, then dedup within each label.
@@ -251,8 +259,10 @@ async function deduplicateNodes({ dryRun = false, skipEmbeddingSimilarity = fals
     }
   }
 
-  if (!dryRun) await releaseConsolidationLock('dedup')
-  return merged
+    return merged
+  } finally {
+    if (!dryRun) await releaseConsolidationLock('dedup')
+  }
 }
 
 // Transfer relationships from dupe node to keep node.
