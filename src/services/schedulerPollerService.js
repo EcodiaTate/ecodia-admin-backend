@@ -11,6 +11,7 @@
 const db = require('../config/db')
 const logger = require('../config/logger')
 const usageEnergy = require('./usageEnergyService')
+const doctrineSurface = require('./doctrineSurface')
 
 const POLL_INTERVAL_MS = 30_000
 const TZ_OFFSET_HOURS = 10 // AEST (UTC+10, no DST)
@@ -76,7 +77,31 @@ async function fireTask(task) {
   // behind in-flight turns or initialise an idle session. See
   // patterns/scheduler-no-pregate-trust-os-message-queue.md.
   try {
-    const prompt = `[SCHEDULED: ${task.name}] ${task.prompt}`
+    // Doctrine surface: keyword-grep ~/ecodiaos/{patterns,clients,docs/secrets}
+    // for files whose triggers: frontmatter matches tokens in this prompt, and
+    // prepend a <doctrine_surface> block so the conductor sees relevant durable
+    // doctrine before acting. Fail-open: any error here is logged and the
+    // un-surfaced prompt is sent. See drafts/context-surface-injection-points-
+    // recon-2026-04-29.md and patterns/decision-quality-self-optimization-
+    // architecture.md (Layer 1 expansion to cron-fire ingress).
+    let surfaceBlock = null
+    let surfaceMatches = []
+    try {
+      surfaceBlock = doctrineSurface.surfaceDoctrineBlock(task.prompt)
+      surfaceMatches = doctrineSurface.matchedFiles(task.prompt)
+    } catch (err) {
+      logger.warn('Scheduler: doctrine surface failed (skipping)', { name: task.name, error: err.message })
+    }
+    const prompt = surfaceBlock
+      ? `[SCHEDULED: ${task.name}]\n\n${surfaceBlock}\n\n${task.prompt}`
+      : `[SCHEDULED: ${task.name}] ${task.prompt}`
+    if (surfaceMatches.length > 0) {
+      logger.info('Scheduler: doctrine surfaces injected for cron prompt', {
+        name: task.name,
+        source: 'cron-fire',
+        surfaces: surfaceMatches.map(s => s.base),
+      })
+    }
     const res = await fetch(`http://127.0.0.1:${API_PORT}/api/os-session/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
