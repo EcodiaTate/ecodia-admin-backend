@@ -29,6 +29,7 @@ const domains = [
   './growth',
   './bookkeeping',
   './coding',
+  './laptop',
 ]
 
 const registry = require('../services/capabilityRegistry')
