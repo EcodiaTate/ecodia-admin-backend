@@ -1,3 +1,7 @@
+---
+triggers: macincloud, sy094, sy094.macincloud.com, user276189, sshpass, ssh-tunnel-17456, agent_token-mac, port-7456-mac, xcrun-simctl, ios-build-host, no-tailscale-mac, PubkeyAuthentication=no, mac-ssh-password-rotate
+---
+
 # SY094 (MacInCloud) - Access Pattern
 
 > Reframe per Tate directive 2026-04-26: the real blocker on the Mac is not signing credentials, it is the access pattern. Document that here. Signing creds will surface naturally when an iOS build is actually attempted.

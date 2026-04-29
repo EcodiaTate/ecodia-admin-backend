@@ -1,3 +1,7 @@
+---
+triggers: ordit, fireauditors, fireauditors1, eugene, ekerner, craige, x-bitbucket-api-token-auth, pr-212, cognito-integration-ordit, prisma-db-push, mysql-3307, AuthSource.COGNITO, spatial-and-compliance-pty-ltd, ekerner@ekerner.com, craige@fireauditors.com.au, ordit-dispatch-spec, AdminSetUserPasswordCommand, AWS_COGNITO_USER_POOL_ID
+---
+
 # Ordit - Client Knowledge File
 
 > **DISPATCH SPEC FILES (load before any ordit-backend Factory session):**

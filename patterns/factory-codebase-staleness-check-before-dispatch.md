@@ -1,5 +1,5 @@
 ---
-triggers: factory, factory-dispatch, start_cc_session, codebase-staleness, worktree-stale, behind-origin, divergent-base, fe-dispatch, frontend-factory, ecodiaos-frontend, rebase-conflict, unmergeable-commit, stale-clone, codebases-registry
+triggers: factory-dispatch, start_cc_session, codebase-staleness, worktree-stale, behind-origin, divergent-base, fe-dispatch, frontend-factory, ecodiaos-frontend, rebase-conflict, unmergeable-commit, stale-clone, codebases-registry
 ---
 
 # Factory codebase-staleness check before dispatch

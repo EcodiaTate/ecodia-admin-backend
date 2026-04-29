@@ -1,5 +1,5 @@
 ---
-triggers: symbolic-logging, ill-log-this, ill-note-this, ill-come-back-to, will-fix-later, will-address-later, self-promise, followup, cold-session-memory, todo-drift, paper-todo, act-or-schedule, turn-completion-discipline
+triggers: symbolic-logging, ill-log-this, ill-note-this, ill-come-back-to, will-fix-later, will-address-later, self-promise, cold-session-memory, todo-drift, paper-todo, act-or-schedule, turn-completion-discipline
 ---
 
 # Symbolic "I'll log this" is a failure. Act now, or schedule it now, or admit you won't do it.

@@ -1,5 +1,5 @@
 ---
-triggers: hook, settings.json, discipline, surfacing, pre-commit, pre-push, remember-to, before-each, every-time, enforcement
+triggers: PreToolUse-hook, settings.json, hook-enforcement, written-discipline-fail, pre-commit-hook, pre-push-hook, remember-to-rule, every-time-rule, hook-vs-doctrine
 ---
 
 # Prefer hooks over written discipline for recurring checks

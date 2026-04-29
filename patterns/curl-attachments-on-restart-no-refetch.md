@@ -1,6 +1,6 @@
 # Curl attachments to disk on restart, do not re-invoke WebFetch
 
-triggers: webfetch, attachments, restart, recent_exchanges, message-redelivery, re-fetch, supabase-os-attachments, turn-restart, file-url, one-shot-download, /tmp, spec-file, attached-file, http-attachment
+triggers: WebFetch-restart, attachments-on-restart, recent_exchanges, message-redelivery, supabase-os-attachments, turn-restart, attached-file-url, one-shot-download, http-attachment-restart, curl-attachments
 
 ---
 

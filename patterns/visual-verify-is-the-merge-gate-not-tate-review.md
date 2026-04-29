@@ -1,5 +1,5 @@
 ---
-triggers: pr, merge, review, vercel, preview, ready, approval, ship, deploy, fork-report, gh-pr, github, visual-verify, screenshot, puppeteer, corazon, laptop-agent
+triggers: visual-verify-merge-gate, vercel-preview-ready, fork-pr-merge, gh-pr-merge, fork-pr-approval, awaiting-tate-review, visual-verification-ship, screenshot-pr, corazon-pr-verify, laptop-agent-pr
 ---
 
 # Visual verification is the merge gate. Tate is NOT in the approve loop.

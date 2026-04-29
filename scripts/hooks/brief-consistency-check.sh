@@ -1,14 +1,35 @@
 #!/usr/bin/env bash
 # brief-consistency-check.sh
 #
-# PreToolUse hook for mcp__forks__spawn_fork and mcp__factory__start_cc_session.
-# Reads tool input on stdin, extracts the brief, runs four checks, and warns
-# (never blocks) when known anti-patterns are present.
+# PreToolUse hook for fork-and-factory dispatch:
+#   - mcp__forks__spawn_fork
+#   - mcp__factory__start_cc_session
 #
-# Surfaces:
+# Reads tool input on stdin, extracts the brief from one of the standard fields
+# (.tool_input.brief / .prompt / .message / .task), runs five checks, and warns
+# (never blocks) when known anti-patterns or context-surface gaps are present.
+#
+# Both dispatch surfaces are routed through this single hook because they share
+# brief-shape (model-authored prose describing scope) and share the same anti-
+# pattern catalogue. The Factory CLI dispatch field is `.tool_input.prompt`;
+# the fork dispatch field is `.tool_input.brief`. The fallback chain catches
+# both. The matcher in settings.json (mcp__forks__spawn_fork|mcp__factory__
+# start_cc_session) wires PreToolUse to fire on either tool.
+#
+# Surfaces (Checks 1-4):
 #   ~/ecodiaos/patterns/brief-names-the-product-not-the-immediate-task.md
 #   ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md
 #   ~/ecodiaos/patterns/project-naming-mirrors-repo-name.md
+#
+# Surfaces (Check 5 - meta-pattern):
+#   ~/ecodiaos/patterns/context-surfacing-must-be-reliable-and-selective.md
+#
+# Related downstream doctrine the conductor should read AFTER a Factory dispatch
+# is approved (these patterns apply to the approve step, not the dispatch step,
+# so they are NOT enforced here - just cross-referenced for awareness):
+#   ~/ecodiaos/patterns/factory-approve-no-push-no-commit-sha.md
+#     (manual git push + cc_sessions.commit_sha reconcile required after every
+#      approve_factory_deploy until the approve pipeline is fixed)
 #
 # Output:
 #   stderr: '[BRIEF-CHECK WARN] anti-pattern: <name> in <tool> - <detail>'
@@ -130,6 +151,132 @@ if echo "$brief" | grep -qiE '(scaffold.*vercel|new vercel project|create vercel
   if ! echo "$brief" | grep -qE 'PROJECT[ _-]?NAMING'; then
     warnings+=("[BRIEF-CHECK WARN] anti-pattern: scaffold-no-project-naming in ${tool_name} - brief scaffolds a new Vercel project but lacks a PROJECT NAMING note. Vercel project name must equal GitHub repo name; never accept the directory-default ('fe'/'be'). See ~/ecodiaos/patterns/project-naming-mirrors-repo-name.md")
   fi
+fi
+
+# --- Check 5: [CONTEXT-SURFACE WARN] - trigger keyword present, owning file not referenced ---
+#
+# Implements the meta-pattern in:
+#   ~/ecodiaos/patterns/context-surfacing-must-be-reliable-and-selective.md
+#
+# Builds a one-time keyword->file-path index from triggers: lines across all known
+# doctrine-layer directories (patterns/, clients/, docs/secrets/). For each trigger
+# keyword the brief contains, checks whether the owning file's basename OR path is
+# referenced in the brief. If keyword present + file unreferenced, emits one warn
+# per missing reference (capped to keep noise bounded).
+#
+# Warn-only. Designed to surface durable doctrine at the moment of fork/factory
+# dispatch. False-positive tuning happens on the trigger keyword side (tighten
+# the trigger), not the hook side.
+#
+# Performance: typical patterns/ directory is ~100 files * ~10 triggers = ~1000
+# keyword entries. The hook scans the brief for each keyword; this is fast enough
+# in practice (sub-100ms typical).
+#
+# DOCTRINE_DIRS: directories scanned for triggers: frontmatter.
+DOCTRINE_DIRS=(
+  "/home/tate/ecodiaos/patterns"
+  "/home/tate/ecodiaos/clients"
+  "/home/tate/ecodiaos/docs/secrets"
+)
+
+# WARN_CAP: maximum number of [CONTEXT-SURFACE WARN] lines emitted per invocation.
+# Prevents a brief that name-drops many domains from drowning the model in warns.
+WARN_CAP=8
+
+# context_surface_warns: array of "<file_path>|<keyword_matched>" entries.
+context_surface_warns=()
+context_surface_count=0
+
+for dir in "${DOCTRINE_DIRS[@]}"; do
+  [ -d "$dir" ] || continue
+  # Find files with a triggers: line in the first 10 lines (frontmatter zone).
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    # Extract the triggers: line content (everything after "triggers:" up to end of line).
+    trig_line=$(head -10 "$f" 2>/dev/null | grep -m 1 '^triggers:' | sed -E 's/^triggers:[[:space:]]*//')
+    [ -z "$trig_line" ] && continue
+    base=$(basename "$f")
+    # Tokenise: split on commas, strip whitespace, lowercase.
+    IFS=',' read -ra kw_arr <<< "$trig_line"
+    for kw in "${kw_arr[@]}"; do
+      # Trim leading/trailing whitespace.
+      kw=$(echo "$kw" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+      # Skip empty or trivially-short keywords (would false-positive on common letters).
+      [ ${#kw} -lt 4 ] && continue
+      # Skip keywords containing wildcard-like glyphs that grep won't handle cleanly.
+      case "$kw" in *\**|*\?*|*\[*|*\]*) continue ;; esac
+      # Lowercase the keyword for case-insensitive comparison.
+      kw_lc=$(echo "$kw" | tr '[:upper:]' '[:lower:]')
+      # Check 1: is the keyword present in the brief (case-insensitive, word-boundary-ish)?
+      # Use grep -F (fixed string) to avoid regex pitfalls on hyphenated keywords.
+      if echo "$brief" | grep -qiF -- "$kw_lc"; then
+        # Check 2: is the basename or full path referenced in the brief?
+        if ! echo "$brief" | grep -qF -- "$base" && ! echo "$brief" | grep -qF -- "$f"; then
+          # Cap to avoid noise.
+          if [ "$context_surface_count" -lt "$WARN_CAP" ]; then
+            context_surface_warns+=("[CONTEXT-SURFACE WARN] brief contains trigger keyword '${kw_lc}' but does not reference ${f}. Read the file before dispatching, or tighten the trigger if false-positive. See ~/ecodiaos/patterns/context-surfacing-must-be-reliable-and-selective.md")
+            context_surface_count=$((context_surface_count + 1))
+          fi
+          # One warn per file (per first-keyword-hit) is enough; break inner loop.
+          break
+        fi
+      fi
+    done
+    # Stop scanning once the cap is hit.
+    [ "$context_surface_count" -ge "$WARN_CAP" ] && break 2
+  done < <(find "$dir" -maxdepth 1 -name '*.md' -not -name 'INDEX.md' 2>/dev/null)
+done
+
+# Append the [CONTEXT-SURFACE WARN] entries to the main warnings array.
+for w in "${context_surface_warns[@]}"; do
+  warnings+=("$w")
+done
+
+# --- Check 6: Factory-dispatch-specific approve-pipeline awareness ---
+# Fires only on mcp__factory__start_cc_session. Surfaces the factory-approve-no-
+# push-no-commit-sha doctrine so the conductor sees it before approving the
+# downstream session. The pattern itself fires post-approve (not at dispatch),
+# but the conductor's plan needs to include the manual-reconcile step BEFORE
+# the session lands. This is a forward-looking cross-reference, not an anti-
+# pattern check.
+#
+# Single warn per dispatch (not per keyword). Skipped if the brief already
+# references the pattern path or basename.
+if [ "$tool_name" = "mcp__factory__start_cc_session" ]; then
+  if ! echo "$brief" | grep -qiF "factory-approve-no-push-no-commit-sha"; then
+    warnings+=("[BRIEF-CHECK INFO] Factory dispatch via mcp__factory__start_cc_session - after approve_factory_deploy, the conductor must verify (a) git log origin/main..HEAD is empty (push landed) and (b) cc_sessions.commit_sha is non-NULL. The approve pipeline does NOT push or populate commit_sha automatically. See ~/ecodiaos/patterns/factory-approve-no-push-no-commit-sha.md for the manual-reconcile protocol.")
+  fi
+fi
+
+# --- Telemetry emission (Layer 4) ---
+# Emit a single JSONL line capturing this hook fire: tool, brief excerpt,
+# every (file_path, trigger_keyword) pair surfaced under the [CONTEXT-SURFACE WARN]
+# rules. Lines from this hook get normalised into dispatch_event +
+# surface_event rows by ~/ecodiaos/src/services/telemetry/dispatchEventConsumer.js.
+# Failures here are silent and never affect hook output.
+TELEM_LIB="$(dirname "$0")/lib/emit-telemetry.sh"
+if [ -f "$TELEM_LIB" ]; then
+  # shellcheck disable=SC1090
+  source "$TELEM_LIB"
+  brief_excerpt=$(printf '%s' "$brief" | head -c 500)
+  ctx_json=$(jq -nc --arg be "$brief_excerpt" --arg ws "${WARN_CAP}" '{brief_excerpt:$be, warn_cap:($ws|tonumber)}' 2>/dev/null || echo '{}')
+  # Build surfaces array from context_surface_warns ("file|keyword" entries).
+  surfaces_array='[]'
+  if [ "${#context_surface_warns[@]}" -gt 0 ]; then
+    surfaces_jq='[]'
+    for entry in "${context_surface_warns[@]}"; do
+      # Best-effort parse of the warning string for path + keyword.
+      f_path=$(echo "$entry" | grep -oE '/home/tate/ecodiaos/[^ ]*\.md' | head -1)
+      kw=$(echo "$entry" | grep -oE "trigger keyword '[^']+'" | head -1 | sed -E "s/trigger keyword '([^']+)'/\1/")
+      [ -z "$f_path" ] && continue
+      surfaces_jq=$(echo "$surfaces_jq" | jq -c \
+        --arg p "$f_path" \
+        --arg k "$kw" \
+        '. + [{pattern_path:$p, trigger_keyword:$k, source_layer:"hook:brief-consistency"}]' 2>/dev/null || echo "$surfaces_jq")
+    done
+    surfaces_array="$surfaces_jq"
+  fi
+  emit_telemetry_safe "brief-consistency-check" "$tool_name" "$ctx_json" "$surfaces_array"
 fi
 
 if [ "${#warnings[@]}" -eq 0 ]; then

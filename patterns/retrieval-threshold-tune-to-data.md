@@ -1,5 +1,5 @@
 ---
-triggers: neo4j, retrieval, semantic-search, vector-search, threshold, min-score, relevant-memory, injection, embedding, cold-start-warmup, telemetry, graphrag, cortex-memory, node_embeddings
+triggers: retrieval-threshold, semantic-search-tuning, vector-search, min-score, relevant-memory-injection, cold-start-warmup, retrieval-telemetry, graphrag, cortex-memory, node_embeddings, threshold-default
 ---
 
 # Tune retrieval thresholds to the actual corpus, not to a default number

@@ -1,5 +1,5 @@
 ---
-triggers: schedule_delayed, scheduled-task, stale-schedule, review-checkpoint, review-factory, parallel-resolution, out-of-band-completion, os_scheduled_tasks, stale-review, symbolic-logging, logging-without-doing
+triggers: schedule_cancel, stale-schedule-cancel, schedule-checkpoint-cancel, review-checkpoint, parallel-resolution-cancel, out-of-band-completion, os_scheduled_tasks-cancel, stale-review-task
 ---
 
 # Cancel stale scheduled tasks the moment the work they track is resolved

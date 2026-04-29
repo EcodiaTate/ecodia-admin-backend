@@ -1,5 +1,5 @@
 ---
-triggers: claude-md, doctrine, doctrine-cadence, claude-md-reflection, paywall, tool-broken, workaround, operational-reality, environment-change, credential-rotation, mcp-schema-change, scope-decision, fresh-session, cold-start, discovery, latency, deferred-write, batch-update
+triggers: discovery-to-doctrine, CLAUDE.md-update, claude-md-reflection, factory-cli-paywall, tool-broken-doctrine, workaround-supersedes, operational-reality-write, credential-rotation-doctrine, mcp-schema-change, fresh-session-needs, doctrine-deferred-write, doctrine-same-turn
 ---
 
 # Discovery to doctrine in one turn — operational realities land in CLAUDE.md the turn they emerge

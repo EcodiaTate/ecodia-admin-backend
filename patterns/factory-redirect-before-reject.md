@@ -1,5 +1,5 @@
 ---
-triggers: factory, reject_factory_session, resume_cc_session, send_cc_message, phantom-session, redirect-first, factory-redirect, factory-correction, in-flight-correction, factory-completed-wrong, ladder, factory-ladder
+triggers: reject_factory_session, resume_cc_session, send_cc_message, factory-phantom-session, redirect-first, factory-redirect, factory-correction, in-flight-correction, factory-completed-wrong, factory-ladder
 ---
 
 # Redirect Factory before reject - reject is the last rung, not the first

@@ -1,5 +1,5 @@
 ---
-triggers: recurring-drift, mechanical-enforcement, cron-extension, parallel-cron, factory-dispatch-decision, drift-correction, status_board, enforcement-layer, queueing-is-not-a-verb, pattern-grep, build-vs-extend, third-time-failure
+triggers: recurring-drift, mechanical-enforcement-extend, cron-extension, parallel-cron, factory-dispatch-decision, drift-correction, enforcement-layer-extend, queueing-is-not-a-verb, build-vs-extend, third-time-failure
 ---
 
 # Recurring drift extends an existing enforcement layer - never build a parallel one

@@ -1,5 +1,5 @@
 ---
-triggers: tate-absence, kili-window, kili-absence, travel-block, sleep-window, away-from-keyboard, posture, meta-loop, absence-framing, declared-absence
+triggers: tate-absence, kili-window, kili-absence, travel-block, sleep-window, away-from-keyboard, absence-posture, meta-loop-absence, absence-framing, declared-absence, vercel-creator-falsify
 ---
 
 # Falsify declared absence-windows via Vercel deploy creator metadata

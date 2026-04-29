@@ -1,5 +1,5 @@
 ---
-triggers: vercel, redirect, redirect loop, too many redirects, ERR_TOO_MANY_REDIRECTS, subdomain, code.ecodia.au, x-matched-path, middleware rewrite, 307 loop
+triggers: vercel-redirect-loop, redirect-loop, too-many-redirects, ERR_TOO_MANY_REDIRECTS, vercel-subdomain, code.ecodia.au, x-matched-path, middleware-rewrite, 307-loop
 ---
 
 # Vercel subdomain rewrite + page redirect = infinite loop

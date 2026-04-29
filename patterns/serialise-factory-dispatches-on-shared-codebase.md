@@ -1,5 +1,5 @@
 ---
-triggers: factory, factory-dispatch, start_cc_session, parallel-factory, concurrent-factory, worktree-collision, phantom-session, ecodiaos-backend, shared-codebase, dispatch-ordering, get_factory_status, serialise-dispatch
+triggers: factory-dispatch, start_cc_session, parallel-factory, concurrent-factory, worktree-collision, factory-phantom-session, ecodiaos-backend, shared-codebase, dispatch-ordering, get_factory_status, serialise-dispatch
 ---
 
 # Serialise all Factory dispatches on a shared codebase — concurrent sessions collide via worktree

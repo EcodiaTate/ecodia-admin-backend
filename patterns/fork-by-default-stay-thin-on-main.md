@@ -1,5 +1,5 @@
 ---
-triggers: fork, spawn_fork, parallel, branching, decompose, independent, multi-stream, conductor-routing, mid-task-input, fork-vs-main, conductor-thin, work-doer, list_forks, abort_fork, mcp__forks, fork-mode, sub-session, parallel-work, in-flight-task, mid-turn-input, route-vs-execute
+triggers: spawn_fork, fork-by-default, fork-decompose, multi-stream-fork, conductor-routing, mid-task-input, fork-vs-main, conductor-thin, fork-work-doer, list_forks, abort_fork, mcp__forks, fork-mode, fork-sub-session, parallel-fork-work, route-vs-execute
 ---
 
 # Fork by default, stay thin on main

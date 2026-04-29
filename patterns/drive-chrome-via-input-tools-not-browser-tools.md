@@ -1,5 +1,5 @@
 ---
-triggers: chrome, browser, browser.*, browser.navigate, browser.enableCDP, input.click, input.type, input.shortcut, taskbar, click-icon, native-gui-automation, cdp, port-9222, default-profile, tate-chrome, no-spawn, no-kill, just-click-the-icon, gui-first, screenshot, drive-chrome, open-chrome, click-the-icon, taskbar-click, win-1, super-key, ctrl-l, address-bar, native-input, no-puppeteer
+triggers: drive-chrome-via-input, browser.*, browser.navigate, browser.enableCDP, input.click, input.type, input.shortcut, taskbar-click, click-chrome-icon, native-gui-automation, port-9222, default-profile, tate-chrome, no-spawn-chrome, no-kill-chrome, just-click-the-icon, gui-first-chrome, drive-chrome, open-chrome, win-1, super-key, ctrl-l, address-bar, no-puppeteer-default
 ---
 
 # Drive Tate's existing Chrome via input + screenshot tools, NOT via browser.* / CDP / spawn

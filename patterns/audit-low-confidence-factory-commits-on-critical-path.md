@@ -1,5 +1,5 @@
 ---
-triggers: factory-low-confidence, factory-confidence-0.4, critical-path, kv_store-accessor, sessionHandoff, auth-flow, scheduler, mock-vs-production, test-mock-hides-bug, jsonb-vs-text, postgres-type-mismatch, second-attempt-fix, cold-start-recovery, factory-quality-gate, audit-window
+triggers: factory-low-confidence, factory-confidence-0.4, factory-critical-path-audit, kv_store-accessor, sessionHandoff, mock-vs-production, test-mock-hides-bug, jsonb-vs-text, postgres-type-mismatch, second-attempt-fix, cold-start-recovery, factory-quality-gate, factory-audit-window
 ---
 
 # Audit low-confidence Factory commits within 24h on critical-path files

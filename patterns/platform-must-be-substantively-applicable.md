@@ -1,5 +1,5 @@
 ---
-triggers: platform pitch, peak body, peak-body, landcare, cetin, conservation platform, multi-tenant, white-label, generalise, generalised, rebrand, platform applicability, platform fit, platform tier, target org, prospective tenant, tenant deployment, deployment model, federation, multiplier thesis, working name pending
+triggers: platform-pitch, peak-body-pitch, landcare-pitch, cetin-pitch, conservation-platform-pitch, white-label-rebrand, platform-applicability, platform-fit, platform-tier, prospective-tenant, tenant-deployment, multiplier-thesis, working-name-pending, substantive-applicability
 ---
 
 # The platform must be substantively applicable to target orgs, not just rebranded

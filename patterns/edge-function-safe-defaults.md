@@ -1,5 +1,5 @@
 ---
-triggers: edge-function, supabase, default-param, missing-param, write-endpoint, mutation, idempotency, deno-serve
+triggers: edge-function, supabase-edge-function, default-param-write, missing-param-mutate, write-endpoint-default, edge-function-idempotency, deno-serve
 ---
 
 # Edge Function defaults must be safe - never write on a missing param

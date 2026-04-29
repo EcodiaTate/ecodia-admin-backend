@@ -1,5 +1,5 @@
 ---
-triggers: vercel, env-var, vite, build-time, baked-in, hardcoded-url, redirectTo, prod-bug-source-fine, source-looks-correct, dist-bundle, deployed-bundle, stale-env, vite-app-url, NEXT_PUBLIC_, VITE_, redeploy, vercel-rebuild, env-deletion, env-update, password-reset-bug, redirect-url-wrong
+triggers: vercel-env-baked, vite-build-time-inline, build-time-baked-in, hardcoded-url, redirectTo, prod-bug-source-fine, source-looks-correct, dist-bundle-grep, deployed-bundle-grep, stale-env-baked, vite-app-url, NEXT_PUBLIC_, VITE_APP_URL, vercel-rebuild, env-deletion, env-update-redeploy, password-reset-bug, redirect-url-wrong
 ---
 
 # When a prod bug seems impossible to explain from source code, audit Vercel env vars - Vite/Next inline them at build time and they go stale silently

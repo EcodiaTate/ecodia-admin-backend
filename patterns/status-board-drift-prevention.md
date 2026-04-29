@@ -1,4 +1,4 @@
-triggers: status_board, stale-status, drift, status-rot, session-start, cron-wake, audit-status, duplicate-row, completed-row, archived_at, last_touched, source-of-truth-drift
+triggers: status_board-drift, status_board-stale, status-rot, status-audit, status_board-duplicate-row, status_board-completed-row, archived_at, last_touched, source-of-truth-drift, status_board-prevention
 
 # Status board drift prevention — audit ruthlessly, archive aggressively, probe ground truth
 

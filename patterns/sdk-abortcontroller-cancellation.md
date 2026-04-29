@@ -1,4 +1,4 @@
-triggers: sdk, abort, cancellation, watchdog, query.close, hang, tool-timeout, webfetch, undici, mcp-transport, abortcontroller, per-tool-watchdog, turn-watchdog, inactivity-timeout, osSessionService, active-query, process-exit, pm2-respawn
+triggers: sdk-abort, AbortController, sdk-cancellation, query.close, sdk-tool-timeout, undici-fetch, mcp-transport, per-tool-watchdog, turn-watchdog, inactivity-timeout, osSessionService, active-query, sdk-process-exit, pm2-respawn-sdk
 
 # SDK cancellation must use AbortController, not q.close()
 

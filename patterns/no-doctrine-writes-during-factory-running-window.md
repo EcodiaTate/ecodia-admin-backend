@@ -1,5 +1,5 @@
 ---
-triggers: factory, factory-running, worktree-contamination, diff-baseline, taskdiffalignment, contamination, doctrine-write, pattern-write, post-dispatch
+triggers: factory-running, worktree-contamination, diff-baseline, taskDiffAlignment, doctrine-write-during-factory, pattern-write-during-factory, factory-post-dispatch-window
 ---
 
 # No doctrine writes to a worktree while Factory is running on it

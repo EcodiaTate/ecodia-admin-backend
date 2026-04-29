@@ -1,5 +1,5 @@
 ---
-triggers: coexist, excel-sync, forms-migrated-at, dedup, collective-migration, sheet-sync, forms-to-app-migration
+triggers: excel-sync, forms-migrated-at, coexist-collective-migration, coexist-sheet-sync, coexist-forms-to-app-migration, forms_migrated_at
 ---
 
 # Co-Exist Forms → App migration: `forms_migrated_at` is the only switch, and it is explicit per-collective

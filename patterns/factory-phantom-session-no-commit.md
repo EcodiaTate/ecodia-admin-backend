@@ -1,5 +1,5 @@
 ---
-triggers: factory, factory-dispatch, cc-session, approve-deploy, phantom-session, files-changed, commit-sha-null, deploy-status-deployed, ecodiaos-backend, worktree-drift, deliverable-verification
+triggers: factory-dispatch, cc-session, approve_factory_deploy, factory-phantom-session, files-changed-empty, commit-sha-null, deploy-status-deployed, ecodiaos-backend, worktree-drift, deliverable-verification
 ---
 
 # Factory phantom sessions: never trust filesChanged or deploy_status without verifying the file on disk

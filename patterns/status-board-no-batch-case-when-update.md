@@ -1,5 +1,5 @@
 ---
-triggers: status_board, batch-update, case-when, multi-row-update, splatter, status-corruption, directive-sweep, cross-row-leak, sql-update-many-rows, sweep-protocol
+triggers: status_board-batch-update, CASE-WHEN-update, status_board-multi-row-update, status_board-splatter, status-corruption, directive-sweep, status_board-cross-row-leak, sql-update-many-rows, status_board-sweep-protocol
 ---
 
 # Never apply a directive sweep to status_board as a single multi-row CASE-WHEN UPDATE - one statement per row

@@ -1,5 +1,5 @@
 ---
-triggers: fork, spawn_fork, recon, probe, scoping, pre-dispatch-probe, brief-padding, codebase-probe, schema-probe, pre-fork-investigation, fork-vs-main, conductor-thin, pre-package, exhaustive-brief, brief-bloat, dont-probe-on-main, let-the-clone-do-it, you-dont-need-to-probe-it-yourself, third-strike, fork-misuse, conductor-doing-doer-work, recon-on-main
+triggers: spawn_fork, fork-recon, pre-dispatch-probe, brief-padding, codebase-probe-on-main, schema-probe-on-main, pre-fork-investigation, fork-vs-main, exhaustive-brief, brief-bloat, dont-probe-on-main, let-the-clone-do-it, fork-misuse, conductor-doing-doer-work, recon-on-main
 ---
 
 # Forks do their own recon. Do not probe on main before dispatching.

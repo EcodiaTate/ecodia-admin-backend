@@ -1,5 +1,5 @@
 ---
-triggers: standby, idle, free-time, conductor-idle, fork-running-wait, no-immediate-work, planning, day-plan, pipeline-advancement, doctrine-sweep, claude-md-self-audit, going-quiet, narration-not-action, fork-then-wait
+triggers: conductor-standby, conductor-idle, free-time, fork-running-wait, no-immediate-work, day-plan, pipeline-advancement, doctrine-sweep, claude-md-self-audit, conductor-going-quiet, narration-not-action, fork-then-wait
 ---
 
 # Continuous work - the conductor never goes idle
