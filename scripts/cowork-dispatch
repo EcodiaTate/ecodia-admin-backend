@@ -16,7 +16,8 @@
 # right post-action capture.
 #
 # Subcommands:
-#   precheck                       - 6-step pre-dispatch check + screenshot
+#   precheck [--target "<sub>"]    - 6-step pre-dispatch check + screenshot
+#                                    (--target opts in Step 0 focus-collision)
 #   focus                          - bring Claude Desktop to foreground
 #   instruct "<step>"              - type the step into the Claude chat
 #   wait <seconds>                 - sleep
@@ -26,6 +27,14 @@
 #   step-with-passkey-watch "<step>" [--max-watch-seconds=N]
 #                                  - step but with continuous Hello-poll
 #                                    during the wait phase
+#   foreground-check [--target "<sub>"] [--verbose]
+#                                  - Win32 GetForegroundWindow probe.
+#                                    Returns {foreground_app, foreground_title,
+#                                    foreground_pid}. With --target, also returns
+#                                    {collision} based on substring match of
+#                                    target against foreground_title. Read-only;
+#                                    does NOT steal focus. Operationalises Step 0
+#                                    of cowork-no-focus-collision.md.
 #
 # Env overrides:
 #   COWORK_AGENT_URL    (default http://100.114.219.69:7456)
@@ -120,6 +129,53 @@ read_passkey() {
     printf '%s' "$val"
 }
 
+# Probe Corazon's foreground window via Win32 GetForegroundWindow.
+# Returns JSON {title, process, pid} on stdout (whatever PowerShell printed).
+# Returns 1 on probe failure (agent unreachable, PowerShell error, parse error).
+#
+# Read-only: this does NOT steal focus, does NOT capture a screenshot, does
+# NOT issue any input.* calls. It executes a single PowerShell P/Invoke
+# encoded via -EncodedCommand to sidestep escape-character hell.
+probe_foreground_window() {
+    local ps_script
+    ps_script='Add-Type -MemberDefinition @"
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+"@ -Name Win32 -Namespace Pi -PassThru | Out-Null
+$h = [Pi.Win32]::GetForegroundWindow()
+$l = [Pi.Win32]::GetWindowTextLength($h)
+$sb = New-Object System.Text.StringBuilder ($l + 1)
+[Pi.Win32]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null
+$pid_out = 0
+[Pi.Win32]::GetWindowThreadProcessId($h, [ref]$pid_out) | Out-Null
+$proc = ""
+try { $proc = (Get-Process -Id $pid_out -ErrorAction Stop).ProcessName } catch { $proc = "" }
+@{ title = $sb.ToString(); process = $proc; pid = [int]$pid_out } | ConvertTo-Json -Compress'
+    local b64
+    b64="$(printf '%s' "$ps_script" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w 0 2>/dev/null)"
+    if [ -z "$b64" ]; then
+        return 1
+    fi
+    local cmd="powershell -NoProfile -EncodedCommand $b64"
+    local payload
+    payload="$(jq -n --arg c "$cmd" '{command: $c, timeout: 8000}')"
+    local resp
+    resp="$(agent_tool shell.shell "$payload")"
+    local stdout
+    stdout="$(echo "$resp" | jq -r '.result.stdout // .stdout // empty' 2>/dev/null | tr -d '\r')"
+    if [ -z "$stdout" ]; then
+        return 1
+    fi
+    # Validate it parses as JSON
+    if ! echo "$stdout" | jq -e '.title' >/dev/null 2>&1; then
+        return 1
+    fi
+    echo "$stdout"
+    return 0
+}
+
 # Probe Corazon for Windows Hello / LogonUI prompt.
 # Returns 0 (yes, Hello on screen) or 1 (no Hello on screen).
 # Echoes a one-line signature on stdout (process_name|window_title) on detection.
@@ -167,14 +223,45 @@ inject_passkey() {
 }
 
 # ---------------------------------------------------------------------------
-# Subcommand: precheck
+# Subcommand: precheck [--target "<sub>"]
+#
+# Without --target: behaviour identical to pre-30-Apr-2026 (backward-compat).
+# With --target: Step 0 (focus-collision) fires FIRST. If collision detected,
+# precheck exits 1 with {ok:false, blocker:"focus_collision", ...} so calling
+# code can defer per cowork-no-focus-collision.md.
 # ---------------------------------------------------------------------------
 cmd_precheck() {
+    local target=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target=*) target="${1#*=}" ;;
+            --target) shift; target="${1:-}" ;;
+        esac
+        shift || true
+    done
     local out="$TMP_DIR/cowork-precheck-$(ts_compact).json"
     local result='{}'
-    # Step 0 (focus collision) and Step 5 (target reachable) are out-of-scope
-    # for the helper invariant probe; the conductor is responsible for the
-    # pre-dispatch reasoning per cowork-no-focus-collision.md.
+
+    # Step 0: focus-collision (only when --target supplied; backward-compat).
+    if [ -n "$target" ]; then
+        local probe_json fg_app fg_title
+        if probe_json="$(probe_foreground_window)"; then
+            fg_app="$(echo "$probe_json" | jq -r '.process // empty' 2>/dev/null)"
+            fg_title="$(echo "$probe_json" | jq -r '.title // empty' 2>/dev/null)"
+            if echo "$fg_title" | grep -qF -- "$target"; then
+                jq -n \
+                    --arg ts "$(ts_iso)" \
+                    --arg target "$target" \
+                    --arg fg_app "$fg_app" \
+                    --arg fg_title "$fg_title" \
+                    '{ok:false, ts:$ts, blocker:"focus_collision", target:$target, foreground_app:$fg_app, foreground_title:$fg_title, note:"Step 0 fired - target substring matches foreground window. Defer per cowork-no-focus-collision.md."}'
+                exit 1
+            fi
+        fi
+        # If probe failed, fall through to remaining steps; failure is not
+        # itself a collision signal.
+    fi
+
     local hp ok
     hp="$(agent_health 2>&1)"
     if echo "$hp" | grep -q '"ok":true'; then
@@ -184,12 +271,22 @@ cmd_precheck() {
     fi
     local sshot
     sshot="$(capture_screenshot precheck 2>/dev/null || echo '')"
-    result="$(jq -n \
-        --arg ts "$(ts_iso)" \
-        --arg health_ok "$ok" \
-        --arg sshot "$sshot" \
-        --arg note "Step 0 (focus-collision) + Step 5 (target reachable) are conductor responsibilities" \
-        '{ts:$ts, health_ok:($health_ok=="true"), screenshot:$sshot, note:$note}')"
+    if [ -n "$target" ]; then
+        result="$(jq -n \
+            --arg ts "$(ts_iso)" \
+            --arg health_ok "$ok" \
+            --arg sshot "$sshot" \
+            --arg target "$target" \
+            --arg note "Step 0 (focus-collision) checked against target; Step 5 (target reachable) is conductor responsibility" \
+            '{ts:$ts, health_ok:($health_ok=="true"), screenshot:$sshot, target:$target, step0_collision:false, note:$note}')"
+    else
+        result="$(jq -n \
+            --arg ts "$(ts_iso)" \
+            --arg health_ok "$ok" \
+            --arg sshot "$sshot" \
+            --arg note "Step 0 (focus-collision) + Step 5 (target reachable) are conductor responsibilities" \
+            '{ts:$ts, health_ok:($health_ok=="true"), screenshot:$sshot, note:$note}')"
+    fi
     echo "$result"
     echo "$result" > "$out"
     [ "$ok" = "true" ] || exit 1
@@ -359,6 +456,85 @@ cmd_step_with_passkey_watch() {
 }
 
 # ---------------------------------------------------------------------------
+# Subcommand: foreground-check [--target "<sub>"] [--verbose]
+#
+# Read-only Win32 GetForegroundWindow probe. Returns JSON with the active
+# window's process name + title + pid. With --target, also returns
+# {collision:true|false} based on substring match of target against the
+# foreground window title.
+#
+# This is the conductor-side primitive operationalising Step 0 of
+# cowork-no-focus-collision.md: foreground-window EQUALITY, NOT idle-time.
+#
+# Exit codes:
+#   0  probe succeeded (regardless of whether collision was detected;
+#      collision is a status field, not a failure)
+#   1  probe failed (Corazon unreachable, PowerShell error, parse error)
+# ---------------------------------------------------------------------------
+cmd_foreground_check() {
+    local target=""
+    local verbose=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target=*) target="${1#*=}" ;;
+            --target) shift; target="${1:-}" ;;
+            --verbose) verbose=true ;;
+            -*) echo "ERROR: unknown flag: $1" >&2; exit 2 ;;
+            *) ;;
+        esac
+        shift || true
+    done
+
+    local probe_json
+    if ! probe_json="$(probe_foreground_window)"; then
+        jq -n --arg ts "$(ts_iso)" --arg target "$target" \
+            '{ok:false, ts:$ts, error:"probe-failed", target:$target, note:"Corazon unreachable, PowerShell P/Invoke failed, or stdout did not parse as JSON."}'
+        exit 1
+    fi
+
+    local fg_app fg_title fg_pid
+    fg_app="$(echo "$probe_json" | jq -r '.process // empty' 2>/dev/null)"
+    fg_title="$(echo "$probe_json" | jq -r '.title // empty' 2>/dev/null)"
+    fg_pid="$(echo "$probe_json" | jq -r '.pid // empty' 2>/dev/null)"
+
+    if [ -z "$fg_title" ] && [ -z "$fg_app" ]; then
+        jq -n --arg ts "$(ts_iso)" --arg target "$target" --arg raw "$probe_json" \
+            '{ok:false, ts:$ts, error:"parse-empty", target:$target, _raw:$raw}'
+        exit 1
+    fi
+
+    local result
+    if [ -n "$target" ]; then
+        local collision_bool="false"
+        if echo "$fg_title" | grep -qF -- "$target"; then
+            collision_bool="true"
+        fi
+        result="$(jq -n \
+            --arg ts "$(ts_iso)" \
+            --arg target "$target" \
+            --arg fg_app "$fg_app" \
+            --arg fg_title "$fg_title" \
+            --arg fg_pid "$fg_pid" \
+            --argjson collision "$collision_bool" \
+            '{ok:true, ts:$ts, target:$target, foreground_app:$fg_app, foreground_title:$fg_title, foreground_pid:($fg_pid|tonumber? // null), collision:$collision}')"
+    else
+        result="$(jq -n \
+            --arg ts "$(ts_iso)" \
+            --arg fg_app "$fg_app" \
+            --arg fg_title "$fg_title" \
+            --arg fg_pid "$fg_pid" \
+            '{ok:true, ts:$ts, foreground_app:$fg_app, foreground_title:$fg_title, foreground_pid:($fg_pid|tonumber? // null)}')"
+    fi
+
+    if [ "$verbose" = "true" ]; then
+        result="$(echo "$result" | jq --arg raw "$probe_json" '. + {_raw: $raw}')"
+    fi
+
+    echo "$result"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 sub="${1:-}"
@@ -372,12 +548,13 @@ case "$sub" in
     account-chip)                 cmd_account_chip "$@" ;;
     passkey-inject)               cmd_passkey_inject "$@" ;;
     step-with-passkey-watch)      cmd_step_with_passkey_watch "$@" ;;
+    foreground-check)             cmd_foreground_check "$@" ;;
     -h|--help|help|"")
         cat <<EOF
 cowork-dispatch - thin bash wrapper for the Conductor -> Cowork dispatch protocol
 
 usage:
-  cowork-dispatch precheck
+  cowork-dispatch precheck [--target "<sub>"]
   cowork-dispatch focus
   cowork-dispatch instruct "<step>"
   cowork-dispatch wait <seconds>
@@ -385,6 +562,7 @@ usage:
   cowork-dispatch account-chip
   cowork-dispatch passkey-inject
   cowork-dispatch step-with-passkey-watch "<step>" [--max-watch-seconds=N]
+  cowork-dispatch foreground-check [--target "<sub>"] [--verbose]
 
 env:
   COWORK_AGENT_URL    (default http://100.114.219.69:7456)
@@ -395,6 +573,7 @@ env:
 doctrine:
   ~/ecodiaos/patterns/cowork-conductor-dispatch-protocol.md
   ~/ecodiaos/patterns/cowork-passkey-stall-conductor-injects.md
+  ~/ecodiaos/patterns/cowork-no-focus-collision.md  (Step 0 - foreground-check)
 EOF
         ;;
     *)
