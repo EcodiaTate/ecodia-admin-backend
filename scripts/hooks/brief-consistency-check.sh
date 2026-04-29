@@ -71,6 +71,20 @@ if echo "$brief" | grep -qiE '(platform|multi-tenant|multi tenant|multitenant)';
     : # explicit single-tenant - skip Check 2
   elif [ "$platform_total" -le "$api_platform" ]; then
     : # all "platform" mentions are API-call names, not multi-tenancy - skip Check 2
+  # Outreach-prep / drafting-only negation: skip Check 2 when the brief is pure markdown
+  # drafting (outreach prep, pitch deck, marketing copy, intro prep, etc.) AND contains no
+  # code-modification verb that is not already negated. Tuned 2026-04-29 after Chambers
+  # federation prep + Carbon-MRV intro prep forks false-positived. The platform-mention in
+  # those briefs was domain context ("compliance platform", "MRV platform") not a
+  # multi-tenancy spec. Negated forms ("no actual deploy", "no commit", "do not push") are
+  # stripped before the verb check so they do not count as real code-mod verbs.
+  elif echo "$brief" | grep -qiE '(outreach prep|outreach drafting|outreach email template|outreach email\b|intro prep|marketing copy|pitch deck|pitch one-pager|drafts only|drafting only)' && \
+       ! echo "$brief" | sed -E '
+         s/\b(no|not)[[:space:]]+(actual[[:space:]]+)?(commits?|merges?|merging|pushes|pushing|deploys?|deploying|ships?|shipping|releases?|releasing|rollouts?|sending|contact)\b//gi
+         s/\b(do[[:space:]]+not|do[[:space:]]+NOT)[[:space:]]+(commit|merge|push|deploy|ship|release|rollout|modify|send)\b//gi
+         s/\bno[[:space:]]+(PR|code[[:space:]]+changes?)\b//gi
+       ' | grep -qiE '\b(commit|merge|push|deploy|ship|release|rollout)\b'; then
+    : # outreach/drafting-only with no real (non-negated) code-modification verb - skip Check 2
   # Heading guard: an explicit "Architecture invariant" / "Architectural invariant" heading
   # (case-insensitive, dash or space separator allowed, optional bold/colon) followed by any
   # non-trivial content is sufficient. Empty/heading-only sections do not satisfy the guard.
@@ -99,6 +113,13 @@ if echo "$brief" | grep -qiE '(\bvercel\b|frontend|ecodiaos-frontend|roam-fronte
   # flagged as needing deploy-verify.
   elif echo "$brief" | grep -qiE '(recon only|recon[ -]+only|read-only|read only on|diagnostic only|doctrine only|no code change|no code changes|no PR|no merge|no deploy|no ship|do not push|do NOT push|do not modify|do NOT modify|do not commit|do NOT commit|out of scope.+(ship|publish|deploy)|recon \+ recommendation|verification only|inspection only|audit only|read-only on)'; then
     : # explicitly recon/read-only - skip Check 3
+  # Outreach-prep / drafting-only negation: skip Check 3 when the brief is pure markdown
+  # drafting (outreach prep, pitch deck, marketing copy, intro prep, etc.). Tuned 2026-04-29
+  # after Chambers federation prep + Carbon-MRV intro prep forks false-positived because they
+  # mentioned codebase keywords ("Vercel", "frontend", domain names) only as context for who
+  # the outreach target is, not as deploy targets.
+  elif echo "$brief" | grep -qiE '(drafting only|drafts only|outreach prep|outreach drafting|outreach email template|outreach email\b|intro prep|marketing copy|pitch deck|pitch one-pager|no actual contact|no actual sending|no actual deploy|no actual ship)'; then
+    : # explicitly drafting/outreach-only - skip Check 3
   elif ! echo "$brief" | grep -qiE '(deploy[ _-]?verify|vercel[^.]{0,40}ready|poll[^.]{0,40}vercel|poll[^.]{0,40}ready|until[^.]{0,40}ready|wait[^.]{0,40}ready|deployment[^.]{0,40}ready)'; then
     warnings+=("[BRIEF-CHECK WARN] anti-pattern: vercel-linked-no-deploy-verify in ${tool_name} - brief touches a Vercel-linked codebase but lacks deploy-verify content. The fork is not done at git push - it must poll Vercel until READY. See ~/ecodiaos/patterns/deploy-verify-or-the-fork-didnt-finish.md")
   fi
