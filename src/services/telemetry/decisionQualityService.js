@@ -1,12 +1,14 @@
 /**
  * decisionQualityService.js
  *
- * Backing service for `GET /api/telemetry/decision-quality`. Computes the four
- * Phase B observability panels:
- *   1. pattern_usage       - per pattern: surface_count, application_count, usage_rate
- *   2. failure_correlation - per pattern: applied_count, correction_count, correction_rate
- *   3. hook_fp_estimate    - per hook: surfaces, correction-adjacent count, FP estimate
- *   4. doctrine_coverage   - failure clusters with no doctrine surfaced
+ * Backing service for `GET /api/telemetry/decision-quality`. Computes the five
+ * observability panels (Phases B + D):
+ *   1. pattern_usage              - per pattern: surface_count, application_count, usage_rate
+ *   2. failure_correlation        - per pattern: applied_count, correction_count, correction_rate
+ *   3. hook_fp_estimate           - per hook: surfaces, correction-adjacent count, FP estimate
+ *   4. doctrine_coverage          - failure clusters with no doctrine surfaced
+ *   5. classification_distribution - Phase D / Layer 5: usage/surfacing/doctrine
+ *                                    failure routing for corrections.
  *
  * See:
  *   ~/ecodiaos/patterns/decision-quality-self-optimization-architecture.md
@@ -185,6 +187,149 @@ async function doctrineCoverage(client, days) {
 }
 
 /**
+ * Panel 5: classification_distribution (Phase D / Layer 5).
+ *
+ * Three sub-panels + accuracy snapshot:
+ *   - by_classification:   per-class rolling-{days} count + % of total corrections.
+ *                          Includes 'unclassified' bucket so total adds up.
+ *   - by_pattern:          per-pattern, which classifications dominate when
+ *                          this pattern is in the application_event chain.
+ *                          Surfaces the "this pattern's applications keep
+ *                          ending in usage_failure" signal.
+ *   - top_doctrine_gaps:   top-10 doctrine_failure clusters (grouped by the
+ *                          bucketCorrection() top-3-words signature). These
+ *                          are the patterns the corpus is missing.
+ *   - auto_vs_tate_accuracy:
+ *                          rolling-{days} % match between auto-classification
+ *                          and Tate-tagged ground truth. Mirrors the kv_store
+ *                          row maintained by failureClassifier's tickClassifier.
+ *
+ * See ~/ecodiaos/patterns/decision-quality-self-optimization-architecture.md
+ * Layer 5.
+ */
+async function classificationDistribution(client, days) {
+  // Sub-panel 1: by classification (rolling window).
+  const byClass = await client.query(`
+    WITH base AS (
+      SELECT classification
+      FROM outcome_event
+      WHERE ts > NOW() - ($1 || ' days')::interval
+        AND outcome = 'correction'
+    ),
+    total AS (SELECT COUNT(*) AS n FROM base)
+    SELECT COALESCE(classification, 'unclassified') AS classification,
+           COUNT(*) AS count,
+           CASE WHEN (SELECT n FROM total) > 0
+                THEN ROUND( (COUNT(*)::numeric / (SELECT n FROM total)) , 4)
+                ELSE 0
+           END AS pct_of_corrections
+    FROM base
+    GROUP BY COALESCE(classification, 'unclassified')
+    ORDER BY count DESC
+  `, [String(days)])
+
+  // Sub-panel 2: by pattern, which classifications dominate when this pattern
+  // is in the application_event chain. Joins outcome_event (with class) to
+  // application_event by dispatch_event_id, so a pattern may "own" multiple
+  // classifications proportionally.
+  const byPattern = await client.query(`
+    WITH joined AS (
+      SELECT ae.pattern_path,
+             o.classification
+      FROM application_event ae
+      JOIN outcome_event o
+        ON o.dispatch_event_id = ae.dispatch_event_id
+      WHERE o.outcome = 'correction'
+        AND o.classification IS NOT NULL
+        AND o.ts > NOW() - ($1 || ' days')::interval
+    )
+    SELECT pattern_path,
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE classification = 'usage_failure')     AS usage_failure,
+           COUNT(*) FILTER (WHERE classification = 'surfacing_failure') AS surfacing_failure,
+           COUNT(*) FILTER (WHERE classification = 'doctrine_failure')  AS doctrine_failure
+    FROM joined
+    GROUP BY pattern_path
+    ORDER BY total DESC
+    LIMIT 50
+  `, [String(days)])
+
+  // Sub-panel 3: top doctrine_failure clusters. Bucket by top-3 most-frequent
+  // content words in correction_text (stopword-filtered). Mirrors the
+  // bucketCorrection() logic in failureClassifier.js so the dashboard agrees
+  // with the auto-author trigger.
+  const STOPWORDS = new Set([
+    'the','and','for','are','was','has','have','had','but','not','you','this','that',
+    'with','from','they','were','their','what','when','where','which','would','could',
+    'should','about','into','your','our','its','his','her','been','will','just','also',
+    'than','then','them','these','those','here','some','such','only','very','more',
+    'most','much','any','all','one','two','can','may','dont','does','did','isnt','wasnt',
+  ])
+  function bucket(correction) {
+    if (!correction) return null
+    const tokens = String(correction)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(t => t.length >= 4 && !STOPWORDS.has(t))
+    if (tokens.length === 0) return null
+    const counts = new Map()
+    for (const t of tokens) counts.set(t, (counts.get(t) || 0) + 1)
+    const top = Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
+      .map(([w]) => w)
+    if (top.length === 0) return null
+    return top.sort().join('+')
+  }
+  const doctrineGapRows = await client.query(`
+    SELECT id, correction_text
+    FROM outcome_event
+    WHERE outcome = 'correction'
+      AND classification = 'doctrine_failure'
+      AND ts > NOW() - ($1 || ' days')::interval
+  `, [String(days)])
+  const bucketCounts = new Map()
+  for (const row of doctrineGapRows.rows) {
+    const b = bucket(row.correction_text)
+    if (!b) continue
+    if (!bucketCounts.has(b)) bucketCounts.set(b, { count: 0, sample_ids: [] })
+    const e = bucketCounts.get(b)
+    e.count += 1
+    if (e.sample_ids.length < 3) e.sample_ids.push(row.id)
+  }
+  const topDoctrineGaps = Array.from(bucketCounts.entries())
+    .map(([cluster, info]) => ({ cluster, count: info.count, sample_outcome_ids: info.sample_ids }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10)
+
+  // Auto-vs-Tate accuracy snapshot (also stored in kv_store by classifier cron;
+  // surface here for dashboard convenience). Computed on the same rolling
+  // window as the dashboard, not the classifier's fixed 7d.
+  const accuracyRow = await client.query(`
+    SELECT COUNT(*) FILTER (WHERE classification = classification_tate_tagged) AS matches,
+           COUNT(*) AS total
+    FROM outcome_event
+    WHERE ts > NOW() - ($1 || ' days')::interval
+      AND classification IS NOT NULL
+      AND classification_tate_tagged IS NOT NULL
+  `, [String(days)])
+  const accTotal = Number(accuracyRow.rows[0]?.total || 0)
+  const accMatches = Number(accuracyRow.rows[0]?.matches || 0)
+  const auto_vs_tate_accuracy = {
+    sample_size: accTotal,
+    matches: accMatches,
+    match_rate: accTotal > 0 ? Number((accMatches / accTotal).toFixed(4)) : null,
+  }
+
+  return {
+    by_classification: byClass.rows,
+    by_pattern: byPattern.rows,
+    top_doctrine_gaps: topDoctrineGaps,
+    auto_vs_tate_accuracy,
+  }
+}
+
+/**
  * Aggregate summary for the response envelope.
  */
 async function summary(client, days) {
@@ -201,12 +346,13 @@ async function summary(client, days) {
 
 async function computeDecisionQuality({ days = 7 } = {}) {
   return withClient(async (client) => {
-    const [s, p1, p2, p3, p4] = await Promise.all([
+    const [s, p1, p2, p3, p4, p5] = await Promise.all([
       summary(client, days),
       patternUsage(client, days),
       failureCorrelation(client, days),
       hookFpEstimate(client, days),
       doctrineCoverage(client, days),
+      classificationDistribution(client, days),
     ])
     return {
       window_days: days,
@@ -215,6 +361,7 @@ async function computeDecisionQuality({ days = 7 } = {}) {
       failure_correlation: p2,
       hook_fp_estimate: p3,
       doctrine_coverage: p4,
+      classification_distribution: p5,
     }
   })
 }
