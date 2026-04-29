@@ -172,10 +172,24 @@ async function pollOnce() {
       return
     }
 
-    // Fire one task per cycle, reschedule the rest to avoid flooding
-    await fireTask(due[0])
+    // Fire up to MAX_PER_TICK tasks per cycle to prevent queue starvation when
+    // many crons come due simultaneously. The previous behaviour fired only
+    // due[0] and requeued the rest by +60s, which under sustained backlog
+    // (e.g. ecodia-api restart with 8+ overdue crons) meant only one cron
+    // fired per minute and the queue grew faster than it drained. Beyond
+    // MAX_PER_TICK we still requeue to avoid flooding /api/os-session/message
+    // in a single tick. /message returns immediately after enqueueing
+    // (osSession.js line 71), so each fireTask is a fast HTTP roundtrip; the
+    // OS-session message queue serialises actual model turns downstream.
+    const MAX_PER_TICK = 5
+    const toFire = due.slice(0, MAX_PER_TICK)
+    const toRequeue = due.slice(MAX_PER_TICK)
 
-    for (const t of due.slice(1)) {
+    for (const task of toFire) {
+      await fireTask(task)
+    }
+
+    for (const t of toRequeue) {
       if (t.type === 'cron') {
         const requeue = new Date(Date.now() + 60_000)
         await db`UPDATE os_scheduled_tasks SET next_run_at = ${requeue} WHERE id = ${t.id}`
