@@ -1,6 +1,11 @@
 ---
 triggers: macro, macro-record, demonstration-mode, auto-author, runs-replay, input-capture, macro-by-example, agent-self-extending, capacity-expansion, macro-registry, registry.json, eos-laptop-agent macros, programming-by-demonstration, repeated-input-sequence
+priority: high
+canonical: false
+superseded_by: macros-learn-by-doing-vision-first-run-with-question-surface.md
 ---
+
+> **Note (2026-04-29):** the phased Tate-records-everything progression below is superseded by the learn-by-doing-vision-first doctrine in `macros-learn-by-doing-vision-first-run-with-question-surface.md`. The architectural invariants (registry, run log, MCP surface) in this file are still accurate and worth keeping; only the phased progression is dead.
 
 # Macros: hand-coded now, recorded by Tate next, auto-authored from runs after that
 
@@ -27,6 +32,44 @@ When I find myself running the same input.*/screenshot.*/shell.* sequence and an
 - The flow has Tate-authenticated state I cannot easily re-derive
 
 I (or a Factory/fork session) author the handler by hand, register it, smoke-test it, and start using `macro.run`. The fork landing today (mojldsgx) ships the registry, the MCP `macro.*` surface, and the first 2 to 4 hand-coded handlers. This phase is a PR-and-ship loop on the eos-laptop-agent.
+
+### Phase 1 observation rule (NON-NEGOTIABLE, added 29 Apr 2026 17:11 AEST)
+
+**Phase 1 macros require observation of the actual flow before any selector or coordinate is encoded. No author-from-imagination Phase 1 macros allowed.** If the flow has not been observed, the macro is **stub-only + record-required-from-Tate** until Phase 2 ships and Tate can record it.
+
+What "observation" means concretely:
+1. Navigate the actual page in Tate's Corazon Chrome via `input.*` (per `drive-chrome-via-input-tools-not-browser-tools.md`).
+2. Capture full-screen screenshot via `screenshot.screenshot`. Save the PNG to `~/ecodiaos/drafts/<macro-name>-recon-YYYY-MM-DD.png`.
+3. For any selector encoded in the macro: run `browser.evaluate({script: "..."})` against the live page to confirm the selector matches. Paste the evaluate result into the recon doc.
+4. For any coordinate encoded in the macro: identify it visually from the screenshot, document the resolution it was derived at (e.g. "1366x768 Corazon"), and add a screenshot-verify step BETWEEN clicks in the handler.
+5. Write a recon doc at `~/ecodiaos/drafts/<macro-name>-recon-YYYY-MM-DD.md` with: page URL, observed state (logged in / logged out / etc), screenshot path, confirmed selectors, derived coordinates, known failure modes.
+
+What stub-only looks like when observation is impossible (auth state unclear, page requires interaction the fork cannot supervise, etc):
+
+```js
+// macroHandlers/<name>.js
+async function handle({ params, helpers }) {
+  return {
+    success: false,
+    stub: true,
+    error: '<name>: requires Tate-recorded session, see Phase 2 of macros doctrine',
+    recon_doc: '~/ecodiaos/drafts/<name>-recon-YYYY-MM-DD.md',
+    next_step: 'Tate runs Phase 2 record-mode for this flow OR conductor escalates with a fresh recon pass.',
+  }
+}
+module.exports = {
+  name: '<name>',
+  description: 'STUB - awaiting Tate-recorded session. See ~/ecodiaos/drafts/<name>-recon-YYYY-MM-DD.md.',
+  params: { /* what the eventual functional macro will accept */ },
+  handle,
+}
+```
+
+Why this rule exists: 29 Apr 2026 17:11 AEST, Tate flagged that fork_mojpge0a_3c7dcd shipped 6 Phase 1 macros (macincloud-login, github-login, stripe-dashboard, gmail-send, supabase-dashboard, vercel-redeploy) with selectors and coordinates that had never been observed. The fork pattern-matched the existing apple-signin / coexist-admin-signin handlers and invented the rest. Hallucinated macros that fail at runtime cost more trust than recon-only macros that say "I do not know yet, Tate please record." The bar is honesty: a stub with a recon doc and a record-required marker is preferable to a confident-looking handler that will fail on first call. (Origin: Tate hard-correction 17:11 AEST, fork_mojpge0a_3c7dcd self-correction same turn.)
+
+### macincloud-login is permanently stub-only under this rule
+
+Apple 2FA flow + Xcode Settings UI + remote macOS via SSH+osascript is THREE non-trivial layers stacked. AppleScript-driven Xcode UI is especially fragile (UI tree changes per Xcode point-release, Settings layout drifts, Accounts pane sub-layout drifts). The macincloud-login macro is permanently stub-only until Tate records it via Phase 2 with his hands at the SY094 VNC console. No Phase 1 author-from-imagination version of this macro will ship. Cross-reference: `~/ecodiaos/drafts/macincloud-login-recon-2026-04-29.md`.
 
 ## Phase 2 (next, after Phase 1 stabilises): record-mode by Tate
 
