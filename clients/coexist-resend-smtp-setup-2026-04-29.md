@@ -1,5 +1,7 @@
 ---
 triggers: coexist-resend, custom-smtp-supabase-auth, rate-limit-email-sent, resend-pro, dkim-resend, coexistaus.org-dns, squarespace-dns, _spf.resend.com, charliebennett@coexistaus.org, supabase-auth-config, mailer_autoconfirm, tjutlbzekfouwsiaplbr-auth, resend.dkim-1024-bit-replace
+priority: high
+canonical: false
 ---
 
 # Co-Exist Supabase Auth Custom SMTP Setup (Resend) - PARTIAL / BLOCKED 2026-04-29
@@ -169,9 +171,9 @@ Prior fork's recon was wrong. The Resend API key was on disk all along - in `D:\
 ### Where the key was
 
 - File: `D:\.code\coexist\.env.production`
-- Key: `re_ebsr64vP_C5C4Zxa8RVkrUhmnqeNd2EmB` (send-only restricted)
+- Key: `<REDACTED - leaked then revoked 2026-04-29 after GitGuardian alert; rotated key in kv_store.creds.resend.send_only>` (send-only restricted)
 - From: `hello@coexistaus.org`
-- Stored in `kv_store.creds.resend` for future-proofing.
+- Stored in `kv_store.creds.resend.send_only` (current). Old leaked value archived at `kv_store.creds.resend.send_only.revoked_2026-04-29`. Pointer `kv_store.creds.resend` marked status=revoked-and-rotated.
 
 ### What was applied
 
@@ -181,7 +183,7 @@ Prior fork's recon was wrong. The Resend API key was on disk all along - in `D:\
   "smtp_host": "smtp.resend.com",
   "smtp_port": "587",
   "smtp_user": "resend",
-  "smtp_pass": "re_ebsr64vP_C5C4Zxa8RVkrUhmnqeNd2EmB",
+  "smtp_pass": "<REDACTED - rotated 2026-04-29; pull from kv_store.creds.resend.send_only.api_key>",
   "smtp_admin_email": "hello@coexistaus.org",
   "smtp_sender_name": "Co-Exist",
   "rate_limit_email_sent": 100

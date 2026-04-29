@@ -18,7 +18,7 @@ This file is the **canonical reference** for the EcodiaOS Decision Quality Self-
 | **B (this fork)** | **4 + drift-check seed** | **SHIPPING** | **dispatch_event/surface_event/application_event/outcome_event tables, 4 hooks emit JSONL, batch consumer, outcome inference, /api/telemetry/decision-quality endpoint, decision-quality-drift-check cron** |
 | A | 2 | TBD | priority+canonical frontmatter, hook respects ranking |
 | C | 3 | TBD | applied-pattern-tag forcing function |
-| D | 5 | TBD | failure-mode classifier (usage / surfacing / doctrine) |
+| D | 5 | SHIPPED (30 Apr 2026, fork_mok4serp_202ca8 redispatch) | failure-mode classifier (usage / surfacing / doctrine), classification_distribution dashboard panel, Tate-tagged ground-truth admin route, doctrine-gap auto-author trigger, decision-quality-classifier cron (1h) |
 | E | 6 | TBD | per-primitive perf telemetry, periodic auto-tune |
 | F | 7 | TBD | Neo4j Episode/Decision semantic resurfacing on action context |
 
@@ -83,7 +83,7 @@ The 7-layer architecture closes all three loops mechanically. The system observe
 - Any 24h period with correction_rate > 30% -> flagged as `regression_signal` (status_board P3).
 - Any hook with surface_count = 0 over 24h despite having matched briefs -> flagged as `silent_hook_candidate` (status_board P3, indicates hook regression).
 
-### Layer 5 - Outcome correlation (TBD - Phase D)
+### Layer 5 - Outcome correlation (SHIPPED - Phase D, 30 Apr 2026)
 
 **What:** every `outcome_event` is classified into one of three failure modes:
 
