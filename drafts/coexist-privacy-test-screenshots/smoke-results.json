@@ -1,0 +1,24 @@
+{
+  "fork": "fork_mojw7558_b2e90a",
+  "target_user_id": "ab8face8-d929-47d8-bb7a-b0a22c509c97",
+  "api": {
+    "participant": {
+      "pass": true,
+      "viewer_can_see_sensitive": false,
+      "sensitive_field_count": 0
+    },
+    "admin": {
+      "pass": true,
+      "viewer_can_see_sensitive": true,
+      "sensitive_field_count": 13
+    }
+  },
+  "ui": {
+    "participant": {
+      "error": "Waiting for selector `input[type=\"email\"]` failed"
+    },
+    "admin": {
+      "error": "Waiting for selector `input[type=\"email\"]` failed"
+    }
+  }
+}
