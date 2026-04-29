@@ -486,40 +486,64 @@ if [[ "$PLATFORM" == "ios" ]]; then
         --apiIssuer '$ASC_ISSUER'
     " || die "altool --upload-app failed. Check ASC for processing errors. If 'Authentication failed (-22938)' the API key was rotated; re-stage."
   else
-    # Resolve the .ipa path on the Mac, then dispatch the macro through the
-    # ecodiaos-backend laptop-agent gateway. The gateway routes by IOS_MACRO_HOST.
+    # Resolve .ipa AND .xcarchive paths on the Mac.
     IPA_REMOTE_PATH="$(ssh_mac "cd ~/projects/$SLUG/ios/App && ls build/export/*.ipa | head -1" || true)"
     if [[ -z "$IPA_REMOTE_PATH" ]]; then
       die "No .ipa produced in build/export/ on $IOS_MACRO_HOST. Check the exportArchive step output."
     fi
+    ARCHIVE_REMOTE_PATH="$(ssh_mac "echo \$HOME/projects/$SLUG/ios/App/build/$SLUG.xcarchive")"
     echo "ipa_remote: $IPA_REMOTE_PATH"
+    echo "archive_remote: $ARCHIVE_REMOTE_PATH"
 
-    # The dispatch happens via the ecodiaos-backend macro proxy at
-    # /api/macro/run, which routes to the appropriate laptop-agent host.
-    # Body: {"host":"sy094","name":"xcode-organizer-upload","params":{"ipa_path":"..."}}.
-    # Fallback macro name: 'transporter-upload' (same params shape).
+    # Macro dispatch is direct: stage the AppleScript driver on the Mac, then
+    # invoke osascript over SSH. We do NOT proxy through the laptop-agent here;
+    # release.sh runs on the same host that already has SSH to the Mac, so the
+    # indirection adds nothing and removes a moving part. The laptop-agent
+    # macro registration (xcode-organizer-upload / transporter-upload, fork
+    # mojlth0k_2b4be6) remains the canonical way for OS-level invocations
+    # (mcp__macros__macroSuite_run from EcodiaOS); release.sh inlines the
+    # same AppleScript driver, kept in sync at scripts/macros/.
+    #
+    # Macro selection:
+    #   xcode-organizer-upload  drives Xcode > Organizer > Distribute App
+    #                           (consumes .xcarchive)
+    #   transporter-upload      drives Apple Transporter.app (consumes .ipa)
+    # Default: xcode-organizer-upload.
     MACRO_NAME="${IOS_MACRO_NAME:-xcode-organizer-upload}"
     case "$MACRO_NAME" in
-      xcode-organizer-upload|transporter-upload) ;;
-      *) die "IOS_MACRO_NAME must be 'xcode-organizer-upload' or 'transporter-upload'. Got: '$MACRO_NAME'." ;;
+      xcode-organizer-upload)
+        APPLESCRIPT_LOCAL="$(dirname "$0")/macros/xcode-organizer-upload.applescript"
+        APPLESCRIPT_REMOTE="/tmp/eos-xcode-organizer-upload.applescript"
+        TARGET_PATH="$ARCHIVE_REMOTE_PATH"
+        ;;
+      transporter-upload)
+        APPLESCRIPT_LOCAL="$(dirname "$0")/macros/transporter-upload.applescript"
+        APPLESCRIPT_REMOTE="/tmp/eos-transporter-upload.applescript"
+        TARGET_PATH="$IPA_REMOTE_PATH"
+        ;;
+      *)
+        die "IOS_MACRO_NAME must be 'xcode-organizer-upload' or 'transporter-upload'. Got: '$MACRO_NAME'."
+        ;;
     esac
 
-    if ! command -v curl >/dev/null 2>&1; then
-      die "curl not on PATH. Required to dispatch the iOS upload macro."
+    if [[ ! -f "$APPLESCRIPT_LOCAL" ]]; then
+      die "AppleScript driver not found at $APPLESCRIPT_LOCAL. Should ship with release.sh."
     fi
-    EOS_API_BASE="${EOS_API_BASE:-http://localhost:3001}"
-    MACRO_PAYLOAD=$(python3 - <<PYEOF
-import json
-print(json.dumps({
-    "host": "$IOS_MACRO_HOST",
-    "name": "$MACRO_NAME",
-    "params": {"ipa_path": "$IPA_REMOTE_PATH"}
-}))
-PYEOF
-)
-    MACRO_RESP="$(curl -sS -X POST "$EOS_API_BASE/api/macro/run" -H "Content-Type: application/json" -d "$MACRO_PAYLOAD" || true)"
-    if [[ -z "$MACRO_RESP" ]] || ! printf '%s' "$MACRO_RESP" | grep -q '"ok":true'; then
-      err "macro $MACRO_NAME failed or returned non-ok: $MACRO_RESP"
+
+    step "iOS [macro: $MACRO_NAME]: stage AppleScript driver -> $APPLESCRIPT_REMOTE on $MAC_HOST"
+    sshpass -p "$MAC_PASS" scp -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+      "$APPLESCRIPT_LOCAL" "$MAC_USER@$MAC_HOST:$APPLESCRIPT_REMOTE" \
+      || die "scp of AppleScript driver to $MAC_HOST failed."
+
+    step "iOS [macro: $MACRO_NAME]: invoke osascript driving $TARGET_PATH (long-running, up to ~15 min)"
+    # AppleScript prints "OK" on success or "ERR <reason>" on failure to stdout.
+    MACRO_OUT="$(ssh_mac "osascript $APPLESCRIPT_REMOTE '$TARGET_PATH'" 2>&1 || true)"
+    echo "macro_out: $MACRO_OUT"
+
+    if printf '%s' "$MACRO_OUT" | grep -qE '^OK\b'; then
+      echo "macro upload OK ($MACRO_NAME)."
+    else
+      err "macro $MACRO_NAME did not return OK. Output above."
       if [[ "${IOS_UPLOAD_FALLBACK_TO_ALTOOL:-0}" == "1" ]]; then
         err "IOS_UPLOAD_FALLBACK_TO_ALTOOL=1 set; falling through to altool path."
         # Re-resolve creds since they were not loaded on the macro path.
@@ -545,10 +569,8 @@ PYEOF
             --apiIssuer '$ASC_ISSUER'
         " || die "Both macro AND altool fallback failed. See ASC and laptop-agent logs."
       else
-        die "macro $MACRO_NAME failed. To fall through to altool automatically, set IOS_UPLOAD_FALLBACK_TO_ALTOOL=1. To author the macro handler, see ~/ecodiaos/drafts/macro-architecture-roadmap-2026-04-29.md."
+        die "macro $MACRO_NAME failed. To fall through to altool automatically, set IOS_UPLOAD_FALLBACK_TO_ALTOOL=1. AppleScript stdout: $MACRO_OUT"
       fi
-    else
-      echo "macro_resp: $MACRO_RESP"
     fi
   fi
 
