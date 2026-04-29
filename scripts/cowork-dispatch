@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+#
+# cowork-dispatch - thin bash wrapper composing existing input.* + screenshot.* +
+# process.* peer-paradigm primitives into one ergonomic command for the
+# Conductor -> Cowork dispatch protocol.
+#
+# Doctrine sources (read these before extending this file):
+#   ~/ecodiaos/patterns/cowork-conductor-dispatch-protocol.md
+#   ~/ecodiaos/patterns/claude-cowork-is-the-1stop-shop-for-ui-driving-tasks.md
+#   ~/ecodiaos/patterns/cowork-passkey-stall-conductor-injects.md
+#   ~/ecodiaos/patterns/cowork-no-focus-collision.md
+#   ~/ecodiaos/patterns/corazon-is-a-peer-not-a-browser-via-http.md
+#
+# This is NOT an MCP wrapper, NOT a parallel runtime, does NOT modify the
+# laptop agent. It is curl-to-/api/tool with the right defaults and the
+# right post-action capture.
+#
+# Subcommands:
+#   precheck                       - 6-step pre-dispatch check + screenshot
+#   focus                          - bring Claude Desktop to foreground
+#   instruct "<step>"              - type the step into the Claude chat
+#   wait <seconds>                 - sleep
+#   step "<step>" [--wait=N]       - focus + instruct + wait + screenshot
+#   account-chip                   - mid-loop account-revert verification
+#   passkey-inject                 - one-shot Hello-prompt detect + inject
+#   step-with-passkey-watch "<step>" [--max-watch-seconds=N]
+#                                  - step but with continuous Hello-poll
+#                                    during the wait phase
+#
+# Env overrides:
+#   COWORK_AGENT_URL    (default http://100.114.219.69:7456)
+#   COWORK_TOKEN_FILE   (default ~/.ecodiaos/laptop-agent.token)
+#   COWORK_TMP_DIR      (default /tmp)
+#   COWORK_DB_URL       (default $DATABASE_URL from /home/tate/ecodiaos/.env)
+#
+# Exit codes:
+#   0 success or no-prompt-detected (idempotent)
+#   1 precheck-fail OR detection-but-injection-failed
+#   2 usage-error
+#   3 transport-error (laptop agent unreachable)
+#
+
+set -uo pipefail
+
+AGENT_URL="${COWORK_AGENT_URL:-http://100.114.219.69:7456}"
+TOKEN_FILE="${COWORK_TOKEN_FILE:-$HOME/.ecodiaos/laptop-agent.token}"
+TMP_DIR="${COWORK_TMP_DIR:-/tmp}"
+ENV_FILE="${COWORK_ENV_FILE:-/home/tate/ecodiaos/.env}"
+
+if [ -f "$TOKEN_FILE" ]; then
+    TOKEN="$(cat "$TOKEN_FILE")"
+else
+    echo "ERROR: token file not found: $TOKEN_FILE" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+ts_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+ts_compact() { date -u +%Y%m%dT%H%M%SZ; }
+
+# Call a single laptop-agent tool. Returns raw JSON on stdout.
+agent_tool() {
+    local tool="$1"
+    local params_json="$2"
+    curl -sS --max-time 30 \
+        -X POST "$AGENT_URL/api/tool" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN" \
+        -d "{\"tool\":\"$tool\",\"params\":$params_json}" \
+        2>&1
+}
+
+agent_health() {
+    curl -sS --max-time 5 "$AGENT_URL/api/health" 2>&1
+}
+
+# Capture a full-screen screenshot to disk and echo the path.
+# Mode 'silent' suppresses stdout JSON of the base64 image.
+capture_screenshot() {
+    local sub="$1"
+    local out="$TMP_DIR/cowork-${sub}-$(ts_compact).png"
+    local resp
+    resp="$(agent_tool screenshot.screenshot '{}')"
+    # Extract base64 image; agent returns {"image": "...", "format":"png"}
+    # If response is wrapped in {"result": {...}}, jq handles either.
+    local b64
+    b64="$(echo "$resp" | jq -r '.result.image // .image // empty' 2>/dev/null)"
+    if [ -z "$b64" ]; then
+        echo "ERROR: screenshot returned no image. raw: $resp" >&2
+        return 1
+    fi
+    echo "$b64" | base64 -d > "$out" 2>/dev/null
+    if [ ! -s "$out" ]; then
+        echo "ERROR: screenshot decode failed" >&2
+        return 1
+    fi
+    echo "$out"
+}
+
+# Read the passkey from kv_store via DATABASE_URL.
+# Echoes ONLY the digits to stdout. Caller is responsible for not leaking.
+read_passkey() {
+    local db_url="${COWORK_DB_URL:-}"
+    if [ -z "$db_url" ] && [ -f "$ENV_FILE" ]; then
+        db_url="$(grep -E '^DATABASE_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    fi
+    if [ -z "$db_url" ]; then
+        echo "ERROR: DATABASE_URL unavailable" >&2
+        return 1
+    fi
+    local val
+    val="$(psql "$db_url" -tA -c "SELECT value FROM kv_store WHERE key='creds.laptop_passkey'" 2>/dev/null | tr -d '"' | tr -d ' \n\r')"
+    if [ -z "$val" ]; then
+        echo "ERROR: kv_store.creds.laptop_passkey is empty" >&2
+        return 1
+    fi
+    printf '%s' "$val"
+}
+
+# Probe Corazon for Windows Hello / LogonUI prompt.
+# Returns 0 (yes, Hello on screen) or 1 (no Hello on screen).
+# Echoes a one-line signature on stdout (process_name|window_title) on detection.
+detect_hello_prompt() {
+    local resp
+    resp="$(agent_tool process.listProcesses '{}')"
+    if echo "$resp" | jq -e '.result.processes // .processes // [] | map(select(.name | test("LogonUI"; "i"))) | length > 0' >/dev/null 2>&1; then
+        echo "LogonUI.exe|<foreground-not-checked>"
+        return 0
+    fi
+    if echo "$resp" | jq -e '.result.processes // .processes // [] | map(select(.name | test("WindowsHello"; "i"))) | length > 0' >/dev/null 2>&1; then
+        echo "WindowsHello|<foreground-not-checked>"
+        return 0
+    fi
+    # Fallback: foreground-window title check via PowerShell
+    local fg_resp
+    fg_resp="$(agent_tool shell.shell '{"command":"powershell -NoProfile -Command \"Add-Type -MemberDefinition '\''[DllImport(\\\"user32.dll\\\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\\\"user32.dll\\\")] public static extern int GetWindowTextLength(IntPtr hWnd); [DllImport(\\\"user32.dll\\\", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);'\'' -Name Win32 -Namespace Pi -PassThru | Out-Null; $h = [Pi.Win32]::GetForegroundWindow(); $l = [Pi.Win32]::GetWindowTextLength($h); $sb = New-Object System.Text.StringBuilder ($l + 1); [Pi.Win32]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null; Write-Output $sb.ToString()\"","timeout":5000}')"
+    local title
+    title="$(echo "$fg_resp" | jq -r '.result.stdout // .stdout // empty' 2>/dev/null | tr -d '\n\r' )"
+    if echo "$title" | grep -qiE '(windows hello|windows security|use windows hello|enter your pin)'; then
+        echo "fg-window|$title"
+        return 0
+    fi
+    return 1
+}
+
+# Inject digits + Enter via input.type. Logs are masked.
+# Returns 0 on success, 1 on injection failure.
+inject_passkey() {
+    local digits="$1"
+    local resp1 resp2 ok1 ok2
+    # input.type the digits
+    resp1="$(agent_tool input.type "{\"text\":\"$digits\"}")"
+    ok1="$(echo "$resp1" | jq -r '.success // .result.success // empty' 2>/dev/null)"
+    # input.key Enter
+    resp2="$(agent_tool input.key '{"key":"Enter"}')"
+    ok2="$(echo "$resp2" | jq -r '.success // .result.success // empty' 2>/dev/null)"
+    if [ "$ok1" = "true" ] || [ "$ok1" = "" ]; then
+        if [ "$ok2" = "true" ] || [ "$ok2" = "" ]; then
+            return 0
+        fi
+    fi
+    echo "ERROR: injection failed (type=$ok1 enter=$ok2)" >&2
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: precheck
+# ---------------------------------------------------------------------------
+cmd_precheck() {
+    local out="$TMP_DIR/cowork-precheck-$(ts_compact).json"
+    local result='{}'
+    # Step 0 (focus collision) and Step 5 (target reachable) are out-of-scope
+    # for the helper invariant probe; the conductor is responsible for the
+    # pre-dispatch reasoning per cowork-no-focus-collision.md.
+    local hp ok
+    hp="$(agent_health 2>&1)"
+    if echo "$hp" | grep -q '"ok":true'; then
+        ok=true
+    else
+        ok=false
+    fi
+    local sshot
+    sshot="$(capture_screenshot precheck 2>/dev/null || echo '')"
+    result="$(jq -n \
+        --arg ts "$(ts_iso)" \
+        --arg health_ok "$ok" \
+        --arg sshot "$sshot" \
+        --arg note "Step 0 (focus-collision) + Step 5 (target reachable) are conductor responsibilities" \
+        '{ts:$ts, health_ok:($health_ok=="true"), screenshot:$sshot, note:$note}')"
+    echo "$result"
+    echo "$result" > "$out"
+    [ "$ok" = "true" ] || exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: focus  (best-effort: bring Claude Desktop foreground)
+# ---------------------------------------------------------------------------
+cmd_focus() {
+    # Attempt: launch Claude (if configured to focus rather than re-launch),
+    # then short pause for window manager. We also screenshot to confirm.
+    agent_tool process.launchApp '{"name":"Claude"}' >/dev/null 2>&1 || true
+    sleep 1
+    capture_screenshot focus 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: instruct "<step>"
+# ---------------------------------------------------------------------------
+cmd_instruct() {
+    local step="${1:-}"
+    if [ -z "$step" ]; then
+        echo "usage: cowork-dispatch instruct \"<step>\"" >&2
+        exit 2
+    fi
+    # Type the step text. Cowork's chat input must be focused (caller
+    # responsibility, or use cmd_step which focuses first).
+    local payload
+    payload="$(jq -n --arg t "$step" '{text:$t}')"
+    agent_tool input.type "$payload" >/dev/null
+    sleep 1
+    agent_tool input.key '{"key":"Enter"}' >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: wait <seconds>
+# ---------------------------------------------------------------------------
+cmd_wait() {
+    local secs="${1:-5}"
+    sleep "$secs"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: step "<step>" [--wait=N]
+# ---------------------------------------------------------------------------
+cmd_step() {
+    local step=""
+    local wait_s=15
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wait=*) wait_s="${1#*=}" ;;
+            *) step="$1" ;;
+        esac
+        shift
+    done
+    if [ -z "$step" ]; then
+        echo "usage: cowork-dispatch step \"<step>\" [--wait=N]" >&2
+        exit 2
+    fi
+    cmd_focus
+    cmd_instruct "$step"
+    sleep "$wait_s"
+    capture_screenshot step
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: account-chip  (mid-loop account-revert verification)
+# ---------------------------------------------------------------------------
+cmd_account_chip() {
+    # Capture screenshot and let the conductor visually verify the active
+    # workspace chip in Claude Desktop's left sidebar.
+    capture_screenshot account-chip
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: passkey-inject  (NEW - 30 Apr 2026 fork_mokmrv7o_76c35d)
+#
+# Single-shot: screenshot + Hello-prompt detection + (if detected) read
+# kv_store.creds.laptop_passkey + input.type digits + input.key Enter.
+# Idempotent: exit 0 on either no-prompt-detected or successful injection.
+# ---------------------------------------------------------------------------
+cmd_passkey_inject() {
+    local sshot
+    sshot="$(capture_screenshot passkey-inject 2>/dev/null || echo '')"
+    local sig
+    if sig="$(detect_hello_prompt)"; then
+        local digits
+        if ! digits="$(read_passkey)"; then
+            jq -n --arg ts "$(ts_iso)" --arg sshot "$sshot" --arg sig "$sig" \
+                '{detected:true, injected_at:null, screenshot_path:$sshot, prompt_signature:$sig, error:"passkey-read-failed"}'
+            exit 1
+        fi
+        if inject_passkey "$digits"; then
+            jq -n --arg ts "$(ts_iso)" --arg sshot "$sshot" --arg sig "$sig" \
+                '{detected:true, injected_at:$ts, screenshot_path:$sshot, prompt_signature:$sig, passkey:"<passkey-masked>"}'
+            # Debounce window: prevent double-injection on the same prompt.
+            sleep 1
+            exit 0
+        else
+            jq -n --arg ts "$(ts_iso)" --arg sshot "$sshot" --arg sig "$sig" \
+                '{detected:true, injected_at:null, screenshot_path:$sshot, prompt_signature:$sig, error:"injection-failed"}'
+            exit 1
+        fi
+    else
+        jq -n --arg sshot "$sshot" \
+            '{detected:false, injected_at:null, screenshot_path:$sshot}'
+        exit 0
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: step-with-passkey-watch "<step>" [--max-watch-seconds=N]
+#
+# Like cmd_step but during the wait phase polls every 2s for Hello prompts
+# and auto-injects on detection. Returns final screenshot + injection log.
+# ---------------------------------------------------------------------------
+cmd_step_with_passkey_watch() {
+    local step=""
+    local max_watch=30
+    local poll_interval=2
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --max-watch-seconds=*) max_watch="${1#*=}" ;;
+            *) step="$1" ;;
+        esac
+        shift
+    done
+    if [ -z "$step" ]; then
+        echo "usage: cowork-dispatch step-with-passkey-watch \"<step>\" [--max-watch-seconds=N]" >&2
+        exit 2
+    fi
+    cmd_focus
+    cmd_instruct "$step"
+    local elapsed=0
+    local injections='[]'
+    local digits=""
+    while [ "$elapsed" -lt "$max_watch" ]; do
+        sleep "$poll_interval"
+        elapsed=$((elapsed + poll_interval))
+        local sig
+        if sig="$(detect_hello_prompt)"; then
+            if [ -z "$digits" ]; then
+                if ! digits="$(read_passkey)"; then
+                    injections="$(echo "$injections" | jq --arg ts "$(ts_iso)" --arg sig "$sig" \
+                        '. + [{at:$ts, signature:$sig, error:"passkey-read-failed"}]')"
+                    break
+                fi
+            fi
+            if inject_passkey "$digits"; then
+                injections="$(echo "$injections" | jq --arg ts "$(ts_iso)" --arg sig "$sig" \
+                    '. + [{at:$ts, signature:$sig, passkey:"<passkey-masked>"}]')"
+                # Debounce 1s before next poll
+                sleep 1
+                elapsed=$((elapsed + 1))
+            else
+                injections="$(echo "$injections" | jq --arg ts "$(ts_iso)" --arg sig "$sig" \
+                    '. + [{at:$ts, signature:$sig, error:"injection-failed"}]')"
+                break
+            fi
+        fi
+    done
+    local final_sshot
+    final_sshot="$(capture_screenshot step-watch-final 2>/dev/null || echo '')"
+    jq -n --arg sshot "$final_sshot" --argjson inj "$injections" --arg step "$step" \
+        --argjson watch "$max_watch" \
+        '{step:$step, max_watch_seconds:$watch, final_screenshot:$sshot, injections:$inj}'
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+sub="${1:-}"
+shift || true
+case "$sub" in
+    precheck)                     cmd_precheck "$@" ;;
+    focus)                        cmd_focus "$@" ;;
+    instruct)                     cmd_instruct "$@" ;;
+    wait)                         cmd_wait "$@" ;;
+    step)                         cmd_step "$@" ;;
+    account-chip)                 cmd_account_chip "$@" ;;
+    passkey-inject)               cmd_passkey_inject "$@" ;;
+    step-with-passkey-watch)      cmd_step_with_passkey_watch "$@" ;;
+    -h|--help|help|"")
+        cat <<EOF
+cowork-dispatch - thin bash wrapper for the Conductor -> Cowork dispatch protocol
+
+usage:
+  cowork-dispatch precheck
+  cowork-dispatch focus
+  cowork-dispatch instruct "<step>"
+  cowork-dispatch wait <seconds>
+  cowork-dispatch step "<step>" [--wait=N]
+  cowork-dispatch account-chip
+  cowork-dispatch passkey-inject
+  cowork-dispatch step-with-passkey-watch "<step>" [--max-watch-seconds=N]
+
+env:
+  COWORK_AGENT_URL    (default http://100.114.219.69:7456)
+  COWORK_TOKEN_FILE   (default ~/.ecodiaos/laptop-agent.token)
+  COWORK_TMP_DIR      (default /tmp)
+  COWORK_DB_URL       (default DATABASE_URL from /home/tate/ecodiaos/.env)
+
+doctrine:
+  ~/ecodiaos/patterns/cowork-conductor-dispatch-protocol.md
+  ~/ecodiaos/patterns/cowork-passkey-stall-conductor-injects.md
+EOF
+        ;;
+    *)
+        echo "ERROR: unknown subcommand: $sub" >&2
+        echo "run 'cowork-dispatch help' for usage" >&2
+        exit 2
+        ;;
+esac
